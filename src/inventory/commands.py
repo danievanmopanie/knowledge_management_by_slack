@@ -7,6 +7,7 @@ families can extend it without growing one monolithic file indefinitely.
 from __future__ import annotations
 
 from src.inventory.audit_commands import AssetAuditCommandService
+from src.inventory.audit_finding_commands import AssetAuditFindingCommandService
 from src.inventory.base_commands import InventoryCommandService as BaseInventoryCommandService
 from src.inventory.profile_commands import AssetProfileCommandService
 from src.inventory.repository import InventoryRepository
@@ -19,10 +20,15 @@ class InventoryCommandService(BaseInventoryCommandService):
         super().__init__(repository)
         self.profile_commands = AssetProfileCommandService(self.repository)
         self.audit_commands = AssetAuditCommandService(self.repository)
+        self.audit_finding_commands = AssetAuditFindingCommandService(self.repository)
 
     def execute(self, message: str, *, actor: str) -> str:
         text = " ".join((message or "").strip().split())
-        for service in (self.profile_commands, self.audit_commands):
+        for service in (
+            self.profile_commands,
+            self.audit_commands,
+            self.audit_finding_commands,
+        ):
             result = service.execute_if_match(text, actor=actor)
             if result is not None:
                 return result
