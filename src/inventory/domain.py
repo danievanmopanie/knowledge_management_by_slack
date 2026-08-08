@@ -25,6 +25,11 @@ class AssetLifecycle(str, Enum):
     DISPOSED = "disposed"
 
 
+class AllocationType(str, Enum):
+    DEDICATED = "dedicated"
+    LOAN = "loan"
+
+
 @dataclass(frozen=True)
 class CatalogItem:
     sku: str
@@ -67,12 +72,28 @@ class SerializedAsset:
     location_id: str = ""
     assigned_to: str = ""
     customer_ref: str = ""
+    allocation_type: AllocationType | None = None
+    return_due_at: datetime | None = None
     purchase_order_id: str = ""
     received_at: datetime | None = None
     warranty_end: datetime | None = None
     retired_at: datetime | None = None
     disposed_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AssetMovement:
+    movement_id: str
+    asset_id: str
+    from_status: AssetLifecycle
+    to_status: AssetLifecycle
+    actor: str
+    at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    from_location: str = ""
+    to_location: str = ""
+    customer_ref: str = ""
+    note: str = ""
 
 
 @dataclass(frozen=True)

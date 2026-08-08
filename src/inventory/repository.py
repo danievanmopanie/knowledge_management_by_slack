@@ -5,11 +5,18 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
 from src.core.config import settings
-from src.inventory.domain import SerializedAsset, StockTransaction
+from src.inventory.domain import (
+    AllocationType,
+    AssetLifecycle,
+    AssetMovement,
+    SerializedAsset,
+    StockTransaction,
+)
 from src.inventory.procurement import Delivery, PurchaseOrder, ReconciliationDiscrepancy
 
 
@@ -102,7 +109,22 @@ class InventoryRepository:
                     warranty_end TEXT,
                     retired_at TEXT,
                     disposed_at TEXT,
-                    metadata_json TEXT NOT NULL
+                    metadata_json TEXT NOT NULL,
+                    allocation_type TEXT,
+                    return_due_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS inventory_asset_movements (
+                    movement_id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    from_status TEXT NOT NULL,
+                    to_status TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    at TEXT NOT NULL,
+                    from_location TEXT NOT NULL,
+                    to_location TEXT NOT NULL,
+                    customer_ref TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    FOREIGN KEY (asset_id) REFERENCES inventory_assets(asset_id)
                 );
                 CREATE TABLE IF NOT EXISTS inventory_exceptions (
                     exception_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +142,14 @@ class InventoryRepository:
                 );
                 """
             )
+            self._ensure_column(conn, "inventory_assets", "allocation_type", "TEXT")
+            self._ensure_column(conn, "inventory_assets", "return_due_at", "TEXT")
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -246,8 +276,21 @@ class InventoryRepository:
 
     def save_asset(self, asset: SerializedAsset, conn: sqlite3.Connection) -> None:
         conn.execute(
-            """INSERT INTO inventory_assets
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO inventory_assets(
+                asset_id, sku, serial_number, status, location_id, assigned_to,
+                customer_ref, purchase_order_id, received_at, warranty_end,
+                retired_at, disposed_at, metadata_json, allocation_type, return_due_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asset_id) DO UPDATE SET
+                status=excluded.status,
+                location_id=excluded.location_id,
+                assigned_to=excluded.assigned_to,
+                customer_ref=excluded.customer_ref,
+                allocation_type=excluded.allocation_type,
+                return_due_at=excluded.return_due_at,
+                retired_at=excluded.retired_at,
+                disposed_at=excluded.disposed_at,
+                metadata_json=excluded.metadata_json""",
             (
                 asset.asset_id,
                 asset.sku,
@@ -262,8 +305,68 @@ class InventoryRepository:
                 asset.retired_at.isoformat() if asset.retired_at else None,
                 asset.disposed_at.isoformat() if asset.disposed_at else None,
                 json.dumps(asset.metadata),
+                asset.allocation_type.value if asset.allocation_type else None,
+                asset.return_due_at.isoformat() if asset.return_due_at else None,
             ),
         )
+
+    def load_asset(self, asset_id: str, conn: sqlite3.Connection | None = None) -> SerializedAsset | None:
+        owns = conn is None
+        conn = conn or self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM inventory_assets WHERE asset_id=?",
+                (asset_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return SerializedAsset(
+                asset_id=row["asset_id"],
+                sku=row["sku"],
+                serial_number=row["serial_number"],
+                status=AssetLifecycle(row["status"]),
+                location_id=row["location_id"],
+                assigned_to=row["assigned_to"],
+                customer_ref=row["customer_ref"],
+                allocation_type=AllocationType(row["allocation_type"]) if row["allocation_type"] else None,
+                return_due_at=datetime.fromisoformat(row["return_due_at"]) if row["return_due_at"] else None,
+                purchase_order_id=row["purchase_order_id"],
+                received_at=datetime.fromisoformat(row["received_at"]) if row["received_at"] else None,
+                warranty_end=datetime.fromisoformat(row["warranty_end"]) if row["warranty_end"] else None,
+                retired_at=datetime.fromisoformat(row["retired_at"]) if row["retired_at"] else None,
+                disposed_at=datetime.fromisoformat(row["disposed_at"]) if row["disposed_at"] else None,
+                metadata=json.loads(row["metadata_json"] or "{}"),
+            )
+        finally:
+            if owns:
+                conn.close()
+
+    def save_asset_movement(self, movement: AssetMovement, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """INSERT INTO inventory_asset_movements
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                movement.movement_id,
+                movement.asset_id,
+                movement.from_status.value,
+                movement.to_status.value,
+                movement.actor,
+                movement.at.isoformat(),
+                movement.from_location,
+                movement.to_location,
+                movement.customer_ref,
+                movement.note,
+            ),
+        )
+
+    def asset_movements(self, asset_id: str) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM inventory_asset_movements WHERE asset_id=? ORDER BY at, movement_id",
+                    (asset_id,),
+                ).fetchall()
+            )
 
     def save_discrepancy(
         self,
