@@ -1,0 +1,56 @@
+{
+  "documents": [
+    {
+      "id": "vpn-runbook",
+      "text": "VPN client error 809: verify the gateway is reachable, restart the VPN client, then validate the user's network path.",
+      "metadata": {"visibility": "internal", "source": "VPN Runbook"}
+    },
+    {
+      "id": "mfa-runbook",
+      "text": "MFA registration failure: confirm the user has a valid authenticator registration before resetting multi-factor authentication.",
+      "metadata": {"visibility": "internal", "source": "MFA Runbook"}
+    },
+    {
+      "id": "printer-runbook",
+      "text": "Printer queue stuck: clear the Windows print queue, restart the spooler service and retry the print job.",
+      "metadata": {"visibility": "internal", "source": "Printer Runbook"}
+    },
+    {
+      "id": "restricted-zeus",
+      "text": "ZEUS-991 payroll gateway recovery procedure for confidential finance systems.",
+      "metadata": {"visibility": "restricted", "allowed_user_ids": "U-SEC", "source": "Finance Gateway Runbook"}
+    }
+  ],
+  "cases": [
+    {
+      "query": "VPN error 809",
+      "expected_ids": ["vpn-runbook"],
+      "user_id": "U-TECH",
+      "no_answer": false
+    },
+    {
+      "query": "authenticator registration MFA failure",
+      "expected_ids": ["mfa-runbook"],
+      "user_id": "U-TECH",
+      "no_answer": false
+    },
+    {
+      "query": "Windows print queue stuck",
+      "expected_ids": ["printer-runbook"],
+      "user_id": "U-TECH",
+      "no_answer": false
+    },
+    {
+      "query": "ZEUS-991",
+      "expected_ids": [],
+      "user_id": "U-OTHER",
+      "no_answer": true
+    },
+    {
+      "query": "quantum coffee machine calibration",
+      "expected_ids": [],
+      "user_id": "U-TECH",
+      "no_answer": true
+    }
+  ]
+}
