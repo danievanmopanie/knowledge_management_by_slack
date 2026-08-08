@@ -14,7 +14,8 @@ from src.core.config import settings
 logger = logging.getLogger(__name__)
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".log", ".json", ".yml", ".yaml"}
-SUPPORTED_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | {".pdf", ".docx"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | {".pdf", ".docx"} | IMAGE_EXTENSIONS
 
 
 class UploadValidationError(ValueError):
@@ -74,10 +75,12 @@ async def download_slack_file(file_info: dict[str, Any], target_dir: Path | None
 
 
 def extract_text(path: Path) -> str:
-    """Extract plain text from a supported local file."""
+    """Extract plain text from a supported non-image local file."""
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise UploadValidationError(f"Unsupported file type: {suffix}")
+    if suffix in IMAGE_EXTENSIONS:
+        raise UploadValidationError("Image text extraction requires the dedicated OCR adapter")
     if suffix == ".csv":
         return _extract_csv(path)
     if suffix == ".pdf":
