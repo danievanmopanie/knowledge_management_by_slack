@@ -7,6 +7,7 @@ from datetime import datetime
 
 from src.inventory.asset_lifecycle import SerializedAssetLifecycleService
 from src.inventory.domain import AllocationType, InventoryDomainError
+from src.inventory.exceptions import InventoryExceptionService
 from src.inventory.locations import LocationService
 from src.inventory.quantity_stock import QuantityStockService
 from src.inventory.repository import InventoryRepository
@@ -20,6 +21,7 @@ class InventoryCommandService:
         self.stock = QuantityStockService(self.repository)
         self.assets = SerializedAssetLifecycleService(self.repository)
         self.locations = LocationService(self.repository)
+        self.exceptions = InventoryExceptionService(self.repository)
 
     def execute(self, message: str, *, actor: str) -> str:
         text = " ".join((message or "").strip().split())
@@ -32,6 +34,11 @@ class InventoryCommandService:
             self._location_path,
             self._location_activate,
             self._location_deactivate,
+            self._exception_list,
+            self._exception_detail,
+            self._exception_history,
+            self._exception_resolve,
+            self._exception_reopen,
             self._asset_status,
             self._stock_status,
             self._low_stock,
@@ -116,6 +123,103 @@ class InventoryCommandService:
             return None
         self.locations.set_active(match.group(1), active=False)
         return f"Deactivated inventory location `{match.group(1).upper()}`."
+
+    def _exception_list(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(
+            r"exceptions(?: po (\S+))?(?: status (open|resolved|all))?",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        po_id, status = match.groups()
+        rows = self.exceptions.list(
+            purchase_order_id=po_id or "",
+            status=(status or "open").lower(),
+        )
+        if not rows:
+            return "No matching inventory exceptions."
+        lines = ["*Inventory exceptions*"]
+        for item in rows:
+            qty = f"expected {item.expected_quantity}, actual {item.actual_quantity}"
+            if item.damaged_quantity:
+                qty += f", damaged {item.damaged_quantity}"
+            lines.append(
+                f"• `#{item.exception_id}` *{item.discrepancy_type}* — PO `{item.purchase_order_id}`, "
+                f"SKU `{item.sku or '—'}` ({qty}) — {item.status}"
+            )
+        return "\n".join(lines)
+
+    def _exception_detail(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"exception (\d+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        item = self.exceptions.require(int(match.group(1)))
+        lines = [
+            f"*Inventory exception #{item.exception_id}*",
+            f"• Status: *{item.status}*",
+            f"• Type: `{item.discrepancy_type}`",
+            f"• PO: `{item.purchase_order_id}`",
+            f"• Delivery: `{item.delivery_id}`",
+            f"• PO line: `{item.po_line_id or '—'}`",
+            f"• SKU: `{item.sku or '—'}`",
+            f"• Expected / actual: *{item.expected_quantity} / {item.actual_quantity}*",
+            f"• Damaged: *{item.damaged_quantity}*",
+            f"• Detail: {item.detail}",
+        ]
+        if item.status == "resolved":
+            lines.extend(
+                [
+                    f"• Resolution: `{item.resolution_type}`",
+                    f"• Note: {item.resolution_note}",
+                    f"• Resolved by: `{item.resolved_by}`",
+                    f"• Resolved at: `{item.resolved_at.isoformat() if item.resolved_at else '—'}`",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _exception_history(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"exception history (\d+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        exception_id = int(match.group(1))
+        events = self.exceptions.events(exception_id)
+        if not events:
+            return f"Exception `#{exception_id}` has no resolution history yet."
+        lines = [f"*Exception #{exception_id} history*"]
+        for event in events:
+            lines.append(
+                f"• `{event.at.isoformat()}` — *{event.action}* by `{event.actor}` — {event.note}"
+            )
+        return "\n".join(lines)
+
+    def _exception_resolve(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(
+            r"resolve exception (\d+) as (\S+) note (.+)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        exception_id, resolution_type, note = match.groups()
+        item = self.exceptions.resolve(
+            int(exception_id),
+            resolution_type=resolution_type,
+            note=note,
+            actor=actor,
+        )
+        return (
+            f"Resolved exception `#{item.exception_id}` as `{item.resolution_type}`. "
+            f"PO `{item.purchase_order_id}` remains fully auditable."
+        )
+
+    def _exception_reopen(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"reopen exception (\d+) note (.+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        exception_id, note = match.groups()
+        item = self.exceptions.reopen(int(exception_id), note=note, actor=actor)
+        return f"Reopened exception `#{item.exception_id}`. Status: *{item.status}*."
 
     def _asset_status(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"status asset (\S+)", text, re.IGNORECASE)

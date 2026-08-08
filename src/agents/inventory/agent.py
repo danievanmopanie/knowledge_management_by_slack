@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 HELP = """*Inventory Agent*
 
 *Storage locations*
-Create a governed physical hierarchy before receiving/storing inventory:
 • `create location SITE-A type site site SITE-A name Main Site`
 • `create location STORE-A type storeroom site SITE-A name Main Store parent SITE-A`
 • `create location SHELF-B3 type shelf site SITE-A name Shelf B3 parent STORE-A`
@@ -31,18 +30,24 @@ Create a governed physical hierarchy before receiving/storing inventory:
 *Purchase orders*
 Attach a CSV/PDF/DOCX/text/image PO or quote and type:
 • `create po PO-2026-0001 supplier Dell`
-Then confirm or cancel the staged PO:
-• `confirm po PO-STAGE-...`
-• `cancel po PO-STAGE-...`
+Then use `confirm po PO-STAGE-...` or `cancel po PO-STAGE-...`.
 PO line columns: `line_id, sku, description, quantity, tracking_mode, unit_price, model`.
 
 *Delivery receiving*
 Attach a delivery note/photo and type:
 • `receive PO-2026-0001 at STORE-A`
-The destination must be an active governed inventory location.
-Then use:
-• `confirm receipt RCV-...`
-• `cancel receipt RCV-...`
+Then use `confirm receipt RCV-...` or `cancel receipt RCV-...`.
+
+*Receiving exceptions*
+• `exceptions`
+• `exceptions po PO-2026-0001`
+• `exceptions status resolved`
+• `exception 42`
+• `resolve exception 42 as supplier_replacement note Supplier will replace next week`
+• `reopen exception 42 note Replacement did not arrive`
+• `exception history 42`
+Resolution types: `supplier_replacement`, `supplier_credit`, `accepted_variance`,
+`returned_to_supplier`, `document_corrected`, `investigated_no_action`, `other`.
 
 *Serialized assets*
 • `status asset A-1042`
