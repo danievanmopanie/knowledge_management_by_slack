@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily knowledge-base backup for Knowledge Management by Slack
+Requires=kb-backup.service
+
+[Timer]
+# Run every day at 02:15 local time
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
