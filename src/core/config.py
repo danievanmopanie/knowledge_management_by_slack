@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     incident_embedding_query_prefix: str = ""
     incident_embedding_batch_size: int = 64
 
+    # Retrieval quality
+    retrieval_min_confidence: float = 0.30
+    retrieval_strong_confidence: float = 0.55
+    retrieval_max_chunks_per_document: int = 2
+
     # Paths
     vectorstore_path: Path = Path("./data/vectorstore")
     raw_docs_path: Path = Path("./data/raw")
