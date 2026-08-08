@@ -12,6 +12,7 @@ from src.inventory.items import ItemCatalogService
 from src.inventory.locations import LocationService
 from src.inventory.quantity_stock import QuantityStockService
 from src.inventory.repository import InventoryRepository
+from src.inventory.suppliers import SupplierService
 
 
 class InventoryCommandService:
@@ -24,6 +25,7 @@ class InventoryCommandService:
         self.locations = LocationService(self.repository)
         self.exceptions = InventoryExceptionService(self.repository)
         self.items = ItemCatalogService(self.repository)
+        self.suppliers = SupplierService(self.repository)
 
     def execute(self, message: str, *, actor: str) -> str:
         text = " ".join((message or "").strip().split())
@@ -31,6 +33,11 @@ class InventoryCommandService:
             raise InventoryDomainError("Inventory command is empty.")
 
         handlers = (
+            self._supplier_create,
+            self._supplier_list,
+            self._supplier_detail,
+            self._supplier_activate,
+            self._supplier_deactivate,
             self._item_create,
             self._item_list,
             self._item_detail,
@@ -68,6 +75,73 @@ class InventoryCommandService:
             if result is not None:
                 return result
         raise InventoryDomainError("Unsupported inventory command. Type `help` for examples.")
+
+    def _supplier_create(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(
+            r"create supplier (\S+) name (.+?)(?: contact (\S+))?"
+            r"(?: email (\S+))?(?: phone (\S+))?",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        supplier_id, name, contact, email, phone = match.groups()
+        supplier = self.suppliers.create(
+            supplier_id=supplier_id,
+            name=name,
+            contact_name=contact or "",
+            email=email or "",
+            phone=phone or "",
+            actor=actor,
+        )
+        return f"Created inventory supplier `{supplier.supplier_id}` — {supplier.name}."
+
+    def _supplier_list(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"suppliers(?: (all))?", text, re.IGNORECASE)
+        if not match:
+            return None
+        rows = self.suppliers.list(include_inactive=bool(match.group(1)))
+        if not rows:
+            return "No inventory suppliers found."
+        lines = ["*Inventory suppliers*"]
+        for supplier in rows[:50]:
+            state = "active" if supplier.active else "inactive"
+            lines.append(
+                f"• `{supplier.supplier_id}` — {supplier.name} [{state}]"
+            )
+        if len(rows) > 50:
+            lines.append(f"… and {len(rows) - 50} more.")
+        return "\n".join(lines)
+
+    def _supplier_detail(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"supplier (\S+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        supplier = self.suppliers.get(match.group(1))
+        if supplier is None:
+            raise InventoryDomainError(f"Unknown inventory supplier: {match.group(1)}")
+        return (
+            f"*Supplier {supplier.supplier_id}*\n"
+            f"• Name: {supplier.name}\n"
+            f"• Contact: `{supplier.contact_name or '—'}`\n"
+            f"• Email: `{supplier.email or '—'}`\n"
+            f"• Phone: `{supplier.phone or '—'}`\n"
+            f"• Status: *{'active' if supplier.active else 'inactive'}*"
+        )
+
+    def _supplier_activate(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"activate supplier (\S+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        supplier = self.suppliers.set_active(match.group(1), active=True)
+        return f"Activated inventory supplier `{supplier.supplier_id}`."
+
+    def _supplier_deactivate(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"deactivate supplier (\S+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        supplier = self.suppliers.set_active(match.group(1), active=False)
+        return f"Deactivated inventory supplier `{supplier.supplier_id}`."
 
     def _item_create(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(
@@ -121,7 +195,11 @@ class InventoryCommandService:
         lines = ["*Inventory item catalog*"]
         for item in rows[:50]:
             state = "active" if item.active else "inactive"
-            model = f" — {item.manufacturer} {item.model}".strip() if (item.manufacturer or item.model) else ""
+            model = (
+                f" — {item.manufacturer} {item.model}".strip()
+                if (item.manufacturer or item.model)
+                else ""
+            )
             lines.append(
                 f"• `{item.sku}` — {item.name} [{item.item_class}, "
                 f"{item.tracking_mode.value}, {state}]{model}"
