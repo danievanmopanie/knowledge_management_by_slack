@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from src.agents.frontend_support import FrontendSupportAgent
 from src.agents.inventory import InventoryAgent
 from src.agents.knowledge_ingest import KnowledgeIngestAgent
 from src.agents.work_management import WorkManagementAgent
 from src.core.config import settings
+from src.core.context import RequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -34,22 +34,16 @@ def _channel_to_agent(channel_id: str | None):
     return mapping.get(channel_id)
 
 
-async def route_message(
-    channel_id: str,
-    text: str,
-    user: str | None = None,
-    files: list[dict] | None = None,
-    thread_ts: str | None = None,
-) -> str:
-    """
-    Route a message to the appropriate agent and return the response text.
-
-    Falls back to a helpful message if the channel is not configured.
-    """
-    agent = _channel_to_agent(channel_id)
+async def route_message(message: str, context: RequestContext) -> str:
+    """Route a request to the agent configured for its Slack channel."""
+    agent = _channel_to_agent(context.channel_id)
 
     if agent is None:
-        logger.warning("No agent mapped for channel %s", channel_id)
+        logger.warning(
+            "No agent mapped for channel %s request_id=%s",
+            context.channel_id,
+            context.request_id,
+        )
         return (
             "This channel is not yet configured for an agent.\n"
             "Please set the channel IDs in your `.env` file:\n"
@@ -57,12 +51,10 @@ async def route_message(
             "`CHANNEL_WORK_MANAGEMENT`, `CHANNEL_KNOWLEDGE_UPLOADS`."
         )
 
-    context: dict[str, Any] = {
-        "channel_id": channel_id,
-        "user": user,
-        "thread_ts": thread_ts,
-        "files": files or [],
-    }
-
-    logger.info("Routing to agent '%s' for channel %s", agent.name, channel_id)
-    return await agent.handle(text, context)
+    logger.info(
+        "Routing request_id=%s to agent '%s' for channel %s",
+        context.request_id,
+        agent.name,
+        context.channel_id,
+    )
+    return await agent.handle(message, context)

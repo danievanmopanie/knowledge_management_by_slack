@@ -1,7 +1,8 @@
 """Base agent interface and shared utilities."""
 
 from abc import ABC, abstractmethod
-from typing import Any
+
+from src.core.context import RequestContext
 
 
 class BaseAgent(ABC):
@@ -10,6 +11,6 @@ class BaseAgent(ABC):
     name: str = "base"
 
     @abstractmethod
-    async def handle(self, message: str, context: dict[str, Any]) -> str:
+    async def handle(self, message: str, context: RequestContext) -> str:
         """Process a user message and return a response."""
         ...

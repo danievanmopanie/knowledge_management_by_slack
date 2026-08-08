@@ -1,9 +1,8 @@
-"""Download files from Slack and extract text for ingest."""
+"""Download Slack files safely and extract text for staged ingest."""
 
 from __future__ import annotations
 
 import csv
-import io
 import logging
 from pathlib import Path
 from typing import Any
@@ -15,117 +14,104 @@ from src.core.config import settings
 logger = logging.getLogger(__name__)
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".log", ".json", ".yml", ".yaml"}
+SUPPORTED_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | {".pdf", ".docx"}
 
 
-async def download_slack_file(file_info: dict[str, Any]) -> Path:
-    """
-    Download a Slack file to the local raw documents folder.
+class UploadValidationError(ValueError):
+    """Raised when an uploaded file fails intake policy."""
 
-    `file_info` is the file object from a Slack event (contains url_private, name, etc.).
-    """
-    url = file_info.get("url_private") or file_info.get("url_private_download")
+
+def validate_slack_file(file_info: dict[str, Any]) -> tuple[str, str]:
+    """Validate upload metadata and return safe filename + extension."""
+    name = str(file_info.get("name") or "").strip()
+    if not name:
+        raise UploadValidationError("File has no name")
+    suffix = Path(name).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise UploadValidationError(f"Unsupported file type: {suffix or '(none)'}")
+    size = file_info.get("size")
+    if size is not None and int(size) > settings.max_upload_bytes:
+        raise UploadValidationError("File exceeds the configured upload-size limit")
+
+    file_id = str(file_info.get("id") or "file")
+    stem = "".join(c for c in Path(name).stem if c.isalnum() or c in ("-", "_", " ")).strip()
+    stem = stem[:120] or "file"
+    safe_name = f"{file_id}_{stem}{suffix}"
+    return safe_name, suffix
+
+
+async def download_slack_file(file_info: dict[str, Any], target_dir: Path | None = None) -> Path:
+    """Stream a validated Slack file to the controlled staging directory."""
+    url = file_info.get("url_private_download") or file_info.get("url_private")
     if not url:
-        raise ValueError("Slack file object has no downloadable URL")
+        raise UploadValidationError("Slack file object has no downloadable URL")
 
-    name = file_info.get("name") or file_info.get("id") or "unknown_file"
-    # Sanitise filename
-    safe_name = "".join(c for c in name if c.isalnum() or c in ("-", "_", ".", " ")).strip()
-    if not safe_name:
-        safe_name = file_info.get("id", "file")
-
-    target_dir = settings.raw_docs_path
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / safe_name
-
-    # Avoid overwriting – append id if needed
-    if target_path.exists():
-        stem = target_path.stem
-        suffix = target_path.suffix
-        target_path = target_dir / f"{stem}_{file_info.get('id', 'dup')}{suffix}"
+    safe_name, _ = validate_slack_file(file_info)
+    directory = Path(target_dir or settings.staging_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    target_path = (directory / safe_name).resolve()
+    if directory.resolve() not in target_path.parents:
+        raise UploadValidationError("Unsafe download path")
 
     headers = {"Authorization": f"Bearer {settings.slack_bot_token}"}
+    written = 0
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            async with client.stream("GET", str(url), headers=headers) as resp:
+                resp.raise_for_status()
+                with target_path.open("wb") as out:
+                    async for chunk in resp.aiter_bytes():
+                        written += len(chunk)
+                        if written > settings.max_upload_bytes:
+                            raise UploadValidationError("File exceeds the configured upload-size limit")
+                        out.write(chunk)
+    except Exception:
+        target_path.unlink(missing_ok=True)
+        raise
 
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        target_path.write_bytes(resp.content)
-
-    logger.info("Downloaded Slack file to %s (%s bytes)", target_path, target_path.stat().st_size)
+    logger.info("Downloaded Slack file to %s (%s bytes)", target_path, written)
     return target_path
 
 
 def extract_text(path: Path) -> str:
-    """
-    Extract plain text from a local file.
-
-    Currently supports common text formats. PDF/DOCX can be added later.
-    """
+    """Extract plain text from a supported local file."""
     suffix = path.suffix.lower()
-
-    if suffix not in SUPPORTED_TEXT_EXTENSIONS and suffix not in {".pdf", ".docx"}:
-        # Try reading as text anyway for unknown extensions
-        try:
-            return path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            raise ValueError(f"Unsupported file type: {suffix}")
-
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise UploadValidationError(f"Unsupported file type: {suffix}")
     if suffix == ".csv":
         return _extract_csv(path)
-
     if suffix == ".pdf":
         return _extract_pdf(path)
-
     if suffix == ".docx":
         return _extract_docx(path)
-
-    # Default: plain text / markdown / json / yaml / log
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def _extract_csv(path: Path) -> str:
-    """Convert CSV into a readable text representation for embedding."""
     lines = []
     with path.open(newline="", encoding="utf-8", errors="ignore") as f:
         reader = csv.reader(f)
         for i, row in enumerate(reader):
-            if i == 0:
-                lines.append("Headers: " + " | ".join(row))
-            else:
-                lines.append(" | ".join(row))
-            if i >= 500:  # safety limit for very large CSVs
+            lines.append(("Headers: " if i == 0 else "") + " | ".join(row))
+            if i >= 500:
                 lines.append("... (truncated)")
                 break
     return "\n".join(lines)
 
 
 def _extract_pdf(path: Path) -> str:
-    """Extract text from PDF if pypdf is available."""
     try:
         from pypdf import PdfReader
-    except ImportError:
-        raise ValueError(
-            "PDF support requires the 'pypdf' package. "
-            "Install it or convert the file to Markdown/TXT."
-        )
-
+    except ImportError as exc:
+        raise UploadValidationError("PDF support requires the optional 'pypdf' package") from exc
     reader = PdfReader(str(path))
-    parts = []
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        if text.strip():
-            parts.append(text)
-    return "\n\n".join(parts)
+    return "\n\n".join((page.extract_text() or "") for page in reader.pages).strip()
 
 
 def _extract_docx(path: Path) -> str:
-    """Extract text from DOCX if python-docx is available."""
     try:
         import docx
-    except ImportError:
-        raise ValueError(
-            "DOCX support requires the 'python-docx' package. "
-            "Install it or convert the file to Markdown/TXT."
-        )
-
+    except ImportError as exc:
+        raise UploadValidationError("DOCX support requires the optional 'python-docx' package") from exc
     document = docx.Document(str(path))
     return "\n".join(p.text for p in document.paragraphs if p.text.strip())
