@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import InventoryDomainError
 from src.inventory.repository import InventoryRepository
 
@@ -39,6 +40,7 @@ class QuantityStockService:
 
     def __init__(self, repository: InventoryRepository):
         self.repository = repository
+        self.customers = CustomerCustodyService(repository)
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -95,8 +97,7 @@ class QuantityStockService:
     ) -> StockReservation:
         if quantity <= 0:
             raise InventoryDomainError("Reservation quantity must be positive.")
-        if not customer_ref:
-            raise InventoryDomainError("Customer reference is required.")
+        customer = self.customers.require_active(customer_ref)
         with self.repository.transaction() as conn:
             row = conn.execute(
                 "SELECT on_hand, reserved FROM inventory_stock_balances WHERE sku=? AND location_id=?",
@@ -112,7 +113,7 @@ class QuantityStockService:
                 sku=sku,
                 location_id=location_id,
                 quantity=quantity,
-                customer_ref=customer_ref,
+                customer_ref=customer.customer_id,
                 requested_by=requested_by,
                 created_at=datetime.now(timezone.utc),
             )
@@ -123,7 +124,7 @@ class QuantityStockService:
                     sku,
                     location_id,
                     quantity,
-                    customer_ref,
+                    reservation.customer_ref,
                     requested_by,
                     reservation.status,
                     reservation.created_at.isoformat(),
@@ -165,6 +166,7 @@ class QuantityStockService:
     ) -> str:
         if quantity <= 0:
             raise InventoryDomainError("Issue quantity must be positive.")
+        customer = self.customers.require_active(customer_ref)
         with self.repository.transaction() as conn:
             reserved_release = 0
             if reservation_id:
@@ -176,6 +178,8 @@ class QuantityStockService:
                     raise InventoryDomainError("Unknown or inactive stock reservation.")
                 if reservation["sku"] != sku or reservation["location_id"] != location_id:
                     raise InventoryDomainError("Reservation does not match the requested stock/location.")
+                if reservation["customer_ref"] != customer.customer_id:
+                    raise InventoryDomainError("Reservation belongs to a different customer.")
                 if int(reservation["quantity"]) != quantity:
                     raise InventoryDomainError("Issue quantity must match the reservation quantity.")
                 reserved_release = quantity
@@ -202,7 +206,7 @@ class QuantityStockService:
                     actor,
                     datetime.now(timezone.utc).isoformat(),
                     location_id,
-                    customer_ref,
+                    customer.customer_id,
                     note,
                 ),
             )
@@ -223,12 +227,15 @@ class QuantityStockService:
         actor: str,
         note: str = "",
     ) -> str:
+        customer = self.customers.get(customer_ref)
+        if customer is None:
+            raise InventoryDomainError(f"Unknown inventory customer: {customer_ref}")
         return self._increase(
             sku=sku,
             location_id=location_id,
             quantity=quantity,
             transaction_type="return",
-            customer_ref=customer_ref,
+            customer_ref=customer.customer_id,
             actor=actor,
             note=note,
         )

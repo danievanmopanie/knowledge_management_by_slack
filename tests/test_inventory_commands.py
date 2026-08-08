@@ -1,4 +1,5 @@
 from src.inventory.commands import InventoryCommandService
+from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import AssetLifecycle, SerializedAsset, StockTransaction
 from src.inventory.repository import InventoryRepository
 
@@ -15,6 +16,15 @@ def seed_locations(commands):
     )
     commands.execute(
         "create location SHELF-B3 type shelf site SITE-A name Shelf B3 parent STORE-A",
+        actor="admin",
+    )
+
+
+def seed_customer(repo, customer_id="EMP-42"):
+    CustomerCustodyService(repo).create(
+        customer_id=customer_id,
+        name=f"Customer {customer_id}",
+        customer_type="employee",
         actor="admin",
     )
 
@@ -52,6 +62,7 @@ def seed_stock(repo):
 def test_asset_commands_drive_persisted_lifecycle(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     seed_asset(repo)
+    seed_customer(repo)
     commands = InventoryCommandService(repo)
     seed_locations(commands)
 
@@ -80,6 +91,7 @@ def test_asset_commands_drive_persisted_lifecycle(tmp_path):
 def test_stock_commands_reserve_issue_transfer_and_count(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     seed_stock(repo)
+    seed_customer(repo)
     commands = InventoryCommandService(repo)
     seed_locations(commands)
 

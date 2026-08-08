@@ -1,3 +1,4 @@
+from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import StockTransaction
 from src.inventory.quantity_stock import QuantityStockService
 from src.inventory.repository import InventoryRepository
@@ -17,6 +18,15 @@ def seed_stock(repo: InventoryRepository, quantity: int = 10) -> None:
             ),
             conn,
         )
+
+
+def seed_customer(repo: InventoryRepository) -> None:
+    CustomerCustodyService(repo).create(
+        customer_id="EMP-42",
+        name="Jane Smith",
+        customer_type="employee",
+        actor="admin",
+    )
 
 
 def test_stage_does_not_change_stock_until_confirmed(tmp_path):
@@ -60,6 +70,7 @@ def test_cancel_leaves_ledger_unchanged(tmp_path):
 def test_stale_count_is_rejected_if_stock_changed_after_staging(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     seed_stock(repo)
+    seed_customer(repo)
     workflow = StockReconciliationWorkflow(repo)
     stock = QuantityStockService(repo)
 
@@ -90,6 +101,7 @@ def test_stale_count_is_rejected_if_stock_changed_after_staging(tmp_path):
 def test_count_below_reserved_stock_cannot_be_confirmed(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     seed_stock(repo, 5)
+    seed_customer(repo)
     workflow = StockReconciliationWorkflow(repo)
     stock = QuantityStockService(repo)
     stock.reserve(

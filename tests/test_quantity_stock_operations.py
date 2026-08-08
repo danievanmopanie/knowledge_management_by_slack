@@ -22,10 +22,20 @@ def seed_stock(repo, *, sku="MOUSE-01", location="STORE-A", quantity=10):
         )
 
 
+def seed_customer(service, customer_id="EMP-1"):
+    service.customers.create(
+        customer_id=customer_id,
+        name=f"Customer {customer_id}",
+        customer_type="employee",
+        actor="admin",
+    )
+
+
 def test_reserve_and_issue_reserved_stock(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = QuantityStockService(repo)
     seed_stock(repo)
+    seed_customer(service)
 
     reservation = service.reserve(
         sku="MOUSE-01",
@@ -53,6 +63,8 @@ def test_reservation_blocks_unreserved_issue(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = QuantityStockService(repo)
     seed_stock(repo, quantity=5)
+    seed_customer(service, "EMP-1")
+    seed_customer(service, "EMP-2")
     service.reserve(
         sku="MOUSE-01",
         location_id="STORE-A",
@@ -71,10 +83,36 @@ def test_reservation_blocks_unreserved_issue(tmp_path):
         )
 
 
+def test_reserved_issue_must_match_customer(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    service = QuantityStockService(repo)
+    seed_stock(repo, quantity=5)
+    seed_customer(service, "EMP-1")
+    seed_customer(service, "EMP-2")
+    reservation = service.reserve(
+        sku="MOUSE-01",
+        location_id="STORE-A",
+        quantity=2,
+        customer_ref="EMP-1",
+        requested_by="U1",
+    )
+
+    with pytest.raises(InventoryDomainError, match="different customer"):
+        service.issue(
+            sku="MOUSE-01",
+            location_id="STORE-A",
+            quantity=2,
+            customer_ref="EMP-2",
+            actor="U2",
+            reservation_id=reservation.reservation_id,
+        )
+
+
 def test_return_and_transfer_are_persisted(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = QuantityStockService(repo)
     seed_stock(repo, quantity=10)
+    seed_customer(service)
 
     service.issue(
         sku="MOUSE-01",
@@ -133,6 +171,7 @@ def test_reservation_and_balance_update_are_atomic(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = QuantityStockService(repo)
     seed_stock(repo, quantity=10)
+    seed_customer(service)
 
     with repo.transaction() as conn:
         conn.execute(
