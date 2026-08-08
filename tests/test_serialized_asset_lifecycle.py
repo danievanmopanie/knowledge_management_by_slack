@@ -26,10 +26,20 @@ def seed_asset(repo, *, asset_id="A-100", status=AssetLifecycle.RECEIVED, locati
     return asset
 
 
+def seed_customer(service, customer_id="EMP-42"):
+    return service.customers.create(
+        customer_id=customer_id,
+        name=f"Customer {customer_id}",
+        customer_type="employee",
+        actor="admin",
+    )
+
+
 def test_full_serialized_asset_lifecycle(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = SerializedAssetLifecycleService(repo)
     seed_asset(repo)
+    seed_customer(service)
 
     asset = service.put_away("A-100", location_id="STORE-A/SHELF-1", actor="U1")
     assert asset.status == AssetLifecycle.IN_STOCK
@@ -75,6 +85,7 @@ def test_loan_requires_due_date_and_dedicated_rejects_due_date(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = SerializedAssetLifecycleService(repo)
     seed_asset(repo)
+    seed_customer(service, "EMP-2")
     service.put_away("A-100", location_id="STORE-A", actor="U1")
 
     with pytest.raises(InventoryDomainError, match="return due date"):
@@ -101,6 +112,7 @@ def test_cannot_dispose_issued_asset_or_skip_retirement(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = SerializedAssetLifecycleService(repo)
     seed_asset(repo)
+    seed_customer(service, "EMP-2")
     service.put_away("A-100", location_id="STORE-A", actor="U1")
     service.issue(
         "A-100",
@@ -116,6 +128,22 @@ def test_cannot_dispose_issued_asset_or_skip_retirement(tmp_path):
         service.dispose("A-100", actor="U1")
 
     assert repo.load_asset("A-100").status == AssetLifecycle.ISSUED
+
+
+def test_unknown_customer_is_rejected_before_issue(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    service = SerializedAssetLifecycleService(repo)
+    seed_asset(repo)
+    service.put_away("A-100", location_id="STORE-A", actor="U1")
+
+    with pytest.raises(InventoryDomainError, match="Unknown inventory customer"):
+        service.issue(
+            "A-100",
+            assigned_to="U2",
+            customer_ref="MADE-UP",
+            allocation_type=AllocationType.DEDICATED,
+            actor="U1",
+        )
 
 
 def test_transition_and_movement_write_are_atomic(tmp_path, monkeypatch):
