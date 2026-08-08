@@ -29,6 +29,12 @@ Your goals:
 When past incident context is provided, highlight patterns that may help resolve the current issue faster.
 """
 
+INSUFFICIENT_EVIDENCE_RESPONSE = (
+    "I couldn't find sufficiently strong internal evidence to answer this reliably. "
+    "Please add more detail (for example the exact error, application/device, hostname or incident number), "
+    "or escalate it for investigation rather than relying on a guessed answer."
+)
+
 
 class FrontendSupportAgent(BaseAgent):
     """Answers support questions using governed knowledge + incident RAG + local LLM."""
@@ -52,10 +58,15 @@ class FrontendSupportAgent(BaseAgent):
         except Exception:
             logger.exception("Incident RAG retrieval failed request_id=%s", context.request_id)
 
+        # Do not ask the LLM to improvise when neither governed knowledge nor
+        # similar-incident evidence clears the retrieval confidence policy.
+        if not result.should_answer and not incident_context:
+            return INSUFFICIENT_EVIDENCE_RESPONSE
+
         user_content_parts = []
         if incident_context:
             user_content_parts.extend([incident_context, "---"])
-        if knowledge_context:
+        if knowledge_context and result.should_answer:
             user_content_parts.extend(["Knowledge articles & notes:\n" + knowledge_context, "---"])
         user_content_parts.append("User question:\n" + message)
 
@@ -74,7 +85,7 @@ class FrontendSupportAgent(BaseAgent):
         sources = {
             candidate.metadata.get("source")
             for candidate in result.candidates
-            if candidate.metadata.get("source")
+            if candidate.metadata.get("source") and result.should_answer
         }
         try:
             for doc in self.incident_rag.similar_incidents(message, k=3):
