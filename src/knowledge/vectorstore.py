@@ -16,10 +16,16 @@ from src.knowledge.embeddings import get_embeddings
 class VectorStore:
     """Persistent Chroma collection for document chunks."""
 
-    def __init__(self, path: Path | None = None, collection_name: str = "knowledge"):
+    def __init__(
+        self,
+        path: Path | None = None,
+        collection_name: str = "knowledge",
+        embedding_purpose: str = "general",
+    ):
         self.path = path or settings.vectorstore_path
         self.path.mkdir(parents=True, exist_ok=True)
         self.collection_name = collection_name
+        self.embedding_purpose = embedding_purpose
 
         self._client = chromadb.PersistentClient(
             path=str(self.path),
@@ -29,7 +35,7 @@ class VectorStore:
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
         )
-        self._embeddings = get_embeddings()
+        self._embeddings = get_embeddings(purpose=embedding_purpose)
 
     def add_documents(
         self,
@@ -44,6 +50,7 @@ class VectorStore:
         metadatas = metadatas or [{} for _ in documents]
         if ids is None:
             import uuid
+
             ids = [str(uuid.uuid4()) for _ in documents]
 
         embeddings = self._embeddings.embed_documents(documents)
