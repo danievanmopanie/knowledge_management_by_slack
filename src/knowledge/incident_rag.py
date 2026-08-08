@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Iterable
 
 from langchain_core.documents import Document
@@ -16,25 +17,61 @@ logger = logging.getLogger(__name__)
 INCIDENT_COLLECTION = "incidents"
 
 
+def _clean(text: str) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return text
+
+
 def _incident_to_text(inc: Incident) -> str:
-    """Build a rich text representation for embedding."""
-    parts = [
-        f"Incident {inc.number}",
-        f"Summary: {inc.short_description}" if inc.short_description else "",
-        f"Description: {inc.description}" if inc.description else "",
-        f"Category: {inc.category}" if inc.category else "",
-        f"Subcategory: {inc.subcategory}" if inc.subcategory else "",
-        f"State: {inc.state}" if inc.state else "",
-        f"Assignment group: {inc.assignment_group}" if inc.assignment_group else "",
-        f"Assigned to: {inc.assigned_to}" if inc.assigned_to else "",
-        f"Caller: {inc.caller}" if inc.caller else "",
-        f"Location: {inc.location}" if inc.location else "",
-    ]
-    if inc.opened_at:
-        parts.append(f"Opened: {inc.opened_at.isoformat()}")
-    if inc.resolved_at:
-        parts.append(f"Resolved: {inc.resolved_at.isoformat()}")
-    return "\n".join(p for p in parts if p)
+    """
+    Build an embedding-optimised representation of an incident.
+
+    Priority order for semantic matching:
+    1. Problem summary + description (what failed / symptoms)
+    2. Category / subcategory (problem class)
+    3. Location + assignment group (operational context)
+    4. Identifiers last (useful for display, weak for pure semantics)
+    """
+    summary = _clean(inc.short_description)
+    description = _clean(inc.description)
+    category = _clean(inc.category)
+    subcategory = _clean(inc.subcategory)
+    location = _clean(inc.location)
+    group = _clean(inc.assignment_group)
+
+    # Lead with the actual problem text – this drives similarity
+    head: list[str] = []
+    if summary:
+        head.append(summary)
+    if description and description.lower() != summary.lower():
+        # Cap very long work notes so embeddings focus on the issue
+        head.append(description[:1200])
+
+    taxonomy: list[str] = []
+    if category:
+        taxonomy.append(f"category: {category}")
+    if subcategory:
+        taxonomy.append(f"subcategory: {subcategory}")
+    if location:
+        taxonomy.append(f"location: {location}")
+    if group:
+        taxonomy.append(f"assignment group: {group}")
+
+    tail: list[str] = []
+    if inc.number:
+        tail.append(f"incident {inc.number}")
+    if inc.state:
+        tail.append(f"state: {_clean(inc.state)}")
+
+    parts = []
+    if head:
+        parts.append(" ".join(head))
+    if taxonomy:
+        parts.append(" | ".join(taxonomy))
+    if tail:
+        parts.append(" | ".join(tail))
+
+    return "\n".join(parts)
 
 
 def _incident_metadata(inc: Incident) -> dict[str, Any]:
@@ -86,9 +123,8 @@ class IncidentRAG:
     """
     Incident-focused RAG layer.
 
-    - Indexes incidents into a dedicated Chroma collection
-    - Links entities in the knowledge graph
-    - Retrieves similar past incidents for a query / live issue description
+    Uses a dedicated embedding model (see INCIDENT_EMBEDDING_MODEL) optimised
+    for short technical problem statements, separate from general knowledge embeddings.
     """
 
     def __init__(
@@ -96,7 +132,10 @@ class IncidentRAG:
         vector_store: VectorStore | None = None,
         graph_store: GraphStore | None = None,
     ):
-        self.vector_store = vector_store or VectorStore(collection_name=INCIDENT_COLLECTION)
+        self.vector_store = vector_store or VectorStore(
+            collection_name=INCIDENT_COLLECTION,
+            embedding_purpose="incident",
+        )
         self.graph_store = graph_store or GraphStore()
 
     def index_incidents(self, incidents: Iterable[Incident]) -> dict[str, int]:
@@ -117,8 +156,6 @@ class IncidentRAG:
             count += 1
 
         if docs:
-            # Chroma upsert behaviour: add with stable IDs; re-index may duplicate
-            # if IDs already exist depending on client version. We delete first when possible.
             try:
                 self.vector_store._collection.delete(ids=ids)
             except Exception:
@@ -141,6 +178,8 @@ class IncidentRAG:
         where: dict | None = None,
     ) -> list[Document]:
         """Semantic search over past incidents."""
+        # Light query normalisation – keep technician language intact
+        query = _clean(query)
         return self.vector_store.similarity_search(query, k=k, where=where)
 
     def build_context(
@@ -150,10 +189,7 @@ class IncidentRAG:
         include_graph: bool = True,
         max_chars: int = 4000,
     ) -> str:
-        """
-        Build a ready-to-use context block of similar past incidents
-        (+ optional graph neighbours) for the LLM.
-        """
+        """Build a context block of similar past incidents for the LLM."""
         docs = self.similar_incidents(query, k=k)
         if not docs:
             return ""
@@ -175,7 +211,6 @@ class IncidentRAG:
             parts.append("")
 
         if include_graph:
-            # Expand from top incident numbers / groups
             entities = []
             for doc in docs[:3]:
                 num = (doc.metadata or {}).get("number")
