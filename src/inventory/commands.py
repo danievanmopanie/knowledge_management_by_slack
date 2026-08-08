@@ -12,6 +12,7 @@ from src.inventory.items import ItemCatalogService
 from src.inventory.locations import LocationService
 from src.inventory.quantity_stock import QuantityStockService
 from src.inventory.repository import InventoryRepository
+from src.inventory.service_history import AssetServiceHistoryService
 from src.inventory.suppliers import SupplierService
 
 
@@ -26,6 +27,7 @@ class InventoryCommandService:
         self.exceptions = InventoryExceptionService(self.repository)
         self.items = ItemCatalogService(self.repository)
         self.suppliers = SupplierService(self.repository)
+        self.service_history = AssetServiceHistoryService(self.repository)
 
     def execute(self, message: str, *, actor: str) -> str:
         text = " ".join((message or "").strip().split())
@@ -54,6 +56,13 @@ class InventoryCommandService:
             self._exception_history,
             self._exception_resolve,
             self._exception_reopen,
+            self._service_open,
+            self._service_list_open,
+            self._service_asset_history,
+            self._service_event_history,
+            self._service_detail,
+            self._service_complete,
+            self._service_cancel,
             self._asset_status,
             self._stock_status,
             self._low_stock,
@@ -77,23 +86,11 @@ class InventoryCommandService:
         raise InventoryDomainError("Unsupported inventory command. Type `help` for examples.")
 
     def _supplier_create(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"create supplier (\S+) name (.+?)(?: contact (\S+))?"
-            r"(?: email (\S+))?(?: phone (\S+))?",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.fullmatch(r"create supplier (\S+) name (.+?)(?: contact (\S+))?(?: email (\S+))?(?: phone (\S+))?", text, re.IGNORECASE)
         if not match:
             return None
         supplier_id, name, contact, email, phone = match.groups()
-        supplier = self.suppliers.create(
-            supplier_id=supplier_id,
-            name=name,
-            contact_name=contact or "",
-            email=email or "",
-            phone=phone or "",
-            actor=actor,
-        )
+        supplier = self.suppliers.create(supplier_id=supplier_id, name=name, contact_name=contact or "", email=email or "", phone=phone or "", actor=actor)
         return f"Created inventory supplier `{supplier.supplier_id}` — {supplier.name}."
 
     def _supplier_list(self, text: str, actor: str) -> str | None:
@@ -106,9 +103,7 @@ class InventoryCommandService:
         lines = ["*Inventory suppliers*"]
         for supplier in rows[:50]:
             state = "active" if supplier.active else "inactive"
-            lines.append(
-                f"• `{supplier.supplier_id}` — {supplier.name} [{state}]"
-            )
+            lines.append(f"• `{supplier.supplier_id}` — {supplier.name} [{state}]")
         if len(rows) > 50:
             lines.append(f"… and {len(rows) - 50} more.")
         return "\n".join(lines)
@@ -120,14 +115,7 @@ class InventoryCommandService:
         supplier = self.suppliers.get(match.group(1))
         if supplier is None:
             raise InventoryDomainError(f"Unknown inventory supplier: {match.group(1)}")
-        return (
-            f"*Supplier {supplier.supplier_id}*\n"
-            f"• Name: {supplier.name}\n"
-            f"• Contact: `{supplier.contact_name or '—'}`\n"
-            f"• Email: `{supplier.email or '—'}`\n"
-            f"• Phone: `{supplier.phone or '—'}`\n"
-            f"• Status: *{'active' if supplier.active else 'inactive'}*"
-        )
+        return (f"*Supplier {supplier.supplier_id}*\n• Name: {supplier.name}\n• Contact: `{supplier.contact_name or '—'}`\n• Email: `{supplier.email or '—'}`\n• Phone: `{supplier.phone or '—'}`\n• Status: *{'active' if supplier.active else 'inactive'}*")
 
     def _supplier_activate(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"activate supplier (\S+)", text, re.IGNORECASE)
@@ -144,66 +132,26 @@ class InventoryCommandService:
         return f"Deactivated inventory supplier `{supplier.supplier_id}`."
 
     def _item_create(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"create item (\S+) tracking (serialized|quantity) class (\S+) name "
-            r"(.+?)(?: manufacturer (\S+))?(?: model (\S+))?"
-            r"(?: reorder point (\d+) quantity (\d+))?",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.fullmatch(r"create item (\S+) tracking (serialized|quantity) class (\S+) name (.+?)(?: manufacturer (\S+))?(?: model (\S+))?(?: reorder point (\d+) quantity (\d+))?", text, re.IGNORECASE)
         if not match:
             return None
         sku, tracking, item_class, name, manufacturer, model, point, quantity = match.groups()
-        item = self.items.create(
-            sku=sku,
-            name=name,
-            tracking_mode=tracking,
-            item_class=item_class,
-            manufacturer=manufacturer or "",
-            model=model or "",
-            default_reorder_point=int(point or 0),
-            default_reorder_quantity=int(quantity or 0),
-            actor=actor,
-        )
-        reorder = ""
-        if item.default_reorder_quantity:
-            reorder = (
-                f" Reorder default: {item.default_reorder_point} / "
-                f"{item.default_reorder_quantity}."
-            )
-        return (
-            f"Created inventory item `{item.sku}` — {item.name} "
-            f"[{item.item_class}, {item.tracking_mode.value}].{reorder}"
-        )
+        item = self.items.create(sku=sku, name=name, tracking_mode=tracking, item_class=item_class, manufacturer=manufacturer or "", model=model or "", default_reorder_point=int(point or 0), default_reorder_quantity=int(quantity or 0), actor=actor)
+        reorder = f" Reorder default: {item.default_reorder_point} / {item.default_reorder_quantity}." if item.default_reorder_quantity else ""
+        return f"Created inventory item `{item.sku}` — {item.name} [{item.item_class}, {item.tracking_mode.value}].{reorder}"
 
     def _item_list(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"items(?: (all))?(?: class (\S+))?",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.fullmatch(r"items(?: (all))?(?: class (\S+))?", text, re.IGNORECASE)
         if not match:
             return None
-        include_inactive = bool(match.group(1))
-        item_class = match.group(2) or ""
-        rows = self.items.list(
-            include_inactive=include_inactive,
-            item_class=item_class,
-        )
+        rows = self.items.list(include_inactive=bool(match.group(1)), item_class=match.group(2) or "")
         if not rows:
             return "No matching inventory items found."
         lines = ["*Inventory item catalog*"]
         for item in rows[:50]:
             state = "active" if item.active else "inactive"
-            model = (
-                f" — {item.manufacturer} {item.model}".strip()
-                if (item.manufacturer or item.model)
-                else ""
-            )
-            lines.append(
-                f"• `{item.sku}` — {item.name} [{item.item_class}, "
-                f"{item.tracking_mode.value}, {state}]{model}"
-            )
+            model = f" — {item.manufacturer} {item.model}".strip() if (item.manufacturer or item.model) else ""
+            lines.append(f"• `{item.sku}` — {item.name} [{item.item_class}, {item.tracking_mode.value}, {state}]{model}")
         if len(rows) > 50:
             lines.append(f"… and {len(rows) - 50} more.")
         return "\n".join(lines)
@@ -215,17 +163,7 @@ class InventoryCommandService:
         item = self.items.get(match.group(1))
         if item is None:
             raise InventoryDomainError(f"Unknown inventory SKU: {match.group(1)}")
-        return (
-            f"*Inventory item {item.sku}*\n"
-            f"• Name: {item.name}\n"
-            f"• Class: `{item.item_class}`\n"
-            f"• Tracking: *{item.tracking_mode.value}*\n"
-            f"• Manufacturer: `{item.manufacturer or '—'}`\n"
-            f"• Model: `{item.model or '—'}`\n"
-            f"• Status: *{'active' if item.active else 'inactive'}*\n"
-            f"• Default reorder point: *{item.default_reorder_point}*\n"
-            f"• Default reorder quantity: *{item.default_reorder_quantity}*"
-        )
+        return (f"*Inventory item {item.sku}*\n• Name: {item.name}\n• Class: `{item.item_class}`\n• Tracking: *{item.tracking_mode.value}*\n• Manufacturer: `{item.manufacturer or '—'}`\n• Model: `{item.model or '—'}`\n• Status: *{'active' if item.active else 'inactive'}*\n• Default reorder point: *{item.default_reorder_point}*\n• Default reorder quantity: *{item.default_reorder_quantity}*")
 
     def _item_activate(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"activate item (\S+)", text, re.IGNORECASE)
@@ -247,52 +185,31 @@ class InventoryCommandService:
             return None
         sku, location_id = match.groups()
         location = self.locations.require_active(location_id)
-        applied = self.items.apply_default_reorder_rule(
-            sku,
-            location_id=location.location_id,
-        )
+        applied = self.items.apply_default_reorder_rule(sku, location_id=location.location_id)
         if not applied:
             return f"Item `{sku.upper()}` has no quantity-stock reorder default to apply."
         return f"Applied the reorder default for `{sku.upper()}` at `{location.location_id}`."
 
     def _location_create(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"create location (\S+) type (\S+) site (\S+) name (.+?)(?: parent (\S+))?",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.fullmatch(r"create location (\S+) type (\S+) site (\S+) name (.+?)(?: parent (\S+))?", text, re.IGNORECASE)
         if not match:
             return None
         location_id, location_type, site, name, parent = match.groups()
-        location = self.locations.create(
-            location_id=location_id,
-            location_type=location_type,
-            site=site,
-            name=name,
-            parent_id=parent or "",
-            actor=actor,
-        )
+        location = self.locations.create(location_id=location_id, location_type=location_type, site=site, name=name, parent_id=parent or "", actor=actor)
         parent_text = f" under `{location.parent_id}`" if location.parent_id else ""
-        return (
-            f"Created *{location.location_type}* `{location.location_id}`{parent_text} "
-            f"at site `{location.site}` — {location.name}."
-        )
+        return f"Created *{location.location_type}* `{location.location_id}`{parent_text} at site `{location.site}` — {location.name}."
 
     def _location_list(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"locations(?: site (\S+))?", text, re.IGNORECASE)
         if not match:
             return None
-        site = match.group(1) or ""
-        rows = self.locations.list(site=site)
+        rows = self.locations.list(site=match.group(1) or "")
         if not rows:
             return "No active inventory locations found."
         lines = ["*Inventory locations*"]
         for location in rows[:50]:
             parent = f" ← `{location.parent_id}`" if location.parent_id else ""
-            lines.append(
-                f"• `{location.location_id}` [{location.location_type}] — {location.name} "
-                f"({location.site}){parent}"
-            )
+            lines.append(f"• `{location.location_id}` [{location.location_type}] — {location.name} ({location.site}){parent}")
         if len(rows) > 50:
             lines.append(f"… and {len(rows) - 50} more.")
         return "\n".join(lines)
@@ -301,8 +218,7 @@ class InventoryCommandService:
         match = re.fullmatch(r"location path (\S+)", text, re.IGNORECASE)
         if not match:
             return None
-        path = self.locations.path(match.group(1))
-        return " → ".join(f"`{item.location_id}`" for item in path)
+        return " → ".join(f"`{item.location_id}`" for item in self.locations.path(match.group(1)))
 
     def _location_activate(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"activate location (\S+)", text, re.IGNORECASE)
@@ -319,18 +235,11 @@ class InventoryCommandService:
         return f"Deactivated inventory location `{match.group(1).upper()}`."
 
     def _exception_list(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"exceptions(?: po (\S+))?(?: status (open|resolved|all))?",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.fullmatch(r"exceptions(?: po (\S+))?(?: status (open|resolved|all))?", text, re.IGNORECASE)
         if not match:
             return None
         po_id, status = match.groups()
-        rows = self.exceptions.list(
-            purchase_order_id=po_id or "",
-            status=(status or "open").lower(),
-        )
+        rows = self.exceptions.list(purchase_order_id=po_id or "", status=(status or "open").lower())
         if not rows:
             return "No matching inventory exceptions."
         lines = ["*Inventory exceptions*"]
@@ -338,10 +247,7 @@ class InventoryCommandService:
             qty = f"expected {item.expected_quantity}, actual {item.actual_quantity}"
             if item.damaged_quantity:
                 qty += f", damaged {item.damaged_quantity}"
-            lines.append(
-                f"• `#{item.exception_id}` *{item.discrepancy_type}* — PO `{item.purchase_order_id}`, "
-                f"SKU `{item.sku or '—'}` ({qty}) — {item.status}"
-            )
+            lines.append(f"• `#{item.exception_id}` *{item.discrepancy_type}* — PO `{item.purchase_order_id}`, SKU `{item.sku or '—'}` ({qty}) — {item.status}")
         return "\n".join(lines)
 
     def _exception_detail(self, text: str, actor: str) -> str | None:
@@ -349,27 +255,9 @@ class InventoryCommandService:
         if not match:
             return None
         item = self.exceptions.require(int(match.group(1)))
-        lines = [
-            f"*Inventory exception #{item.exception_id}*",
-            f"• Status: *{item.status}*",
-            f"• Type: `{item.discrepancy_type}`",
-            f"• PO: `{item.purchase_order_id}`",
-            f"• Delivery: `{item.delivery_id}`",
-            f"• PO line: `{item.po_line_id or '—'}`",
-            f"• SKU: `{item.sku or '—'}`",
-            f"• Expected / actual: *{item.expected_quantity} / {item.actual_quantity}*",
-            f"• Damaged: *{item.damaged_quantity}*",
-            f"• Detail: {item.detail}",
-        ]
+        lines = [f"*Inventory exception #{item.exception_id}*", f"• Status: *{item.status}*", f"• Type: `{item.discrepancy_type}`", f"• PO: `{item.purchase_order_id}`", f"• Delivery: `{item.delivery_id}`", f"• PO line: `{item.po_line_id or '—'}`", f"• SKU: `{item.sku or '—'}`", f"• Expected / actual: *{item.expected_quantity} / {item.actual_quantity}*", f"• Damaged: *{item.damaged_quantity}*", f"• Detail: {item.detail}"]
         if item.status == "resolved":
-            lines.extend(
-                [
-                    f"• Resolution: `{item.resolution_type}`",
-                    f"• Note: {item.resolution_note}",
-                    f"• Resolved by: `{item.resolved_by}`",
-                    f"• Resolved at: `{item.resolved_at.isoformat() if item.resolved_at else '—'}`",
-                ]
-            )
+            lines.extend([f"• Resolution: `{item.resolution_type}`", f"• Note: {item.resolution_note}", f"• Resolved by: `{item.resolved_by}`", f"• Resolved at: `{item.resolved_at.isoformat() if item.resolved_at else '—'}`"])
         return "\n".join(lines)
 
     def _exception_history(self, text: str, actor: str) -> str | None:
@@ -382,30 +270,16 @@ class InventoryCommandService:
             return f"Exception `#{exception_id}` has no resolution history yet."
         lines = [f"*Exception #{exception_id} history*"]
         for event in events:
-            lines.append(
-                f"• `{event.at.isoformat()}` — *{event.action}* by `{event.actor}` — {event.note}"
-            )
+            lines.append(f"• `{event.at.isoformat()}` — *{event.action}* by `{event.actor}` — {event.note}")
         return "\n".join(lines)
 
     def _exception_resolve(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"resolve exception (\d+) as (\S+) note (.+)",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.fullmatch(r"resolve exception (\d+) as (\S+) note (.+)", text, re.IGNORECASE)
         if not match:
             return None
         exception_id, resolution_type, note = match.groups()
-        item = self.exceptions.resolve(
-            int(exception_id),
-            resolution_type=resolution_type,
-            note=note,
-            actor=actor,
-        )
-        return (
-            f"Resolved exception `#{item.exception_id}` as `{item.resolution_type}`. "
-            f"PO `{item.purchase_order_id}` remains fully auditable."
-        )
+        item = self.exceptions.resolve(int(exception_id), resolution_type=resolution_type, note=note, actor=actor)
+        return f"Resolved exception `#{item.exception_id}` as `{item.resolution_type}`. PO `{item.purchase_order_id}` remains fully auditable."
 
     def _exception_reopen(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"reopen exception (\d+) note (.+)", text, re.IGNORECASE)
@@ -414,6 +288,78 @@ class InventoryCommandService:
         exception_id, note = match.groups()
         item = self.exceptions.reopen(int(exception_id), note=note, actor=actor)
         return f"Reopened exception `#{item.exception_id}`. Status: *{item.status}*."
+
+    def _service_open(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"open service (repair|rma|warranty_claim|inspection) for asset (\S+)(?: supplier (\S+))?(?: reference (\S+))?(?: note (.+))?", text, re.IGNORECASE)
+        if not match:
+            return None
+        service_type, asset_id, supplier_id, reference, note = match.groups()
+        case = self.service_history.open_case(asset_id=asset_id, service_type=service_type, supplier_id=supplier_id or "", external_reference=reference or "", note=note or "", actor=actor)
+        return f"Opened *{case.service_type}* case `{case.service_id}` for asset `{case.asset_id}`. Supplier: `{case.supplier_id or '—'}` | Reference: `{case.external_reference or '—'}`."
+
+    def _service_list_open(self, text: str, actor: str) -> str | None:
+        if text.lower() != "open service cases":
+            return None
+        rows = self.service_history.open_cases()
+        if not rows:
+            return "No open serialized-asset service cases."
+        lines = ["*Open asset service cases*"]
+        for case in rows[:50]:
+            lines.append(f"• `{case.service_id}` — `{case.asset_id}` *{case.service_type}* — supplier `{case.supplier_id or '—'}` — opened {case.opened_at.date().isoformat()}")
+        if len(rows) > 50:
+            lines.append(f"… and {len(rows) - 50} more.")
+        return "\n".join(lines)
+
+    def _service_asset_history(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"service history asset (\S+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        asset_id = match.group(1)
+        rows = self.service_history.cases_for_asset(asset_id)
+        total = self.service_history.total_service_cost(asset_id)
+        if not rows:
+            return f"Asset `{asset_id}` has no recorded service history. Total completed service cost: *0.00*."
+        lines = [f"*Service history — {asset_id}*", f"• Total completed service cost: *{total:.2f}*"]
+        for case in rows[:50]:
+            lines.append(f"• `{case.service_id}` *{case.service_type}* — {case.status} — supplier `{case.supplier_id or '—'}` — cost {case.cost:.2f} — outcome `{case.outcome or '—'}`")
+        return "\n".join(lines)
+
+    def _service_event_history(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"service events (\S+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        service_id = match.group(1)
+        events = self.service_history.events(service_id)
+        lines = [f"*Service events — {service_id}*"]
+        for event in events:
+            lines.append(f"• `{event.at.isoformat()}` — *{event.action}* by `{event.actor}` — {event.detail or '—'}")
+        return "\n".join(lines)
+
+    def _service_detail(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"service (\S+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        case = self.service_history.get(match.group(1))
+        if case is None:
+            raise InventoryDomainError(f"Unknown service case: {match.group(1)}")
+        completed = case.completed_at.isoformat() if case.completed_at else "—"
+        return (f"*Service case {case.service_id}*\n• Asset: `{case.asset_id}`\n• Type: *{case.service_type}*\n• Status: *{case.status}*\n• Supplier: `{case.supplier_id or '—'}`\n• Reference: `{case.external_reference or '—'}`\n• Opened: `{case.opened_at.isoformat()}` by `{case.opened_by}`\n• Completed: `{completed}` by `{case.completed_by or '—'}`\n• Outcome: `{case.outcome or '—'}`\n• Cost: *{case.cost:.2f}*\n• Note: {case.note or '—'}")
+
+    def _service_complete(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"complete service (\S+) outcome (.+?)(?: cost ([0-9]+(?:\.[0-9]+)?))?(?: note (.+))?", text, re.IGNORECASE)
+        if not match:
+            return None
+        service_id, outcome, cost, note = match.groups()
+        case = self.service_history.complete(service_id, actor=actor, outcome=outcome, cost=float(cost or 0), note=note or "")
+        return f"Completed service case `{case.service_id}` for `{case.asset_id}`. Outcome: *{case.outcome}* | Cost: *{case.cost:.2f}*."
+
+    def _service_cancel(self, text: str, actor: str) -> str | None:
+        match = re.fullmatch(r"cancel service (\S+) note (.+)", text, re.IGNORECASE)
+        if not match:
+            return None
+        service_id, note = match.groups()
+        case = self.service_history.cancel(service_id, actor=actor, note=note)
+        return f"Cancelled service case `{case.service_id}` for asset `{case.asset_id}`."
 
     def _asset_status(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"status asset (\S+)", text, re.IGNORECASE)
@@ -424,22 +370,9 @@ class InventoryCommandService:
             raise InventoryDomainError(f"Unknown serialized asset: {match.group(1)}")
         allocation = asset.allocation_type.value if asset.allocation_type else "none"
         due = asset.return_due_at.date().isoformat() if asset.return_due_at else "—"
-        location = asset.location_id or "—"
         location_record = self.locations.get(asset.location_id) if asset.location_id else None
-        location_text = location
-        if location_record:
-            location_text = f"{location_record.location_id} ({location_record.name})"
-        return (
-            f"*Asset {asset.asset_id}*\n"
-            f"• SKU: `{asset.sku}`\n"
-            f"• Serial: `{asset.serial_number}`\n"
-            f"• Status: *{asset.status.value}*\n"
-            f"• Location: `{location_text}`\n"
-            f"• Assigned to: `{asset.assigned_to or '—'}`\n"
-            f"• Customer: `{asset.customer_ref or '—'}`\n"
-            f"• Allocation: `{allocation}`\n"
-            f"• Return due: `{due}`"
-        )
+        location_text = f"{location_record.location_id} ({location_record.name})" if location_record else (asset.location_id or "—")
+        return f"*Asset {asset.asset_id}*\n• SKU: `{asset.sku}`\n• Serial: `{asset.serial_number}`\n• Status: *{asset.status.value}*\n• Location: `{location_text}`\n• Assigned to: `{asset.assigned_to or '—'}`\n• Customer: `{asset.customer_ref or '—'}`\n• Allocation: `{allocation}`\n• Return due: `{due}`"
 
     def _stock_status(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"stock (\S+) at (\S+)", text, re.IGNORECASE)
@@ -453,12 +386,7 @@ class InventoryCommandService:
         on_hand = self.repository.stock_on_hand(item.sku, location_record.location_id)
         available = self.stock.available(item.sku, location_record.location_id)
         reserved = on_hand - available
-        return (
-            f"*Stock {item.sku} @ {location_record.location_id}*\n"
-            f"• On hand: *{on_hand}*\n"
-            f"• Reserved: *{reserved}*\n"
-            f"• Available: *{available}*"
-        )
+        return f"*Stock {item.sku} @ {location_record.location_id}*\n• On hand: *{on_hand}*\n• Reserved: *{reserved}*\n• Available: *{available}*"
 
     def _low_stock(self, text: str, actor: str) -> str | None:
         if text.lower() != "low stock":
@@ -469,10 +397,7 @@ class InventoryCommandService:
         lines = ["*Low stock*"]
         for row in rows[:30]:
             available = int(row["on_hand"]) - int(row["reserved"])
-            lines.append(
-                f"• `{row['sku']}` @ `{row['location_id']}` — available {available}; "
-                f"reorder point {row['reorder_point']}; suggested order {row['reorder_quantity']}"
-            )
+            lines.append(f"• `{row['sku']}` @ `{row['location_id']}` — available {available}; reorder point {row['reorder_point']}; suggested order {row['reorder_quantity']}")
         return "\n".join(lines)
 
     def _asset_store(self, text: str, actor: str) -> str | None:
@@ -484,38 +409,16 @@ class InventoryCommandService:
         return f"Stored `{asset.asset_id}` at `{asset.location_id}`. Status: *{asset.status.value}*."
 
     def _asset_issue(self, text: str, actor: str) -> str | None:
-        loan = re.fullmatch(
-            r"issue asset (\S+) to (\S+) customer (\S+) loan until (\d{4}-\d{2}-\d{2})",
-            text,
-            re.IGNORECASE,
-        )
+        loan = re.fullmatch(r"issue asset (\S+) to (\S+) customer (\S+) loan until (\d{4}-\d{2}-\d{2})", text, re.IGNORECASE)
         if loan:
             asset_id, assignee, customer, due = loan.groups()
-            asset = self.assets.issue(
-                asset_id,
-                assigned_to=assignee,
-                customer_ref=customer,
-                allocation_type=AllocationType.LOAN,
-                return_due_at=datetime.fromisoformat(due),
-                actor=actor,
-            )
+            asset = self.assets.issue(asset_id, assigned_to=assignee, customer_ref=customer, allocation_type=AllocationType.LOAN, return_due_at=datetime.fromisoformat(due), actor=actor)
             return f"Issued `{asset.asset_id}` to `{assignee}` as a loan until `{due}`."
-
-        dedicated = re.fullmatch(
-            r"issue asset (\S+) to (\S+) customer (\S+) dedicated",
-            text,
-            re.IGNORECASE,
-        )
+        dedicated = re.fullmatch(r"issue asset (\S+) to (\S+) customer (\S+) dedicated", text, re.IGNORECASE)
         if not dedicated:
             return None
         asset_id, assignee, customer = dedicated.groups()
-        asset = self.assets.issue(
-            asset_id,
-            assigned_to=assignee,
-            customer_ref=customer,
-            allocation_type=AllocationType.DEDICATED,
-            actor=actor,
-        )
+        asset = self.assets.issue(asset_id, assigned_to=assignee, customer_ref=customer, allocation_type=AllocationType.DEDICATED, actor=actor)
         return f"Issued `{asset.asset_id}` to `{assignee}` as a dedicated asset."
 
     def _asset_return(self, text: str, actor: str) -> str | None:
@@ -560,54 +463,27 @@ class InventoryCommandService:
         return f"Disposed `{asset.asset_id}`."
 
     def _stock_reserve(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"reserve stock (\S+) (\d+) at (\S+) for (\S+)", text, re.IGNORECASE
-        )
+        match = re.fullmatch(r"reserve stock (\S+) (\d+) at (\S+) for (\S+)", text, re.IGNORECASE)
         if not match:
             return None
         sku, quantity, location_id, customer = match.groups()
         item = self.items.require_active(sku)
         location = self.locations.require_active(location_id)
-        reservation = self.stock.reserve(
-            sku=item.sku,
-            location_id=location.location_id,
-            quantity=int(quantity),
-            customer_ref=customer,
-            requested_by=actor,
-        )
-        return (
-            f"Reserved *{quantity}* × `{item.sku}` at `{location.location_id}` for `{customer}`.\n"
-            f"Reservation: `{reservation.reservation_id}`"
-        )
+        reservation = self.stock.reserve(sku=item.sku, location_id=location.location_id, quantity=int(quantity), customer_ref=customer, requested_by=actor)
+        return f"Reserved *{quantity}* × `{item.sku}` at `{location.location_id}` for `{customer}`.\nReservation: `{reservation.reservation_id}`"
 
     def _stock_issue(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"issue stock (\S+) (\d+) from (\S+) to (\S+)(?: reservation (\S+))?",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.fullmatch(r"issue stock (\S+) (\d+) from (\S+) to (\S+)(?: reservation (\S+))?", text, re.IGNORECASE)
         if not match:
             return None
         sku, quantity, location_id, customer, reservation = match.groups()
         item = self.items.require_active(sku)
         location = self.locations.require_active(location_id)
-        tx = self.stock.issue(
-            sku=item.sku,
-            location_id=location.location_id,
-            quantity=int(quantity),
-            customer_ref=customer,
-            actor=actor,
-            reservation_id=reservation or "",
-        )
-        return (
-            f"Issued *{quantity}* × `{item.sku}` from `{location.location_id}` to `{customer}`. "
-            f"Transaction `{tx}`."
-        )
+        tx = self.stock.issue(sku=item.sku, location_id=location.location_id, quantity=int(quantity), customer_ref=customer, actor=actor, reservation_id=reservation or "")
+        return f"Issued *{quantity}* × `{item.sku}` from `{location.location_id}` to `{customer}`. Transaction `{tx}`."
 
     def _stock_return(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"return stock (\S+) (\d+) to (\S+) from (\S+)", text, re.IGNORECASE
-        )
+        match = re.fullmatch(r"return stock (\S+) (\d+) to (\S+) from (\S+)", text, re.IGNORECASE)
         if not match:
             return None
         sku, quantity, location_id, customer = match.groups()
@@ -615,39 +491,19 @@ class InventoryCommandService:
         if item is None:
             raise InventoryDomainError(f"Unknown inventory SKU: {sku}")
         location = self.locations.require_active(location_id)
-        tx = self.stock.return_stock(
-            sku=item.sku,
-            location_id=location.location_id,
-            quantity=int(quantity),
-            customer_ref=customer,
-            actor=actor,
-        )
-        return (
-            f"Returned *{quantity}* × `{item.sku}` to `{location.location_id}`. "
-            f"Transaction `{tx}`."
-        )
+        tx = self.stock.return_stock(sku=item.sku, location_id=location.location_id, quantity=int(quantity), customer_ref=customer, actor=actor)
+        return f"Returned *{quantity}* × `{item.sku}` to `{location.location_id}`. Transaction `{tx}`."
 
     def _stock_transfer(self, text: str, actor: str) -> str | None:
-        match = re.fullmatch(
-            r"transfer stock (\S+) (\d+) from (\S+) to (\S+)", text, re.IGNORECASE
-        )
+        match = re.fullmatch(r"transfer stock (\S+) (\d+) from (\S+) to (\S+)", text, re.IGNORECASE)
         if not match:
             return None
         sku, quantity, source_id, destination_id = match.groups()
         item = self.items.require_active(sku)
         source = self.locations.require_active(source_id)
         destination = self.locations.require_active(destination_id)
-        tx = self.stock.transfer(
-            sku=item.sku,
-            from_location=source.location_id,
-            to_location=destination.location_id,
-            quantity=int(quantity),
-            actor=actor,
-        )
-        return (
-            f"Transferred *{quantity}* × `{item.sku}` from `{source.location_id}` to "
-            f"`{destination.location_id}`. Transaction `{tx}`."
-        )
+        tx = self.stock.transfer(sku=item.sku, from_location=source.location_id, to_location=destination.location_id, quantity=int(quantity), actor=actor)
+        return f"Transferred *{quantity}* × `{item.sku}` from `{source.location_id}` to `{destination.location_id}`. Transaction `{tx}`."
 
     def _stock_count(self, text: str, actor: str) -> str | None:
         match = re.fullmatch(r"count stock (\S+) at (\S+) = (\d+)", text, re.IGNORECASE)
@@ -658,13 +514,5 @@ class InventoryCommandService:
         if item is None:
             raise InventoryDomainError(f"Unknown inventory SKU: {sku}")
         location = self.locations.require_active(location_id)
-        result = self.stock.count_and_reconcile(
-            sku=item.sku,
-            location_id=location.location_id,
-            counted_quantity=int(counted),
-            actor=actor,
-        )
-        return (
-            f"Counted `{item.sku}` at `{location.location_id}`: expected *{result.expected}*, "
-            f"counted *{result.counted}*, variance *{result.variance:+d}*."
-        )
+        result = self.stock.count_and_reconcile(sku=item.sku, location_id=location.location_id, counted_quantity=int(counted), actor=actor)
+        return f"Counted `{item.sku}` at `{location.location_id}`: expected *{result.expected}*, counted *{result.counted}*, variance *{result.variance:+d}*."
