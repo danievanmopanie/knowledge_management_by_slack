@@ -67,8 +67,10 @@ def test_open_assign_note_close_found_investigation(tmp_path):
     assert item.status == "closed"
     assert item.outcome == "found"
     assert item.owner == "U-MGR"
+    assert item.opened_by == "tech"
     assert [event.action for event in service.events(investigation_id)] == [
         "opened",
+        "assigned",
         "assigned",
         "note",
         "closed",
