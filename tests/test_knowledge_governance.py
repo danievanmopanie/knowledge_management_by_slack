@@ -28,7 +28,6 @@ class FakeVectorStore:
 
 def test_upload_validation_rejects_unsupported_and_oversized(monkeypatch):
     monkeypatch.setattr("src.knowledge.file_loader.settings.max_upload_bytes", 100)
-
     with pytest.raises(UploadValidationError):
         validate_slack_file({"id": "F1", "name": "malware.exe", "size": 10})
     with pytest.raises(UploadValidationError):
@@ -53,7 +52,6 @@ def test_staging_does_not_create_catalogue_entry(tmp_path: Path):
         uploader_id="U1",
         channel_id="C1",
     )
-
     assert staging.get(stage_id)["status"] == "staged"
     assert catalog.get_document("doc_nonexistent") is None
 
@@ -62,7 +60,6 @@ def test_catalogued_ingest_is_idempotent_and_versions_changes(tmp_path: Path):
     db = tmp_path / "platform.db"
     catalog = KnowledgeCatalog(db)
     vectors = FakeVectorStore()
-
     first = commit_knowledge(
         text="Reset VPN by restarting the client.",
         title="VPN Runbook",
@@ -72,7 +69,6 @@ def test_catalogued_ingest_is_idempotent_and_versions_changes(tmp_path: Path):
         vector_store=vectors,
     )
     added_after_first = list(vectors.added)
-
     second = commit_knowledge(
         text="Reset VPN by restarting the client.",
         title="VPN Runbook",
@@ -97,20 +93,35 @@ def test_catalogued_ingest_is_idempotent_and_versions_changes(tmp_path: Path):
     assert third["version_id"] != first["version_id"]
 
 
-def test_restricted_acl_denies_by_default_and_allows_explicit_identity():
+def test_restricted_acl_denies_by_default_and_supports_identity_scope():
     restricted = {
         "visibility": "restricted",
         "allowed_user_ids": "U-ALLOWED",
         "allowed_channel_ids": "C-SECURE",
+        "allowed_roles": "knowledge-owner",
+        "allowed_groups": "frontend-support",
+        "allowed_sites": "Amandelbult",
     }
     denied = RequestContext.from_slack(channel_id="C-OTHER", user_id="U-DENIED")
     allowed_user = RequestContext.from_slack(channel_id="C-OTHER", user_id="U-ALLOWED")
     allowed_channel = RequestContext.from_slack(channel_id="C-SECURE", user_id="U-DENIED")
+    allowed_role = RequestContext.from_slack(
+        channel_id="C-OTHER", user_id="U2", roles=["knowledge-owner"]
+    )
+    allowed_group = RequestContext.from_slack(
+        channel_id="C-OTHER", user_id="U3", groups=["frontend-support"]
+    )
+    allowed_site = RequestContext.from_slack(
+        channel_id="C-OTHER", user_id="U4", site="Amandelbult"
+    )
 
     assert can_read(restricted, None) is False
     assert can_read(restricted, denied) is False
     assert can_read(restricted, allowed_user) is True
     assert can_read(restricted, allowed_channel) is True
+    assert can_read(restricted, allowed_role) is True
+    assert can_read(restricted, allowed_group) is True
+    assert can_read(restricted, allowed_site) is True
     assert can_read({"visibility": "internal"}, denied) is True
 
 
@@ -131,7 +142,6 @@ def test_audit_events_are_durable_and_queryable(tmp_path: Path):
         target_id="doc-1",
         metadata={"chunks": 3},
     )
-
     by_request = audit.by_request("req-123")
     by_actor = audit.by_actor("U1")
     assert len(by_request) == 1
