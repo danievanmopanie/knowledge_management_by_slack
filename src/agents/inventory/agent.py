@@ -11,6 +11,7 @@ from src.core.errors import safe_error_message
 from src.inventory.assisted_receiving import AssistedReceivingWorkflow
 from src.inventory.commands import InventoryCommandService
 from src.inventory.domain import InventoryDomainError
+from src.inventory.overview import InventoryOverviewService
 from src.inventory.po_intake import PurchaseOrderIntakeWorkflow
 from src.inventory.stock_reconciliation import StockReconciliationWorkflow
 from src.knowledge.file_loader import UploadValidationError, download_slack_file
@@ -18,6 +19,10 @@ from src.knowledge.file_loader import UploadValidationError, download_slack_file
 logger = logging.getLogger(__name__)
 
 HELP = """*Inventory Agent*
+
+*Operations overview*
+• `inventory summary`
+• `overdue loans`
 
 *Storage locations*
 • `create location SITE-A type site site SITE-A name Main Site`
@@ -68,7 +73,7 @@ Then use `confirm receipt RCV-...` or `cancel receipt RCV-...`.
 • `transfer stock MOUSE-01 10 from STORE-A to STORE-B`
 
 *Physical stock counts*
-`count stock` now stages the variance before changing the ledger:
+`count stock` stages the variance before changing the ledger:
 • `count stock MOUSE-01 at STORE-A = 97`
 • `pending counts`
 • `pending counts at STORE-A`
@@ -99,6 +104,7 @@ class InventoryAgent(BaseAgent):
         self.receiving = AssistedReceivingWorkflow()
         self.po_intake = PurchaseOrderIntakeWorkflow()
         self.stock_counts = StockReconciliationWorkflow(self.commands.repository)
+        self.overview = InventoryOverviewService(self.commands.repository)
 
     async def handle(self, message: str, context: RequestContext) -> str:
         text = (message or "").strip()
@@ -109,6 +115,10 @@ class InventoryAgent(BaseAgent):
             return HELP
 
         try:
+            if text.lower() == "inventory summary":
+                return self._inventory_summary()
+            if text.lower() == "overdue loans":
+                return self._overdue_loans()
             if match := CONFIRM_RECEIPT_RE.match(text):
                 return self.receiving.confirm(match.group("receipt"), actor=actor)
             if match := CANCEL_RECEIPT_RE.match(text):
@@ -206,3 +216,32 @@ class InventoryAgent(BaseAgent):
         except Exception:
             logger.exception("Inventory operation failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
+
+    def _inventory_summary(self) -> str:
+        summary = self.overview.snapshot()
+        return (
+            "*Inventory operational summary*\n"
+            f"• Active locations: *{summary.active_locations}*\n"
+            f"• Open / partially received POs: *{summary.open_purchase_orders}*\n"
+            f"• Serialized assets: *{summary.serialized_assets}* (issued: *{summary.issued_assets}*)\n"
+            f"• Quantity stock on hand: *{summary.stock_units_on_hand}* "
+            f"(reserved: *{summary.stock_units_reserved}*)\n"
+            f"• Low-stock positions: *{summary.low_stock_positions}*\n"
+            f"• Open receiving exceptions: *{summary.open_exceptions}*\n"
+            f"• Overdue loans: *{summary.overdue_loans}* | Due in 7 days: *{summary.due_soon_loans}*\n"
+            f"• Awaiting confirmation — POs: *{summary.pending_purchase_orders}*, "
+            f"receipts: *{summary.pending_receipts}*, stock counts: *{summary.pending_stock_counts}*"
+        )
+
+    def _overdue_loans(self) -> str:
+        rows = self.overview.overdue_loans()
+        if not rows:
+            return "No serialized loan assets are currently overdue."
+        lines = ["*Overdue asset loans*"]
+        for item in rows:
+            lines.append(
+                f"• `{item.asset_id}` / `{item.sku}` — `{item.assigned_to or '—'}` "
+                f"customer `{item.customer_ref or '—'}` — due `{item.due_at.date().isoformat()}` "
+                f"(*{item.days_overdue} day(s) overdue*)"
+            )
+        return "\n".join(lines)
