@@ -1,6 +1,6 @@
 """Routing tests for typed request context."""
 
-import pytest
+import asyncio
 
 from src.bot import router
 from src.core.context import RequestContext
@@ -13,8 +13,7 @@ class FakeAgent:
         return f"{context.request_id}:{message}"
 
 
-@pytest.mark.asyncio
-async def test_route_message_passes_typed_context(monkeypatch):
+def test_route_message_passes_typed_context(monkeypatch):
     monkeypatch.setattr(router, "_channel_to_agent", lambda _channel: FakeAgent())
     context = RequestContext.from_slack(
         channel_id="C123",
@@ -22,6 +21,6 @@ async def test_route_message_passes_typed_context(monkeypatch):
         request_id="req123",
     )
 
-    result = await router.route_message("hello", context)
+    result = asyncio.run(router.route_message("hello", context))
 
     assert result == "req123:hello"
