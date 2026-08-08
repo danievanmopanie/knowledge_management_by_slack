@@ -1,13 +1,12 @@
-"""Incident records used by daily/weekly Frontend Support reports.
+"""Incident records used by daily/weekly Frontend Support reports and Incident RAG.
 
 Data can come from:
 1. Uploaded CSV files in data/raw (or ingested knowledge)
 2. A local JSON/CSV incident export drop-zone
 3. Future live ServiceNow integration
 
-Expected CSV columns (flexible matching):
-  number, short_description, description, state, assignment_group,
-  assigned_to, caller, location, opened_at, resolved_at, category, subcategory
+Expected free-text columns (flexible matching):
+  short_description, description, work_notes, comments, resolution_notes
 """
 
 from __future__ import annotations
@@ -26,10 +25,50 @@ logger = logging.getLogger(__name__)
 # Common column name aliases from ServiceNow / ITSM exports
 COLUMN_ALIASES = {
     "number": ["number", "incident", "incident_number", "ticket", "id"],
-    "short_description": ["short_description", "short description", "summary", "title"],
-    "description": ["description", "details", "work_notes"],
+    "short_description": [
+        "short_description",
+        "short description",
+        "summary",
+        "title",
+    ],
+    "description": [
+        "description",
+        "details",
+        "issue description",
+        "problem description",
+    ],
+    "work_notes": [
+        "work_notes",
+        "work notes",
+        "work_note",
+        "internal notes",
+        "activity",
+    ],
+    "comments": [
+        "comments",
+        "additional_comments",
+        "additional comments",
+        "customer comments",
+        "public comments",
+        "comment",
+    ],
+    "resolution_notes": [
+        "resolution_notes",
+        "resolution notes",
+        "close_notes",
+        "close notes",
+        "resolve_notes",
+        "resolution",
+        "resolution_description",
+        "closed notes",
+    ],
     "state": ["state", "status"],
-    "assignment_group": ["assignment_group", "assignment group", "group", "assigned_group"],
+    "assignment_group": [
+        "assignment_group",
+        "assignment group",
+        "group",
+        "assigned_group",
+    ],
     "assigned_to": ["assigned_to", "assigned to", "assignee", "technician"],
     "caller": ["caller", "caller_id", "requested_for", "user", "employee"],
     "location": ["location", "site", "building", "floor", "office"],
@@ -45,6 +84,9 @@ class Incident:
     number: str
     short_description: str = ""
     description: str = ""
+    work_notes: str = ""
+    comments: str = ""
+    resolution_notes: str = ""
     state: str = ""
     assignment_group: str = ""
     assigned_to: str = ""
@@ -55,6 +97,16 @@ class Incident:
     category: str = ""
     subcategory: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def free_text_fields(self) -> dict[str, str]:
+        """Return the free-text columns used for embedding."""
+        return {
+            "short_description": self.short_description or "",
+            "description": self.description or "",
+            "work_notes": self.work_notes or "",
+            "comments": self.comments or "",
+            "resolution_notes": self.resolution_notes or "",
+        }
 
 
 def _norm(s: str) -> str:
@@ -111,6 +163,7 @@ def load_incidents_from_csv(path: Path) -> list[Incident]:
             return []
 
         for row in reader:
+
             def get(field: str) -> str:
                 col = mapping.get(field)
                 return (row.get(col) or "").strip() if col else ""
@@ -121,6 +174,9 @@ def load_incidents_from_csv(path: Path) -> list[Incident]:
                     number=number,
                     short_description=get("short_description"),
                     description=get("description"),
+                    work_notes=get("work_notes"),
+                    comments=get("comments"),
+                    resolution_notes=get("resolution_notes"),
                     state=get("state"),
                     assignment_group=get("assignment_group"),
                     assigned_to=get("assigned_to"),
@@ -140,7 +196,7 @@ def load_all_incidents(
     search_dirs: Iterable[Path] | None = None,
 ) -> list[Incident]:
     """Load incidents from CSV files in raw docs / incidents drop zone."""
-    dirs = list(search_dirs or [settings.raw_docs_path, Path("./data/incidents")])
+    dirs = list(search_dirs or [settings.raw_docs_path, settings.incidents_path])
     all_incidents: list[Incident] = []
     seen_numbers: set[str] = set()
 
@@ -152,7 +208,6 @@ def load_all_incidents(
             try:
                 batch = load_incidents_from_csv(path)
                 for inc in batch:
-                    # Prefer latest occurrence of same number
                     if inc.number in seen_numbers:
                         continue
                     seen_numbers.add(inc.number)
