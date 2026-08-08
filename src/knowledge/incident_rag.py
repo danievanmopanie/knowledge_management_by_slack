@@ -10,6 +10,12 @@ from langchain_core.documents import Document
 
 from src.core.config import settings
 from src.knowledge.graphstore import GraphStore
+from src.knowledge.incident_dedupe import (
+    content_hash,
+    filter_changed_incidents,
+    load_hash_index,
+    save_hash_index,
+)
 from src.knowledge.vectorstore import VectorStore
 from src.reporting.incidents import Incident, load_all_incidents
 
@@ -113,6 +119,7 @@ def _incident_metadata(inc: Incident) -> dict[str, Any]:
         "location": inc.location or "",
         "category": inc.category or "",
         "subcategory": inc.subcategory or "",
+        "content_hash": content_hash(inc),
         "has_work_notes": bool(_clean(inc.work_notes)),
         "has_comments": bool(_clean(inc.comments)),
         "has_resolution_notes": bool(_clean(inc.resolution_notes)),
@@ -154,6 +161,9 @@ class IncidentRAG:
 
     Free-text embedded: Short Description, Description, Work Notes,
     Comments, Resolution Notes.
+
+    Daily CSV uploads: content-hash dedupe skips unchanged rows so we do not
+    re-embed identical ServiceNow exports.
     """
 
     def __init__(
@@ -167,13 +177,43 @@ class IncidentRAG:
         )
         self.graph_store = graph_store or GraphStore()
 
-    def index_incidents(self, incidents: Iterable[Incident]) -> dict[str, int]:
-        """Embed and store incidents in batches (safe for large CSVs)."""
+    def index_incidents(
+        self,
+        incidents: Iterable[Incident],
+        *,
+        force: bool = False,
+    ) -> dict[str, int]:
+        """
+        Embed and store incidents in batches.
+
+        By default only new or changed rows are embedded (content-hash check).
+        Pass force=True to re-embed everything.
+        """
+        incident_list = list(incidents)
+        if not incident_list:
+            return {
+                "indexed": 0,
+                "skipped_unchanged": 0,
+                "collection_total": self.vector_store.count(),
+            }
+
+        if force:
+            to_index = incident_list
+            skipped = 0
+            index = {inc.number: content_hash(inc) for inc in incident_list}
+            logger.info("Force reindex: %s incidents", len(to_index))
+        else:
+            existing = load_hash_index()
+            to_index, unchanged, index = filter_changed_incidents(
+                incident_list, existing=existing
+            )
+            skipped = len(unchanged)
+
         docs: list[str] = []
         metas: list[dict[str, Any]] = []
         ids: list[str] = []
 
-        for inc in incidents:
+        for inc in to_index:
             text = _incident_to_text(inc)
             if not text.strip():
                 continue
@@ -190,10 +230,11 @@ class IncidentRAG:
                 pass
 
             logger.info(
-                "Indexing %s incidents with model '%s' (batch_size=%s)",
+                "Indexing %s changed incidents with model '%s' (batch_size=%s); skipped %s unchanged",
                 count,
                 settings.incident_embedding_model,
                 settings.incident_embedding_batch_size,
+                skipped,
             )
             self.vector_store.add_documents(
                 docs,
@@ -202,14 +243,25 @@ class IncidentRAG:
                 batch_size=settings.incident_embedding_batch_size,
             )
             self.graph_store.save()
+        else:
+            logger.info(
+                "No changed incidents to embed (skipped %s unchanged)",
+                skipped,
+            )
 
-        logger.info("Indexed %s incidents into incident RAG", count)
-        return {"indexed": count, "collection_total": self.vector_store.count()}
+        # Persist full hash index so tomorrow's export can skip unchanged rows
+        save_hash_index(index)
 
-    def index_from_disk(self) -> dict[str, int]:
+        return {
+            "indexed": count,
+            "skipped_unchanged": skipped,
+            "collection_total": self.vector_store.count(),
+        }
+
+    def index_from_disk(self, force: bool = False) -> dict[str, int]:
         incidents = load_all_incidents()
         logger.info("Loaded %s incidents from disk for reindex", len(incidents))
-        return self.index_incidents(incidents)
+        return self.index_incidents(incidents, force=force)
 
     def similar_incidents(
         self,

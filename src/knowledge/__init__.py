@@ -9,6 +9,7 @@ from .backup import (
 )
 from .file_loader import download_slack_file, extract_text
 from .graphstore import GraphStore
+from .incident_dedupe import content_hash, filter_changed_incidents
 from .incident_rag import IncidentRAG
 from .ingest import ingest_file, ingest_text
 from .retriever import HybridRetriever, RetrievalResult
@@ -20,6 +21,8 @@ __all__ = [
     "HybridRetriever",
     "RetrievalResult",
     "IncidentRAG",
+    "content_hash",
+    "filter_changed_incidents",
     "ingest_text",
     "ingest_file",
     "download_slack_file",
