@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from src.inventory.asset_profile import AssetLifecycleProfileService
 from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import (
     AllocationType,
@@ -52,6 +53,7 @@ class SerializedAssetLifecycleService:
     def __init__(self, repository: InventoryRepository):
         self.repository = repository
         self.customers = CustomerCustodyService(repository)
+        self.profiles = AssetLifecycleProfileService(repository)
 
     def put_away(self, asset_id: str, *, location_id: str, actor: str, note: str = "") -> SerializedAsset:
         if not location_id:
@@ -136,6 +138,10 @@ class SerializedAssetLifecycleService:
         )
 
     def dispose(self, asset_id: str, *, actor: str, note: str = "") -> SerializedAsset:
+        if not self.profiles.can_dispose(asset_id):
+            raise InventoryDomainError(
+                "A retired asset requires disposal evidence before it can be marked disposed."
+            )
         return self._transition(
             asset_id,
             AssetLifecycle.DISPOSED,
