@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 
 HELP = """*Inventory Agent*
 
+*Storage locations*
+Create a governed physical hierarchy before receiving/storing inventory:
+• `create location SITE-A type site site SITE-A name Main Site`
+• `create location STORE-A type storeroom site SITE-A name Main Store parent SITE-A`
+• `create location SHELF-B3 type shelf site SITE-A name Shelf B3 parent STORE-A`
+• `locations site SITE-A`
+• `location path SHELF-B3`
+• `deactivate location SHELF-B3`
+• `activate location SHELF-B3`
+
 *Purchase orders*
 Attach a CSV/PDF/DOCX/text/image PO or quote and type:
 • `create po PO-2026-0001 supplier Dell`
@@ -29,6 +39,7 @@ PO line columns: `line_id, sku, description, quantity, tracking_mode, unit_price
 *Delivery receiving*
 Attach a delivery note/photo and type:
 • `receive PO-2026-0001 at STORE-A`
+The destination must be an active governed inventory location.
 Then use:
 • `confirm receipt RCV-...`
 • `cancel receipt RCV-...`
