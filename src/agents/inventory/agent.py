@@ -12,6 +12,7 @@ from src.inventory.assisted_receiving import AssistedReceivingWorkflow
 from src.inventory.commands import InventoryCommandService
 from src.inventory.domain import InventoryDomainError
 from src.inventory.po_intake import PurchaseOrderIntakeWorkflow
+from src.inventory.stock_reconciliation import StockReconciliationWorkflow
 from src.knowledge.file_loader import UploadValidationError, download_slack_file
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,6 @@ Then use `confirm receipt RCV-...` or `cancel receipt RCV-...`.
 • `resolve exception 42 as supplier_replacement note Supplier will replace next week`
 • `reopen exception 42 note Replacement did not arrive`
 • `exception history 42`
-Resolution types: `supplier_replacement`, `supplier_credit`, `accepted_variance`,
-`returned_to_supplier`, `document_corrected`, `investigated_no_action`, `other`.
 
 *Serialized assets*
 • `status asset A-1042`
@@ -67,7 +66,14 @@ Resolution types: `supplier_replacement`, `supplier_credit`, `accepted_variance`
 • `issue stock MOUSE-01 5 from STORE-A to EMP-42`
 • `return stock MOUSE-01 2 to STORE-A from EMP-42`
 • `transfer stock MOUSE-01 10 from STORE-A to STORE-B`
+
+*Physical stock counts*
+`count stock` now stages the variance before changing the ledger:
 • `count stock MOUSE-01 at STORE-A = 97`
+• `pending counts`
+• `pending counts at STORE-A`
+• `confirm count CNT-...`
+• `cancel count CNT-...`
 """
 
 RECEIVE_RE = re.compile(r"^receive\s+(?P<po>\S+)\s+at\s+(?P<location>\S+)$", re.I)
@@ -76,6 +82,13 @@ CANCEL_RECEIPT_RE = re.compile(r"^cancel\s+receipt\s+(?P<receipt>\S+)$", re.I)
 CREATE_PO_RE = re.compile(r"^create\s+po\s+(?P<po>\S+)\s+supplier\s+(?P<supplier>.+)$", re.I)
 CONFIRM_PO_RE = re.compile(r"^confirm\s+po\s+(?P<stage>\S+)$", re.I)
 CANCEL_PO_RE = re.compile(r"^cancel\s+po\s+(?P<stage>\S+)$", re.I)
+STAGE_COUNT_RE = re.compile(
+    r"^count\s+stock\s+(?P<sku>\S+)\s+at\s+(?P<location>\S+)\s*=\s*(?P<count>\d+)$",
+    re.I,
+)
+CONFIRM_COUNT_RE = re.compile(r"^confirm\s+count\s+(?P<count>\S+)$", re.I)
+CANCEL_COUNT_RE = re.compile(r"^cancel\s+count\s+(?P<count>\S+)$", re.I)
+PENDING_COUNTS_RE = re.compile(r"^pending\s+counts(?:\s+at\s+(?P<location>\S+))?$", re.I)
 
 
 class InventoryAgent(BaseAgent):
@@ -85,6 +98,7 @@ class InventoryAgent(BaseAgent):
         self.commands = InventoryCommandService()
         self.receiving = AssistedReceivingWorkflow()
         self.po_intake = PurchaseOrderIntakeWorkflow()
+        self.stock_counts = StockReconciliationWorkflow(self.commands.repository)
 
     async def handle(self, message: str, context: RequestContext) -> str:
         text = (message or "").strip()
@@ -103,6 +117,52 @@ class InventoryAgent(BaseAgent):
                 return self.po_intake.confirm(match.group("stage"), actor=actor)
             if match := CANCEL_PO_RE.match(text):
                 return self.po_intake.cancel(match.group("stage"), actor=actor)
+            if match := CONFIRM_COUNT_RE.match(text):
+                count = self.stock_counts.confirm(match.group("count"), actor=actor)
+                return (
+                    f"Confirmed stock count `{count.count_id}` for `{count.sku}` at "
+                    f"`{count.location_id}`. Ledger adjusted from *{count.expected_on_hand}* "
+                    f"to *{count.counted_quantity}* (variance *{count.variance:+d}*)."
+                )
+            if match := CANCEL_COUNT_RE.match(text):
+                count = self.stock_counts.cancel(match.group("count"), actor=actor)
+                return (
+                    f"Cancelled stock count `{count.count_id}`. "
+                    "The inventory ledger was not changed."
+                )
+            if match := PENDING_COUNTS_RE.match(text):
+                location_id = match.group("location") or ""
+                if location_id:
+                    location_id = self.commands.locations.require_active(location_id).location_id
+                rows = self.stock_counts.list_pending(location_id=location_id)
+                if not rows:
+                    return "No stock counts are awaiting confirmation."
+                lines = ["*Pending stock counts*"]
+                for item in rows[:50]:
+                    lines.append(
+                        f"• `{item.count_id}` — `{item.sku}` @ `{item.location_id}`: "
+                        f"ledger {item.expected_on_hand}, counted {item.counted_quantity}, "
+                        f"variance {item.variance:+d}"
+                    )
+                return "\n".join(lines)
+            if match := STAGE_COUNT_RE.match(text):
+                location = self.commands.locations.require_active(match.group("location"))
+                staged = self.stock_counts.stage(
+                    sku=match.group("sku"),
+                    location_id=location.location_id,
+                    counted_quantity=int(match.group("count")),
+                    actor=actor,
+                )
+                return (
+                    f"*Stock count staged* `{staged.count_id}`\n"
+                    f"• SKU/location: `{staged.sku}` @ `{staged.location_id}`\n"
+                    f"• Ledger on hand: *{staged.expected_on_hand}*\n"
+                    f"• Reserved: *{staged.expected_reserved}*\n"
+                    f"• Physical count: *{staged.counted_quantity}*\n"
+                    f"• Variance: *{staged.variance:+d}*\n"
+                    "No stock has changed. "
+                    f"Use `confirm count {staged.count_id}` or `cancel count {staged.count_id}`."
+                )
 
             if context.files:
                 if len(context.files) != 1:
