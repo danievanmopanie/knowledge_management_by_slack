@@ -129,17 +129,11 @@ def test_count_reconciliation_and_low_stock(tmp_path):
     assert low[0]["reorder_quantity"] == 20
 
 
-def test_reservation_and_balance_update_are_atomic(tmp_path, monkeypatch):
+def test_reservation_and_balance_update_are_atomic(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     service = QuantityStockService(repo)
     seed_stock(repo, quantity=10)
 
-    real_connect = repo._connect
-
-    class FailingConnection:
-        pass
-
-    # Simpler transactional failure proof: force the reservation insert itself to fail.
     with repo.transaction() as conn:
         conn.execute(
             "CREATE TRIGGER fail_reservation BEFORE INSERT ON inventory_stock_reservations "
@@ -156,4 +150,3 @@ def test_reservation_and_balance_update_are_atomic(tmp_path, monkeypatch):
         )
 
     assert service.available("MOUSE-01", "STORE-A") == 10
-    monkeypatch.setattr(repo, "_connect", real_connect)
