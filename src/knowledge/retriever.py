@@ -1,49 +1,20 @@
-"""Hybrid RAG retriever with access-controlled vector results."""
+"""Governed retrieval service with access-controlled vector and graph results."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
-
-from langchain_core.documents import Document
 
 from src.core.audit import AuditStore
 from src.core.context import RequestContext
 from src.knowledge.graphstore import GraphStore
+from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery, RetrievalResult
 from src.knowledge.vectorstore import VectorStore
 from src.security.access import can_read
 
 
-@dataclass
-class RetrievalResult:
-    documents: list[Document] = field(default_factory=list)
-    graph_context: list[dict[str, Any]] = field(default_factory=list)
-    query: str = ""
-
-    def to_context_string(self, max_chars: int = 6000) -> str:
-        parts: list[str] = []
-        if self.documents:
-            parts.append("### Relevant Knowledge Articles & Notes")
-            for i, doc in enumerate(self.documents, 1):
-                source = doc.metadata.get("source", "unknown")
-                score = doc.metadata.get("score")
-                header = f"[{i}] Source: {source}"
-                if score is not None:
-                    header += f" (relevance: {score:.2f})"
-                parts.extend([header, doc.page_content.strip(), ""])
-        if self.graph_context:
-            parts.append("### Related Entities & Relationships")
-            for item in self.graph_context:
-                parts.append(
-                    f"- ({item.get('relation', 'related_to')}) {item.get('entity')} "
-                    f"[{item.get('type', 'entity')}]"
-                )
-            parts.append("")
-        text = "\n".join(parts).strip()
-        return text if len(text) <= max_chars else text[:max_chars] + "\n\n[Context truncated]"
-
-
 class HybridRetriever:
+    """Single deterministic entry point for governed knowledge retrieval."""
+
     def __init__(
         self,
         vector_store: VectorStore | None = None,
@@ -54,6 +25,40 @@ class HybridRetriever:
         self.graph_store = graph_store or GraphStore()
         self.audit_store = audit_store or AuditStore()
 
+    def search(self, request: RetrievalQuery) -> RetrievalResult:
+        raw = self.vector_store.similarity_search(
+            request.text,
+            k=max(request.limit * 5, request.limit),
+            where=request.where,
+        )
+        allowed = [doc for doc in raw if can_read(doc.metadata, request.context)]
+        selected = allowed[: request.limit]
+        candidates = [
+            RetrievalCandidate.from_document(document, rank)
+            for rank, document in enumerate(selected, 1)
+        ]
+
+        if request.context is not None:
+            self.audit_store.record(
+                request.context,
+                action="knowledge.retrieve",
+                outcome="success",
+                target_type="knowledge",
+                metadata={
+                    "candidate_count": len(raw),
+                    "returned_count": len(candidates),
+                    "denied_count": len(raw) - len(allowed),
+                    "evidence_ids": [candidate.evidence_id for candidate in candidates],
+                },
+            )
+
+        graph_context = self._graph_context(request, selected)
+        return RetrievalResult(
+            candidates=candidates,
+            graph_context=graph_context,
+            query=request.text,
+        )
+
     def retrieve(
         self,
         query: str,
@@ -62,37 +67,36 @@ class HybridRetriever:
         where: dict | None = None,
         context: RequestContext | None = None,
     ) -> RetrievalResult:
-        candidates = self.vector_store.similarity_search(query, k=max(k * 5, k), where=where)
-        documents = [doc for doc in candidates if can_read(doc.metadata, context)][:k]
-
-        if context is not None:
-            self.audit_store.record(
-                context,
-                action="knowledge.retrieve",
-                outcome="success",
-                target_type="knowledge",
-                metadata={
-                    "candidate_count": len(candidates),
-                    "returned_count": len(documents),
-                    "denied_count": len(candidates) - len([doc for doc in candidates if can_read(doc.metadata, context)]),
-                },
+        """Compatibility wrapper; new callers should construct `RetrievalQuery`."""
+        return self.search(
+            RetrievalQuery(
+                text=query,
+                context=context,
+                limit=k,
+                graph_depth=graph_depth,
+                where=where,
             )
+        )
 
-        graph_context: list[dict[str, Any]] = []
-        candidate_entities = set(self.graph_store.search_entities(query, limit=5))
+    def _graph_context(self, request: RetrievalQuery, documents: list[Any]) -> list[dict[str, Any]]:
+        candidate_entities = set(self.graph_store.search_entities(request.text, limit=5))
         for doc in documents:
             entities = doc.metadata.get("entities") or []
             if isinstance(entities, str):
                 entities = [e.strip() for e in entities.split(",") if e.strip()]
             candidate_entities.update(entities)
+
+        graph_context: list[dict[str, Any]] = []
         for entity in list(candidate_entities)[:8]:
-            graph_context.extend(self.graph_store.get_related(entity, max_depth=graph_depth))
+            graph_context.extend(
+                self.graph_store.get_related(entity, max_depth=request.graph_depth)
+            )
 
         seen: set[tuple[Any, Any]] = set()
-        unique_graph = []
+        unique_graph: list[dict[str, Any]] = []
         for item in graph_context:
             key = (item.get("entity"), item.get("relation"))
             if key not in seen:
                 seen.add(key)
                 unique_graph.append(item)
-        return RetrievalResult(documents=documents, graph_context=unique_graph, query=query)
+        return unique_graph
