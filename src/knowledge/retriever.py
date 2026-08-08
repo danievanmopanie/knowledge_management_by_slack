@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.documents import Document
 
+from src.core.audit import AuditStore
 from src.core.context import RequestContext
 from src.knowledge.graphstore import GraphStore
 from src.knowledge.vectorstore import VectorStore
@@ -43,9 +44,15 @@ class RetrievalResult:
 
 
 class HybridRetriever:
-    def __init__(self, vector_store: VectorStore | None = None, graph_store: GraphStore | None = None):
+    def __init__(
+        self,
+        vector_store: VectorStore | None = None,
+        graph_store: GraphStore | None = None,
+        audit_store: AuditStore | None = None,
+    ):
         self.vector_store = vector_store or VectorStore()
         self.graph_store = graph_store or GraphStore()
+        self.audit_store = audit_store or AuditStore()
 
     def retrieve(
         self,
@@ -55,9 +62,21 @@ class HybridRetriever:
         where: dict | None = None,
         context: RequestContext | None = None,
     ) -> RetrievalResult:
-        # Over-fetch before ACL filtering so denied chunks do not crowd out permitted ones.
         candidates = self.vector_store.similarity_search(query, k=max(k * 5, k), where=where)
         documents = [doc for doc in candidates if can_read(doc.metadata, context)][:k]
+
+        if context is not None:
+            self.audit_store.record(
+                context,
+                action="knowledge.retrieve",
+                outcome="success",
+                target_type="knowledge",
+                metadata={
+                    "candidate_count": len(candidates),
+                    "returned_count": len(documents),
+                    "denied_count": len(candidates) - len([doc for doc in candidates if can_read(doc.metadata, context)]),
+                },
+            )
 
         graph_context: list[dict[str, Any]] = []
         candidate_entities = set(self.graph_store.search_entities(query, limit=5))
