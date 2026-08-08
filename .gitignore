@@ -22,6 +22,7 @@ data/backups/*
 !data/backups/.gitkeep
 data/incidents/*
 !data/incidents/.gitkeep
+data/incident_content_hashes.json
 
 # IDE / OS
 .idea/
