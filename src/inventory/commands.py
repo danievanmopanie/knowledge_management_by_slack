@@ -10,6 +10,7 @@ from src.inventory.audit_commands import AssetAuditCommandService
 from src.inventory.audit_correction_commands import AssetAuditCorrectionCommandService
 from src.inventory.audit_finding_commands import AssetAuditFindingCommandService
 from src.inventory.base_commands import InventoryCommandService as BaseInventoryCommandService
+from src.inventory.lost_investigation_commands import LostAssetInvestigationCommandService
 from src.inventory.profile_commands import AssetProfileCommandService
 from src.inventory.repository import InventoryRepository
 
@@ -23,6 +24,7 @@ class InventoryCommandService(BaseInventoryCommandService):
         self.audit_commands = AssetAuditCommandService(self.repository)
         self.audit_finding_commands = AssetAuditFindingCommandService(self.repository)
         self.audit_correction_commands = AssetAuditCorrectionCommandService(self.repository)
+        self.lost_investigation_commands = LostAssetInvestigationCommandService(self.repository)
 
     def execute(self, message: str, *, actor: str) -> str:
         text = " ".join((message or "").strip().split())
@@ -31,6 +33,7 @@ class InventoryCommandService(BaseInventoryCommandService):
             self.audit_commands,
             self.audit_finding_commands,
             self.audit_correction_commands,
+            self.lost_investigation_commands,
         ):
             result = service.execute_if_match(text, actor=actor)
             if result is not None:
