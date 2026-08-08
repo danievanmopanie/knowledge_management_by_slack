@@ -29,11 +29,18 @@ class Settings(BaseSettings):
     vectorstore_path: Path = Path("./data/vectorstore")
     raw_docs_path: Path = Path("./data/raw")
     backup_root: Path = Path("./data/backups")
+    incidents_path: Path = Path("./data/incidents")
 
     # Backup policy
     backup_include_raw: bool = True
-    backup_retention_count: int = 14  # keep last N backups
+    backup_retention_count: int = 14
     backup_label_prefix: str = "scheduled"
+
+    # Reporting
+    report_daily_enabled: bool = True
+    report_weekly_enabled: bool = True
+    report_weekly_location: str | None = None  # set when you specify the location
+    report_daily_hours: int = 24
 
     # App
     log_level: str = "INFO"
