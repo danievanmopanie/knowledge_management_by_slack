@@ -20,6 +20,8 @@ data/vectorstore/*
 !data/vectorstore/.gitkeep
 data/backups/*
 !data/backups/.gitkeep
+data/incidents/*
+!data/incidents/.gitkeep
 
 # IDE / OS
 .idea/
