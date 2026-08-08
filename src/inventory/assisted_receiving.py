@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from src.inventory.domain import InventoryDomainError, TrackingMode
 from src.inventory.image_ocr import DeliveryImageOcr, IMAGE_EXTENSIONS
+from src.inventory.locations import LocationService
 from src.inventory.procurement import (
     Delivery,
     DeliveryLine,
@@ -78,7 +79,6 @@ class DeliveryDocumentParser:
 
     @staticmethod
     def _normalise_ocr_table(text: str) -> str:
-        """Convert common OCR table spacing into the parser's pipe-delimited contract."""
         output: list[str] = []
         for line in text.splitlines():
             clean = line.strip()
@@ -145,6 +145,7 @@ class AssistedReceivingWorkflow:
         self.parser = parser or DeliveryDocumentParser()
         self.reconciler = DeliveryReconciler()
         self.receiver = AtomicReceivingService(repository=self.repository)
+        self.locations = LocationService(self.repository)
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -158,6 +159,7 @@ class AssistedReceivingWorkflow:
     def stage(self, *, purchase_order_id: str, source_path: Path, destination_location: str, actor: str, supplier_delivery_note: str = "") -> tuple[StagedReceipt, str]:
         if not destination_location:
             raise InventoryDomainError("Destination location is required.")
+        destination = self.locations.require_active(destination_location)
         po = self._load_purchase_order(purchase_order_id)
         delivery = Delivery(
             delivery_id=f"DEL-{uuid4().hex[:12]}", purchase_order_id=purchase_order_id,
@@ -167,7 +169,7 @@ class AssistedReceivingWorkflow:
         result = self.reconciler.reconcile(po, delivery)
         receipt = StagedReceipt(
             receipt_id=f"RCV-{uuid4().hex[:10]}", purchase_order_id=purchase_order_id,
-            delivery_id=delivery.delivery_id, destination_location=destination_location,
+            delivery_id=delivery.delivery_id, destination_location=destination.location_id,
             actor=actor, source_path=str(source_path), created_at=datetime.now(timezone.utc).isoformat(),
         )
         with self.repository.transaction() as conn:
@@ -176,7 +178,7 @@ class AssistedReceivingWorkflow:
                 receipt.destination_location, receipt.actor, receipt.source_path,
                 json.dumps(self._delivery_payload(delivery)), receipt.created_at, receipt.status,
             ))
-        return receipt, self._format_preview(po, delivery, result, receipt.receipt_id)
+        return receipt, self._format_preview(po, delivery, result, receipt.receipt_id, destination.name)
 
     def confirm(self, receipt_id: str, *, actor: str) -> str:
         with self.repository._connect() as conn:
@@ -187,6 +189,7 @@ class AssistedReceivingWorkflow:
             raise InventoryDomainError("Receipt is no longer awaiting confirmation.")
         if row["actor"] != actor:
             raise InventoryDomainError("Only the user who staged this receipt may confirm it.")
+        self.locations.require_active(row["destination_location"])
         po = self._load_purchase_order(row["purchase_order_id"])
         delivery = self._delivery_from_payload(json.loads(row["delivery_json"]))
         result = self.receiver.receive(purchase_order=po, delivery=delivery, destination_location=row["destination_location"], actor=actor)
@@ -194,7 +197,7 @@ class AssistedReceivingWorkflow:
             conn.execute("UPDATE inventory_staged_receipts SET status='confirmed' WHERE receipt_id=?", (receipt_id,))
         discrepancy_summary = ", ".join(sorted({item.discrepancy_type.value for item in result.discrepancies}))
         suffix = f" Exceptions: {discrepancy_summary}." if discrepancy_summary else ""
-        return f"Receipt `{receipt_id}` confirmed for PO `{po.purchase_order_id}`.{suffix}"
+        return f"Receipt `{receipt_id}` confirmed for PO `{po.purchase_order_id}` into `{row['destination_location']}`.{suffix}"
 
     def cancel(self, receipt_id: str, *, actor: str) -> str:
         with self.repository.transaction() as conn:
@@ -244,9 +247,10 @@ class AssistedReceivingWorkflow:
         )
 
     @staticmethod
-    def _format_preview(po, delivery, result, receipt_id: str) -> str:
+    def _format_preview(po, delivery, result, receipt_id: str, destination_name: str = "") -> str:
         accepted = sum(result.accepted_quantities.values())
-        lines = [f"*Receipt preview* `{receipt_id}` for PO `{po.purchase_order_id}`",
+        destination = f" into *{destination_name}*" if destination_name else ""
+        lines = [f"*Receipt preview* `{receipt_id}` for PO `{po.purchase_order_id}`{destination}",
                  f"Delivery lines: *{len(delivery.lines)}* | Accepted units: *{accepted}*"]
         if result.discrepancies:
             lines.append("*Discrepancies:*")
