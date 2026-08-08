@@ -14,6 +14,9 @@ class FakeVectorStore:
     def similarity_search(self, query, k=5, where=None):
         return self.documents[:k]
 
+    def all_documents(self, where=None):
+        return list(self.documents)
+
 
 class FakeGraphStore:
     def search_entities(self, query, limit=5):
@@ -69,7 +72,7 @@ def test_search_filters_restricted_content_before_returning_evidence():
             },
         ),
         Document(
-            page_content="General",
+            page_content="General support guidance",
             metadata={"chunk_id": "general-1", "visibility": "internal"},
         ),
     ]
