@@ -58,7 +58,7 @@ class LostAssetInvestigationCommandService:
                     correction_id=correction_id,
                     finding_id=correction["finding_id"],
                     asset_id=correction["asset_id"],
-                    actor=owner or actor,
+                    actor=actor,
                     note=f"Opened from audit correction {correction_id}",
                 )
         if owner and owner != actor:
