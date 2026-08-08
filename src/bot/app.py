@@ -6,15 +6,17 @@ import asyncio
 import logging
 import re
 
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from src.bot.router import route_message
 from src.core.config import settings
+from src.core.context import RequestContext
+from src.core.errors import safe_error_message
 
 logger = logging.getLogger(__name__)
 
-app = App(
+app = AsyncApp(
     token=settings.slack_bot_token,
     signing_secret=settings.slack_signing_secret,
 )
@@ -22,103 +24,77 @@ app = App(
 
 def _clean_mention_text(text: str) -> str:
     """Remove the bot mention from the message text."""
-    # Slack mentions look like <@U12345678>
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
-def _run_async(coro):
-    """Run an async coroutine from a sync Slack Bolt handler."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Fallback for environments that already have a running loop
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, coro).result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+def _context_from_event(event: dict) -> RequestContext:
+    return RequestContext.from_slack(
+        channel_id=event.get("channel", ""),
+        user_id=event.get("user"),
+        thread_ts=event.get("thread_ts") or event.get("ts"),
+        files=event.get("files", []),
+    )
 
 
 @app.event("app_mention")
-def handle_app_mention(event, say):
+async def handle_app_mention(event, say):
     """Route @mentions to the appropriate agent based on channel."""
-    channel = event.get("channel")
-    raw_text = event.get("text", "")
-    text = _clean_mention_text(raw_text)
-    thread_ts = event.get("thread_ts") or event.get("ts")
-    user = event.get("user")
-    files = event.get("files", [])
+    context = _context_from_event(event)
+    text = _clean_mention_text(event.get("text", ""))
 
-    logger.info("Mention in channel %s from user %s: %s", channel, user, text[:80])
+    logger.info(
+        "Mention request_id=%s channel=%s user=%s text=%s",
+        context.request_id,
+        context.channel_id,
+        context.user_id,
+        text[:80],
+    )
 
     try:
-        response = _run_async(
-            route_message(
-                channel_id=channel,
-                text=text,
-                user=user,
-                files=files,
-                thread_ts=thread_ts,
-            )
-        )
-    except Exception as e:
-        logger.exception("Error while routing message")
-        response = f"Sorry, something went wrong while processing your request.\n`{type(e).__name__}: {e}`"
+        response = await route_message(text, context)
+    except Exception:
+        logger.exception("Request failed request_id=%s", context.request_id)
+        response = safe_error_message(context.request_id)
 
-    say(text=response, thread_ts=thread_ts)
+    await say(text=response, thread_ts=context.thread_ts)
 
 
 @app.event("message")
-def handle_message(event, say):
-    """
-    Handle messages in monitored channels.
-
-    - In #knowledge-uploads: treat file uploads as ingest requests.
-    - In other agent channels: only respond to @mentions (handled above)
-      or explicit thread follow-ups if desired later.
-    """
-    # Ignore bot messages and message changes
+async def handle_message(event, say):
+    """Auto-process file uploads only in the configured knowledge-upload channel."""
     if event.get("subtype") in ("bot_message", "message_changed", "message_deleted"):
         return
 
-    # Ignore messages that are already handled as app_mentions
     if event.get("text") and "<@" in event.get("text", ""):
         return
 
-    channel = event.get("channel")
-    files = event.get("files", [])
+    context = _context_from_event(event)
     text = event.get("text", "") or ""
-    thread_ts = event.get("thread_ts") or event.get("ts")
-    user = event.get("user")
 
-    # Only auto-react to file uploads in the knowledge-uploads channel
-    if files and channel == settings.channel_knowledge_uploads:
+    if context.files and context.channel_id == settings.channel_knowledge_uploads:
         logger.info(
-            "File(s) detected in knowledge-uploads: %s",
-            [f.get("name") for f in files],
+            "Knowledge upload request_id=%s files=%s",
+            context.request_id,
+            [f.get("name") for f in context.files],
         )
         try:
-            response = _run_async(
-                route_message(
-                    channel_id=channel,
-                    text=text or "Please ingest the uploaded file(s).",
-                    user=user,
-                    files=files,
-                    thread_ts=thread_ts,
-                )
+            response = await route_message(
+                text or "Please ingest the uploaded file(s).",
+                context,
             )
-            say(text=response, thread_ts=thread_ts)
-        except Exception as e:
-            logger.exception("Error while handling knowledge upload")
-            say(
-                text=f"Sorry, I could not process the upload.\n`{type(e).__name__}: {e}`",
-                thread_ts=thread_ts,
-            )
+        except Exception:
+            logger.exception("Knowledge upload failed request_id=%s", context.request_id)
+            response = safe_error_message(context.request_id)
+        await say(text=response, thread_ts=context.thread_ts)
 
 
-def start():
-    """Start the Slack bot using Socket Mode."""
+async def _start_async() -> None:
+    handler = AsyncSocketModeHandler(app, settings.slack_app_token)
+    await handler.start_async()
+
+
+def start() -> None:
+    """Start the Slack bot using asynchronous Socket Mode."""
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -131,8 +107,7 @@ def start():
         settings.channel_work_management,
         settings.channel_knowledge_uploads,
     )
-    handler = SocketModeHandler(app, settings.slack_app_token)
-    handler.start()
+    asyncio.run(_start_async())
 
 
 if __name__ == "__main__":

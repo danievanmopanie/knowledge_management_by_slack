@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Any
 
 from src.agents.base import BaseAgent
 from src.core.config import settings
+from src.core.context import RequestContext
 from src.knowledge.file_loader import download_slack_file, extract_text
 from src.knowledge.incident_rag import IncidentRAG
 from src.knowledge.ingest import ingest_text
@@ -29,16 +29,12 @@ def _looks_like_incident_csv(path: Path) -> bool:
 
 
 class KnowledgeIngestAgent(BaseAgent):
-    """
-    Processes uploaded documents and adds them to the hybrid knowledge base.
-
-    Incident CSVs are also indexed into the dedicated incident RAG collection.
-    """
+    """Processes uploaded documents and adds them to the hybrid knowledge base."""
 
     name = "knowledge_ingest"
 
-    async def handle(self, message: str, context: dict[str, Any]) -> str:
-        files = context.get("files") or []
+    async def handle(self, message: str, context: RequestContext) -> str:
+        files = context.files
 
         if not files:
             return (
@@ -56,7 +52,6 @@ class KnowledgeIngestAgent(BaseAgent):
             try:
                 local_path = await download_slack_file(file_info)
 
-                # Incident CSV path → dedicated incident RAG + copy to incidents drop-zone
                 if _looks_like_incident_csv(local_path):
                     incidents = load_incidents_from_csv(local_path)
                     settings.incidents_path.mkdir(parents=True, exist_ok=True)
@@ -69,8 +64,12 @@ class KnowledgeIngestAgent(BaseAgent):
                         f"• *{name}* → incident RAG: {index_result['indexed']} ticket(s) indexed "
                         f"(collection total: {index_result['collection_total']})"
                     )
-                    logger.info("Incident CSV indexed: %s → %s", name, index_result)
-                    # Also keep a text form in general knowledge for keyword/theme search
+                    logger.info(
+                        "Incident CSV indexed request_id=%s file=%s result=%s",
+                        context.request_id,
+                        name,
+                        index_result,
+                    )
                     text = extract_text(local_path)
                     if text.strip():
                         summary = ingest_text(
@@ -79,7 +78,7 @@ class KnowledgeIngestAgent(BaseAgent):
                             metadata={
                                 "doc_type": "incident_export",
                                 "slack_file_id": file_info.get("id"),
-                                "uploaded_by": context.get("user"),
+                                "uploaded_by": context.user_id,
                             },
                         )
                         results.append(
@@ -87,7 +86,6 @@ class KnowledgeIngestAgent(BaseAgent):
                         )
                     continue
 
-                # Normal document path
                 text = extract_text(local_path)
                 if not text or not text.strip():
                     errors.append(f"• *{name}*: no extractable text found")
@@ -98,8 +96,8 @@ class KnowledgeIngestAgent(BaseAgent):
                     source=name,
                     metadata={
                         "slack_file_id": file_info.get("id"),
-                        "uploaded_by": context.get("user"),
-                        "channel_id": context.get("channel_id"),
+                        "uploaded_by": context.user_id,
+                        "channel_id": context.channel_id,
                         "local_path": str(local_path),
                     },
                 )
@@ -108,29 +106,40 @@ class KnowledgeIngestAgent(BaseAgent):
                     f"• *{name}* → {summary['chunks']} chunk(s), "
                     f"{summary['entities']} entit(y/ies) indexed"
                 )
-                logger.info("Ingested %s: %s", name, summary)
+                logger.info(
+                    "Ingested request_id=%s file=%s summary=%s",
+                    context.request_id,
+                    name,
+                    summary,
+                )
 
-            except Exception as e:
-                logger.exception("Failed to ingest file %s", name)
-                errors.append(f"• *{name}*: `{type(e).__name__}: {e}`")
+            except Exception:
+                logger.exception(
+                    "Failed to ingest file request_id=%s file=%s",
+                    context.request_id,
+                    name,
+                )
+                errors.append(
+                    f"• *{name}*: processing failed (reference `{context.request_id}`)"
+                )
 
         lines = ["*Knowledge Ingest complete*"]
 
         if results:
-            lines.append("")
-            lines.append("Successfully added:")
+            lines.extend(["", "Successfully added:"])
             lines.extend(results)
 
         if errors:
-            lines.append("")
-            lines.append("Issues:")
+            lines.extend(["", "Issues:"])
             lines.extend(errors)
 
         try:
             total = VectorStore().count()
-            lines.append("")
-            lines.append(f"_General knowledge chunks: {total}_")
+            lines.extend(["", f"_General knowledge chunks: {total}_"])
         except Exception:
-            pass
+            logger.exception(
+                "Failed to count knowledge chunks request_id=%s",
+                context.request_id,
+            )
 
         return "\n".join(lines)

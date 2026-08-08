@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from src.agents.base import BaseAgent
+from src.core.context import RequestContext
 
 HELP = """*Inventory Agent*
 
@@ -26,19 +25,13 @@ Barcode photos are decoded locally (pyzbar). Hardware scanners that type into Sl
 
 
 class InventoryAgent(BaseAgent):
-    """
-    Entry point for #inventory.
-
-    Full specialised sub-agents (Order, Intake, Storage, Issue, Returns,
-    Compliance) will be wired via LangGraph; this handler is the Slack-facing
-    coordinator stub until those graphs are connected.
-    """
+    """Slack-facing coordinator stub for inventory requests."""
 
     name = "inventory"
 
-    async def handle(self, message: str, context: dict[str, Any]) -> str:
+    async def handle(self, message: str, context: RequestContext) -> str:
         text = (message or "").strip()
-        files = context.get("files") or []
+        files = context.files
 
         if not text and not files:
             return HELP
@@ -47,7 +40,6 @@ class InventoryAgent(BaseAgent):
         if lower in {"help", "?", "hi", "hello"}:
             return HELP
 
-        # Lightweight acknowledgements until full graph is implemented
         if files and any(
             k in lower for k in ("quote", "order", "po", "deliver", "receive", "barcode")
         ):
