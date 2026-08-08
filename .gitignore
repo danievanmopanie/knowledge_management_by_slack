@@ -16,6 +16,8 @@ build/
 # Data (keep structure, ignore contents)
 data/raw/*
 !data/raw/.gitkeep
+data/staging/*
+!data/staging/.gitkeep
 data/vectorstore/*
 !data/vectorstore/.gitkeep
 data/backups/*
@@ -23,6 +25,8 @@ data/backups/*
 data/incidents/*
 !data/incidents/.gitkeep
 data/incident_content_hashes.json
+data/platform.db
+data/platform.db-*
 
 # IDE / OS
 .idea/
