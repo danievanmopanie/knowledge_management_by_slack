@@ -16,26 +16,24 @@ class Settings(BaseSettings):
     slack_app_token: str
     slack_signing_secret: str
 
-    # Local LLM (OpenAI-compatible)
+    # Response model – intelligent answers (Qwen3 on GX10)
     llm_base_url: str = "http://localhost:11434/v1"
     llm_api_key: str = "ollama"
     llm_model: str = "qwen3:30b-a3b"
 
-    # Embeddings – general knowledge / runbooks
+    # Embeddings – general knowledge / runbooks (lightweight)
     embedding_base_url: str = "http://localhost:11434/v1"
     embedding_model: str = "nomic-embed-text"
     embedding_document_prefix: str = ""
     embedding_query_prefix: str = ""
 
-    # Embeddings – incidents (stronger retrieval model recommended)
-    # Good local options on GX10:
-    #   qwen3-embedding:0.6b  (fast, strong)
-    #   qwen3-embedding:4b    (higher quality)
-    #   bge-m3                (hybrid dense/sparse friendly)
-    #   mxbai-embed-large     (strong English short-text)
-    incident_embedding_model: str = "qwen3-embedding:0.6b"
+    # Embeddings – incidents (lightweight BGE; good quality on technical text)
+    # Pull with: ollama pull bge-m3
+    incident_embedding_model: str = "bge-m3"
     incident_embedding_document_prefix: str = ""
     incident_embedding_query_prefix: str = ""
+    # Batch size when indexing large incident CSVs
+    incident_embedding_batch_size: int = 64
 
     # Paths
     vectorstore_path: Path = Path("./data/vectorstore")
