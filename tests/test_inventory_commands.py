@@ -20,6 +20,17 @@ def seed_locations(commands):
     )
 
 
+def seed_items(commands):
+    commands.execute(
+        "create item LAPTOP-01 tracking serialized class laptop name Laptop manufacturer Dell model Model-X",
+        actor="admin",
+    )
+    commands.execute(
+        "create item MOUSE-01 tracking quantity class peripheral name USB Mouse manufacturer Dell model Mouse-X reorder point 4 quantity 20",
+        actor="admin",
+    )
+
+
 def seed_customer(repo, customer_id="EMP-42"):
     CustomerCustodyService(repo).create(
         customer_id=customer_id,
@@ -59,12 +70,47 @@ def seed_stock(repo):
         )
 
 
+def test_item_commands_manage_catalog_and_reorder_defaults(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    commands = InventoryCommandService(repo)
+    seed_locations(commands)
+
+    created = commands.execute(
+        "create item MOUSE-01 tracking quantity class peripheral name USB Mouse manufacturer Dell model M100 reorder point 5 quantity 20",
+        actor="admin",
+    )
+    assert "MOUSE-01" in created
+    assert "quantity" in created
+
+    detail = commands.execute("item MOUSE-01", actor="U1")
+    assert "USB Mouse" in detail
+    assert "Default reorder point: *5*" in detail
+
+    listing = commands.execute("items class peripheral", actor="U1")
+    assert "MOUSE-01" in listing
+
+    applied = commands.execute("apply reorder default MOUSE-01 at STORE-A", actor="U1")
+    assert "Applied" in applied
+    with repo._connect() as conn:
+        rule = conn.execute(
+            "SELECT * FROM inventory_reorder_rules WHERE sku='MOUSE-01' AND location_id='STORE-A'"
+        ).fetchone()
+    assert rule["reorder_point"] == 5
+    assert rule["reorder_quantity"] == 20
+
+    commands.execute("deactivate item MOUSE-01", actor="admin")
+    assert "inactive" in commands.execute("item MOUSE-01", actor="U1")
+    commands.execute("activate item MOUSE-01", actor="admin")
+    assert "active" in commands.execute("item MOUSE-01", actor="U1")
+
+
 def test_asset_commands_drive_persisted_lifecycle(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     seed_asset(repo)
     seed_customer(repo)
     commands = InventoryCommandService(repo)
     seed_locations(commands)
+    seed_items(commands)
 
     response = commands.execute("store asset A-1 at SHELF-B3", actor="U1")
     assert "in_stock" in response
@@ -94,6 +140,7 @@ def test_stock_commands_reserve_issue_transfer_and_count(tmp_path):
     seed_customer(repo)
     commands = InventoryCommandService(repo)
     seed_locations(commands)
+    seed_items(commands)
 
     status = commands.execute("stock MOUSE-01 at STORE-A", actor="U1")
     assert "On hand: *10*" in status
@@ -117,6 +164,19 @@ def test_stock_commands_reserve_issue_transfer_and_count(tmp_path):
     result = commands.execute("count stock MOUSE-01 at STORE-A = 3", actor="U1")
     assert "variance *-1*" in result
     assert repo.stock_on_hand("MOUSE-01", "STORE-A") == 3
+
+
+def test_unknown_sku_is_rejected_for_stock_commands(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    commands = InventoryCommandService(repo)
+    seed_locations(commands)
+
+    try:
+        commands.execute("stock MADE-UP at STORE-A", actor="U1")
+    except Exception as exc:
+        assert "Unknown inventory SKU" in str(exc)
+    else:
+        raise AssertionError("Expected unknown-SKU failure")
 
 
 def test_location_commands_build_and_show_hierarchy(tmp_path):
