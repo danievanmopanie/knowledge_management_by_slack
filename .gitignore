@@ -1,0 +1,26 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Data (keep structure, ignore contents)
+data/raw/*
+!data/raw/.gitkeep
+data/vectorstore/*
+!data/vectorstore/.gitkeep
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
