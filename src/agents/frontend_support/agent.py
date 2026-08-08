@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agents.base import BaseAgent
+from src.core.context import RequestContext
+from src.core.errors import safe_error_message
 from src.knowledge.incident_rag import IncidentRAG
 from src.knowledge.retriever import HybridRetriever
 from src.llm.client import get_llm
@@ -37,19 +38,19 @@ class FrontendSupportAgent(BaseAgent):
         self.incident_rag = IncidentRAG()
         self.llm = get_llm()
 
-    async def handle(self, message: str, context: dict[str, Any]) -> str:
-        # 1. General knowledge retrieval
+    async def handle(self, message: str, context: RequestContext) -> str:
         result = self.retriever.retrieve(message, k=5, graph_depth=1)
         knowledge_context = result.to_context_string()
 
-        # 2. Similar past incidents
         incident_context = ""
         try:
             incident_context = self.incident_rag.build_context(message, k=5)
         except Exception:
-            logger.exception("Incident RAG retrieval failed")
+            logger.exception(
+                "Incident RAG retrieval failed request_id=%s",
+                context.request_id,
+            )
 
-        # 3. Build prompt
         user_content_parts = []
         if incident_context:
             user_content_parts.append(incident_context)
@@ -64,19 +65,13 @@ class FrontendSupportAgent(BaseAgent):
             HumanMessage(content="\n\n".join(user_content_parts)),
         ]
 
-        # 4. Generate answer with local LLM
         try:
             response = await self.llm.ainvoke(messages)
             answer = response.content if hasattr(response, "content") else str(response)
-        except Exception as e:
-            return (
-                "I retrieved some context but failed to generate a full answer.\n"
-                f"Error: `{type(e).__name__}: {e}`\n\n"
-                "Raw context (for debugging):\n"
-                f"{(incident_context or knowledge_context)[:1500]}"
-            )
+        except Exception:
+            logger.exception("LLM generation failed request_id=%s", context.request_id)
+            return safe_error_message(context.request_id)
 
-        # 5. Source hints
         sources = {
             doc.metadata.get("source")
             for doc in result.documents
@@ -88,7 +83,10 @@ class FrontendSupportAgent(BaseAgent):
                 if num:
                     sources.add(f"incident:{num}")
         except Exception:
-            pass
+            logger.exception(
+                "Incident source lookup failed request_id=%s",
+                context.request_id,
+            )
 
         if sources:
             answer = answer.rstrip() + "\n\n_Sources: " + ", ".join(sorted(s for s in sources if s)) + "_"
