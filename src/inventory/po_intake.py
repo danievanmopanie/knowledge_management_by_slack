@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from src.inventory.domain import InventoryDomainError, TrackingMode
 from src.inventory.image_ocr import DeliveryImageOcr, IMAGE_EXTENSIONS
+from src.inventory.items import ItemCatalogService
 from src.inventory.procurement import PurchaseOrder, PurchaseOrderLine
 from src.inventory.repository import InventoryRepository
 from src.knowledge.file_loader import extract_text
@@ -79,7 +80,7 @@ class PurchaseOrderDocumentParser:
             result.append(
                 PurchaseOrderLine(
                     line_id=row.get("line_id") or row.get("po_line_id") or f"LINE-{index:03d}",
-                    sku=row["sku"],
+                    sku=row["sku"].upper(),
                     description=row.get("description") or row.get("name") or row["sku"],
                     quantity_ordered=quantity,
                     tracking_mode=mode,
@@ -111,6 +112,7 @@ class PurchaseOrderIntakeWorkflow:
     ) -> None:
         self.repository = repository or InventoryRepository()
         self.parser = parser or PurchaseOrderDocumentParser()
+        self.items = ItemCatalogService(self.repository)
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -126,6 +128,14 @@ class PurchaseOrderIntakeWorkflow:
                     created_at TEXT NOT NULL,
                     status TEXT NOT NULL
                 )"""
+            )
+
+    def _validate_lines(self, lines: list[PurchaseOrderLine]) -> None:
+        for line in lines:
+            self.items.validate_po_item(
+                sku=line.sku,
+                tracking_mode=line.tracking_mode,
+                model=line.model,
             )
 
     def stage(
@@ -147,10 +157,12 @@ class PurchaseOrderIntakeWorkflow:
         if existing:
             raise InventoryDomainError(f"Purchase order already exists: {purchase_order_id}")
 
+        lines = self.parser.parse(source_path)
+        self._validate_lines(lines)
         po = PurchaseOrder(
             purchase_order_id=purchase_order_id,
             supplier=supplier,
-            lines=self.parser.parse(source_path),
+            lines=lines,
             created_by=actor,
             external_reference=external_reference,
         )
@@ -227,6 +239,7 @@ class PurchaseOrderIntakeWorkflow:
                 for item in payload["lines"]
             ],
         )
+        self._validate_lines(po.lines)
         with self.repository.transaction() as conn:
             existing = conn.execute(
                 "SELECT 1 FROM inventory_purchase_orders WHERE purchase_order_id=?",
