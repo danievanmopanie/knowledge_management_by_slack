@@ -5,14 +5,15 @@ Data can come from:
 2. A local JSON/CSV incident export drop-zone
 3. Future live ServiceNow integration
 
-Expected free-text columns (flexible matching):
-  short_description, description, work_notes, comments, resolution_notes
+Daily ServiceNow exports are snapshots: the same incident can appear in many files.
+This module preserves those versions while exposing a deterministic current record.
 """
 
 from __future__ import annotations
 
 import csv
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -73,10 +74,14 @@ COLUMN_ALIASES = {
     "caller": ["caller", "caller_id", "requested_for", "user", "employee"],
     "location": ["location", "site", "building", "floor", "office"],
     "opened_at": ["opened_at", "opened", "created", "created_at", "sys_created_on"],
-    "resolved_at": ["resolved_at", "resolved", "closed_at", "sys_updated_on"],
+    "updated_at": ["updated_at", "updated", "last_updated", "sys_updated_on"],
+    "resolved_at": ["resolved_at", "resolved", "closed_at", "closed"],
     "category": ["category", "type"],
     "subcategory": ["subcategory", "sub_category"],
 }
+
+_MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
+_SNAPSHOT_DATE_RE = re.compile(r"(?<!\d)(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)(?!\d)")
 
 
 @dataclass
@@ -93,6 +98,7 @@ class Incident:
     caller: str = ""
     location: str = ""
     opened_at: datetime | None = None
+    updated_at: datetime | None = None
     resolved_at: datetime | None = None
     category: str = ""
     subcategory: str = ""
@@ -107,6 +113,15 @@ class Incident:
             "comments": self.comments or "",
             "resolution_notes": self.resolution_notes or "",
         }
+
+
+@dataclass(frozen=True)
+class IncidentVersion:
+    """One incident record as observed in one source snapshot."""
+
+    incident: Incident
+    source_path: Path
+    snapshot_at: datetime | None = None
 
 
 def _norm(s: str) -> str:
@@ -151,6 +166,43 @@ def _parse_dt(value: str | None) -> datetime | None:
     return None
 
 
+def _snapshot_time_from_path(path: Path) -> datetime | None:
+    """Infer a snapshot date from names such as incidents_2026-08-08.csv."""
+    match = _SNAPSHOT_DATE_RE.search(path.name)
+    if not match:
+        return None
+    try:
+        year, month, day = (int(part) for part in match.groups())
+        return datetime(year, month, day, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _version_sort_key(version: IncidentVersion) -> tuple[datetime, datetime, str]:
+    """Oldest-to-newest deterministic ordering for incident snapshots.
+
+    Prefer the record's actual update timestamp. When exports do not include one,
+    use a date encoded in the snapshot filename. Resolved/opened timestamps are
+    final fallbacks. The source path is a deterministic tie-breaker only.
+    """
+    incident = version.incident
+    primary = (
+        incident.updated_at
+        or version.snapshot_at
+        or incident.resolved_at
+        or incident.opened_at
+        or _MIN_TIME
+    )
+    secondary = (
+        version.snapshot_at
+        or incident.updated_at
+        or incident.resolved_at
+        or incident.opened_at
+        or _MIN_TIME
+    )
+    return primary, secondary, str(version.source_path)
+
+
 def load_incidents_from_csv(path: Path) -> list[Incident]:
     incidents: list[Incident] = []
     with path.open(newline="", encoding="utf-8", errors="ignore") as f:
@@ -183,6 +235,7 @@ def load_incidents_from_csv(path: Path) -> list[Incident]:
                     caller=get("caller"),
                     location=get("location"),
                     opened_at=_parse_dt(get("opened_at")),
+                    updated_at=_parse_dt(get("updated_at")),
                     resolved_at=_parse_dt(get("resolved_at")),
                     category=get("category"),
                     subcategory=get("subcategory"),
@@ -192,13 +245,12 @@ def load_incidents_from_csv(path: Path) -> list[Incident]:
     return incidents
 
 
-def load_all_incidents(
+def load_incident_versions(
     search_dirs: Iterable[Path] | None = None,
-) -> list[Incident]:
-    """Load incidents from CSV files in raw docs / incidents drop zone."""
+) -> dict[str, list[IncidentVersion]]:
+    """Load every observed version of each incident, ordered oldest to newest."""
     dirs = list(search_dirs or [settings.raw_docs_path, settings.incidents_path])
-    all_incidents: list[Incident] = []
-    seen_numbers: set[str] = set()
+    versions: dict[str, list[IncidentVersion]] = {}
 
     for directory in dirs:
         directory = Path(directory)
@@ -206,16 +258,36 @@ def load_all_incidents(
             continue
         for path in sorted(directory.rglob("*.csv")):
             try:
-                batch = load_incidents_from_csv(path)
-                for inc in batch:
-                    if inc.number in seen_numbers:
-                        continue
-                    seen_numbers.add(inc.number)
-                    all_incidents.append(inc)
+                snapshot_at = _snapshot_time_from_path(path)
+                for incident in load_incidents_from_csv(path):
+                    versions.setdefault(incident.number, []).append(
+                        IncidentVersion(
+                            incident=incident,
+                            source_path=path,
+                            snapshot_at=snapshot_at,
+                        )
+                    )
             except Exception:
                 logger.exception("Failed to load incidents from %s", path)
 
-    return all_incidents
+    for incident_versions in versions.values():
+        incident_versions.sort(key=_version_sort_key)
+
+    return versions
+
+
+def load_all_incidents(
+    search_dirs: Iterable[Path] | None = None,
+) -> list[Incident]:
+    """Return one canonical current record per incident number.
+
+    The newest version is selected using record update time when present, then
+    snapshot filename date, rather than whichever CSV happens to be visited first.
+    Use :func:`load_incident_versions` when historical snapshot records are needed.
+    """
+    versions = load_incident_versions(search_dirs=search_dirs)
+    current = [incident_versions[-1].incident for incident_versions in versions.values()]
+    return sorted(current, key=lambda incident: incident.number)
 
 
 def filter_incidents(
