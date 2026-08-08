@@ -13,8 +13,6 @@ from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BACKUP_ROOT = Path("./data/backups")
-
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -22,7 +20,7 @@ def _timestamp() -> str:
 
 def create_backup(
     backup_root: Path | None = None,
-    include_raw: bool = True,
+    include_raw: bool | None = None,
     label: str | None = None,
 ) -> Path:
     """
@@ -35,7 +33,8 @@ def create_backup(
 
     Returns the path to the created backup directory.
     """
-    backup_root = backup_root or DEFAULT_BACKUP_ROOT
+    backup_root = backup_root or settings.backup_root
+    include_raw = settings.backup_include_raw if include_raw is None else include_raw
     backup_root.mkdir(parents=True, exist_ok=True)
 
     stamp = _timestamp()
@@ -63,7 +62,7 @@ def create_backup(
     else:
         logger.warning("Vector store path does not exist: %s", vector_src)
 
-    # 2. Graph store (lives under vectorstore_path / graph.json by default)
+    # 2. Graph store
     graph_src = settings.vectorstore_path / "graph.json"
     if graph_src.exists():
         graph_dst = backup_dir / "graph.json"
@@ -80,7 +79,6 @@ def create_backup(
             manifest["components"]["raw"] = "raw"
             logger.info("Backed up raw documents → %s", raw_dst)
 
-    # Write manifest
     manifest_path = backup_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -90,13 +88,13 @@ def create_backup(
 
 def list_backups(backup_root: Path | None = None) -> list[dict[str, Any]]:
     """List available backups (newest first)."""
-    backup_root = backup_root or DEFAULT_BACKUP_ROOT
+    backup_root = backup_root or settings.backup_root
     if not backup_root.exists():
         return []
 
     results = []
     for path in sorted(backup_root.iterdir(), reverse=True):
-        if not path.is_dir():
+        if not path.is_dir() or not path.name.startswith("kb_backup_"):
             continue
         manifest_path = path / "manifest.json"
         info: dict[str, Any] = {"path": str(path), "name": path.name}
@@ -107,6 +105,35 @@ def list_backups(backup_root: Path | None = None) -> list[dict[str, Any]]:
                 info["manifest"] = None
         results.append(info)
     return results
+
+
+def prune_backups(
+    keep: int | None = None,
+    backup_root: Path | None = None,
+) -> list[str]:
+    """
+    Delete older backups, keeping only the most recent `keep` backups.
+
+    Returns the list of deleted backup directory names.
+    """
+    keep = settings.backup_retention_count if keep is None else keep
+    backups = list_backups(backup_root=backup_root)
+
+    if len(backups) <= keep:
+        return []
+
+    to_delete = backups[keep:]  # newest-first
+    deleted = []
+    for item in to_delete:
+        path = Path(item["path"])
+        try:
+            shutil.rmtree(path)
+            deleted.append(path.name)
+            logger.info("Pruned old backup: %s", path)
+        except Exception:
+            logger.exception("Failed to prune backup %s", path)
+
+    return deleted
 
 
 def restore_backup(
@@ -132,7 +159,6 @@ def restore_backup(
 
     restored = []
 
-    # Vector store
     if restore_vector:
         src = backup_path / "vectorstore"
         if src.exists():
@@ -145,7 +171,6 @@ def restore_backup(
         else:
             logger.warning("No vectorstore component in backup %s", backup_path)
 
-    # Graph
     if restore_graph:
         src = backup_path / "graph.json"
         if src.exists():
@@ -155,7 +180,6 @@ def restore_backup(
             restored.append("graph")
             logger.info("Restored knowledge graph from %s", src)
 
-    # Raw docs
     if restore_raw:
         src = backup_path / "raw"
         if src.exists():
@@ -170,4 +194,20 @@ def restore_backup(
         "backup": str(backup_path),
         "restored": restored,
         "manifest": manifest,
+    }
+
+
+def run_scheduled_backup() -> dict[str, Any]:
+    """
+    Create a scheduled backup and prune old ones according to retention policy.
+
+    Intended to be called by cron / systemd timer.
+    """
+    label = settings.backup_label_prefix
+    backup_path = create_backup(label=label)
+    deleted = prune_backups()
+    return {
+        "backup": str(backup_path),
+        "pruned": deleted,
+        "retention": settings.backup_retention_count,
     }
