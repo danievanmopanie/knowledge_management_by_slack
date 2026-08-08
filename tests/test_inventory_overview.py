@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.inventory.asset_lifecycle import SerializedAssetLifecycleService
 from src.inventory.assisted_receiving import AssistedReceivingWorkflow
+from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import AllocationType, AssetLifecycle, SerializedAsset, StockTransaction
 from src.inventory.exceptions import InventoryExceptionService
 from src.inventory.locations import LocationService
@@ -29,6 +30,12 @@ def test_overview_aggregates_operational_attention_items(tmp_path):
         name="Main Store",
         site="SITE-A",
         location_type="storeroom",
+        actor="admin",
+    )
+    CustomerCustodyService(repo).create(
+        customer_id="EMP-42",
+        name="Jane Smith",
+        customer_type="employee",
         actor="admin",
     )
 
