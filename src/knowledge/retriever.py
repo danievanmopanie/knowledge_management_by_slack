@@ -1,19 +1,24 @@
-"""Governed retrieval service with access-controlled vector and graph results."""
+"""Governed hybrid retrieval service with reranking, confidence and ACLs."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from src.core.audit import AuditStore
+from src.core.config import settings
 from src.core.context import RequestContext
+from src.knowledge.confidence import assess_confidence
 from src.knowledge.graphstore import GraphStore
+from src.knowledge.lexical import lexical_search, reciprocal_rank_fusion
+from src.knowledge.query_understanding import understand_query
+from src.knowledge.reranking import rerank_documents
 from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery, RetrievalResult
 from src.knowledge.vectorstore import VectorStore
 from src.security.access import can_read
 
 
 class HybridRetriever:
-    """Single deterministic entry point for governed knowledge retrieval."""
+    """Single deterministic entry point for semantic + lexical knowledge retrieval."""
 
     def __init__(
         self,
@@ -26,28 +31,67 @@ class HybridRetriever:
         self.audit_store = audit_store or AuditStore()
 
     def search(self, request: RetrievalQuery) -> RetrievalResult:
-        raw = self.vector_store.similarity_search(
-            request.text,
-            k=max(request.limit * 5, request.limit),
+        hints = understand_query(request.text)
+        candidate_limit = max(request.limit * 5, request.limit)
+
+        semantic_raw = self.vector_store.similarity_search(
+            hints.normalized,
+            k=candidate_limit,
             where=request.where,
         )
-        allowed = [doc for doc in raw if can_read(doc.metadata, request.context)]
-        selected = allowed[: request.limit]
+        semantic = [
+            doc for doc in semantic_raw if can_read(doc.metadata, request.context)
+        ]
+
+        lexical_corpus_raw = self.vector_store.all_documents(where=request.where)
+        lexical_corpus = [
+            doc for doc in lexical_corpus_raw if can_read(doc.metadata, request.context)
+        ]
+        lexical = lexical_search(
+            hints.normalized,
+            lexical_corpus,
+            limit=candidate_limit,
+            exact_terms=hints.exact_terms,
+        )
+
+        fused = reciprocal_rank_fusion(
+            semantic,
+            lexical,
+            limit=candidate_limit,
+        )
+        selected = rerank_documents(
+            fused,
+            limit=request.limit,
+            max_per_document=settings.retrieval_max_chunks_per_document,
+        )
+        decision = assess_confidence(
+            selected,
+            minimum=settings.retrieval_min_confidence,
+            strong=settings.retrieval_strong_confidence,
+        )
         candidates = [
             RetrievalCandidate.from_document(document, rank)
             for rank, document in enumerate(selected, 1)
         ]
 
         if request.context is not None:
+            denied_semantic = len(semantic_raw) - len(semantic)
+            denied_lexical = len(lexical_corpus_raw) - len(lexical_corpus)
             self.audit_store.record(
                 request.context,
                 action="knowledge.retrieve",
-                outcome="success",
+                outcome=decision.level.value,
                 target_type="knowledge",
                 metadata={
-                    "candidate_count": len(raw),
+                    "semantic_candidates": len(semantic),
+                    "lexical_candidates": len(lexical),
+                    "fused_candidates": len(fused),
                     "returned_count": len(candidates),
-                    "denied_count": len(raw) - len(allowed),
+                    "denied_semantic_count": denied_semantic,
+                    "denied_lexical_count": denied_lexical,
+                    "exact_terms": list(hints.exact_terms),
+                    "confidence_score": decision.score,
+                    "evidence_level": decision.level.value,
                     "evidence_ids": [candidate.evidence_id for candidate in candidates],
                 },
             )
@@ -57,6 +101,8 @@ class HybridRetriever:
             candidates=candidates,
             graph_context=graph_context,
             query=request.text,
+            confidence_score=decision.score,
+            evidence_level=decision.level.value,
         )
 
     def retrieve(

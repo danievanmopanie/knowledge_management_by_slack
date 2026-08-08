@@ -41,7 +41,7 @@ class RetrievalCandidate:
             or metadata.get("source")
             or f"candidate-{rank}"
         )
-        score = metadata.get("score")
+        score = metadata.get("rerank_score", metadata.get("score"))
         return cls(
             evidence_id=evidence_id,
             content=document.page_content,
@@ -64,6 +64,8 @@ class RetrievalResult:
     candidates: list[RetrievalCandidate] = field(default_factory=list)
     graph_context: list[dict[str, Any]] = field(default_factory=list)
     query: str = ""
+    confidence_score: float = 0.0
+    evidence_level: str = "insufficient"
 
     @property
     def documents(self) -> list[Document]:
@@ -74,15 +76,22 @@ class RetrievalResult:
     def evidence_ids(self) -> tuple[str, ...]:
         return tuple(candidate.evidence_id for candidate in self.candidates)
 
+    @property
+    def should_answer(self) -> bool:
+        return self.evidence_level != "insufficient"
+
     def to_context_string(self, max_chars: int = 6000) -> str:
         parts: list[str] = []
         if self.candidates:
-            parts.append("### Relevant Knowledge Articles & Notes")
+            parts.append(
+                f"### Relevant Knowledge Articles & Notes "
+                f"(evidence: {self.evidence_level}, confidence: {self.confidence_score:.2f})"
+            )
             for i, candidate in enumerate(self.candidates, 1):
                 source = candidate.metadata.get("source", "unknown")
-                header = f"[{i}] Evidence: {candidate.evidence_id} | Source: {source}"
+                header = f"[E{i}] Evidence: {candidate.evidence_id} | Source: {source}"
                 if candidate.score is not None:
-                    header += f" (relevance: {candidate.score:.2f})"
+                    header += f" (rank: {candidate.score:.2f})"
                 parts.extend([header, candidate.content.strip(), ""])
         if self.graph_context:
             parts.append("### Related Entities & Relationships")
