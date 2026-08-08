@@ -39,6 +39,17 @@ class StockReconciliationWorkflow:
         with self.repository._connect() as conn:
             conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS inventory_stock_counts (
+                    count_id TEXT PRIMARY KEY,
+                    sku TEXT NOT NULL,
+                    location_id TEXT NOT NULL,
+                    expected_quantity INTEGER NOT NULL,
+                    counted_quantity INTEGER NOT NULL,
+                    variance INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    counted_at TEXT NOT NULL,
+                    note TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS inventory_staged_stock_counts (
                     count_id TEXT PRIMARY KEY,
                     sku TEXT NOT NULL,
