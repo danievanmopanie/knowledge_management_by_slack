@@ -9,6 +9,7 @@ import re
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
+from src.bot.readiness import validate_slack_readiness
 from src.bot.router import route_message
 from src.core.config import settings
 from src.core.context import RequestContext
@@ -94,11 +95,17 @@ async def _start_async() -> None:
 
 
 def start() -> None:
-    """Start the Slack bot using asynchronous Socket Mode."""
+    """Validate configuration and start the Slack bot using asynchronous Socket Mode."""
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    readiness = validate_slack_readiness(settings)
+    for warning in readiness.warnings:
+        logger.warning("Slack readiness: %s", warning)
+    readiness.require_ready()
+
     logger.info("Starting Knowledge Management by Slack bot...")
     logger.info(
         "Configured channels → frontend_support=%s, inventory=%s, work_management=%s, knowledge_uploads=%s",
