@@ -63,6 +63,13 @@ class ItemCatalogService:
                 );
                 CREATE INDEX IF NOT EXISTS idx_inventory_items_active
                     ON inventory_items(active, item_class, sku);
+                CREATE TABLE IF NOT EXISTS inventory_reorder_rules (
+                    sku TEXT NOT NULL,
+                    location_id TEXT NOT NULL,
+                    reorder_point INTEGER NOT NULL,
+                    reorder_quantity INTEGER NOT NULL,
+                    PRIMARY KEY (sku, location_id)
+                );
                 """
             )
 
