@@ -17,7 +17,7 @@ def _values(metadata: dict[str, Any], key: str) -> set[str]:
 
 
 def can_read(metadata: dict[str, Any], context: RequestContext | None) -> bool:
-    """Deny restricted knowledge unless an explicit ACL matches the request."""
+    """Deny restricted knowledge unless an explicit identity/scope ACL matches."""
     visibility = str(metadata.get("visibility") or "internal").lower()
     if visibility in {"public", "internal"}:
         return True
@@ -27,5 +27,11 @@ def can_read(metadata: dict[str, Any], context: RequestContext | None) -> bool:
     if context.user_id and context.user_id in _values(metadata, "allowed_user_ids"):
         return True
     if context.channel_id and context.channel_id in _values(metadata, "allowed_channel_ids"):
+        return True
+    if set(context.roles) & _values(metadata, "allowed_roles"):
+        return True
+    if set(context.groups) & _values(metadata, "allowed_groups"):
+        return True
+    if context.site and context.site in _values(metadata, "allowed_sites"):
         return True
     return False
