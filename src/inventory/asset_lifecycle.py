@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import (
     AllocationType,
     AssetLifecycle,
@@ -50,6 +51,7 @@ ALLOWED_TRANSITIONS: dict[AssetLifecycle, set[AssetLifecycle]] = {
 class SerializedAssetLifecycleService:
     def __init__(self, repository: InventoryRepository):
         self.repository = repository
+        self.customers = CustomerCustodyService(repository)
 
     def put_away(self, asset_id: str, *, location_id: str, actor: str, note: str = "") -> SerializedAsset:
         if not location_id:
@@ -78,6 +80,7 @@ class SerializedAssetLifecycleService:
             raise InventoryDomainError("Assignee is required to issue an asset.")
         if not customer_ref:
             raise InventoryDomainError("Customer reference is required to issue an asset.")
+        customer = self.customers.require_active(customer_ref)
         if allocation_type == AllocationType.LOAN and return_due_at is None:
             raise InventoryDomainError("Loan allocation requires a return due date.")
         if allocation_type == AllocationType.DEDICATED and return_due_at is not None:
@@ -87,7 +90,7 @@ class SerializedAssetLifecycleService:
             AssetLifecycle.ISSUED,
             actor=actor,
             assigned_to=assigned_to,
-            customer_ref=customer_ref,
+            customer_ref=customer.customer_id,
             allocation_type=allocation_type,
             return_due_at=return_due_at,
             note=note,
