@@ -1,4 +1,4 @@
-"""Frontend Support Knowledge Agent with Hybrid RAG + Incident RAG."""
+"""Frontend Support Knowledge Agent with governed knowledge + Incident RAG."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from src.agents.base import BaseAgent
 from src.core.context import RequestContext
 from src.core.errors import safe_error_message
 from src.knowledge.incident_rag import IncidentRAG
+from src.knowledge.retrieval_models import RetrievalQuery
 from src.knowledge.retriever import HybridRetriever
 from src.llm.client import get_llm
 
@@ -30,7 +31,7 @@ When past incident context is provided, highlight patterns that may help resolve
 
 
 class FrontendSupportAgent(BaseAgent):
-    """Answers support questions using knowledge RAG + incident RAG + local LLM."""
+    """Answers support questions using governed knowledge + incident RAG + local LLM."""
 
     name = "frontend_support"
 
@@ -40,7 +41,9 @@ class FrontendSupportAgent(BaseAgent):
         self.llm = get_llm()
 
     async def handle(self, message: str, context: RequestContext) -> str:
-        result = self.retriever.retrieve(message, k=5, graph_depth=1, context=context)
+        result = self.retriever.search(
+            RetrievalQuery(text=message, context=context, limit=5, graph_depth=1)
+        )
         knowledge_context = result.to_context_string()
 
         incident_context = ""
@@ -69,7 +72,9 @@ class FrontendSupportAgent(BaseAgent):
             return safe_error_message(context.request_id)
 
         sources = {
-            doc.metadata.get("source") for doc in result.documents if doc.metadata.get("source")
+            candidate.metadata.get("source")
+            for candidate in result.candidates
+            if candidate.metadata.get("source")
         }
         try:
             for doc in self.incident_rag.similar_incidents(message, k=3):
