@@ -1,4 +1,4 @@
-"""Local vector store using Chroma."""
+"""Local vector store using Chroma behind a small repository interface."""
 
 from __future__ import annotations
 
@@ -29,7 +29,6 @@ class VectorStore:
         self.path.mkdir(parents=True, exist_ok=True)
         self.collection_name = collection_name
         self.embedding_purpose = embedding_purpose
-
         self._client = chromadb.PersistentClient(
             path=str(self.path),
             settings=ChromaSettings(anonymized_telemetry=False),
@@ -47,76 +46,52 @@ class VectorStore:
         ids: list[str] | None = None,
         batch_size: int | None = None,
     ) -> list[str]:
-        """Embed and add documents in batches (important for large incident CSVs)."""
+        """Embed and upsert documents in batches."""
         if not documents:
             return []
-
         metadatas = metadatas or [{} for _ in documents]
         if ids is None:
             import uuid
-
             ids = [str(uuid.uuid4()) for _ in documents]
-
         batch_size = batch_size or (
-            settings.incident_embedding_batch_size
-            if self.embedding_purpose == "incident"
-            else 128
+            settings.incident_embedding_batch_size if self.embedding_purpose == "incident" else 128
         )
         batch_size = max(1, int(batch_size))
-
         total = len(documents)
         for start in range(0, total, batch_size):
             end = min(start + batch_size, total)
             batch_docs = documents[start:end]
-            batch_meta = metadatas[start:end]
-            batch_ids = ids[start:end]
-
             embeddings = self._embeddings.embed_documents(batch_docs)
-            self._collection.add(
+            self._collection.upsert(
                 documents=batch_docs,
                 embeddings=embeddings,
-                metadatas=batch_meta,
-                ids=batch_ids,
+                metadatas=metadatas[start:end],
+                ids=ids[start:end],
             )
-            logger.info(
-                "Embedded batch %s–%s / %s into collection '%s'",
-                start + 1,
-                end,
-                total,
-                self.collection_name,
-            )
-
+            logger.info("Embedded batch %s–%s / %s into '%s'", start + 1, end, total, self.collection_name)
         return ids
 
-    def similarity_search(
-        self,
-        query: str,
-        k: int = 5,
-        where: dict | None = None,
-    ) -> list[Document]:
-        """Return the top-k most similar document chunks."""
-        query_embedding = self._embeddings.embed_query(query)
+    def delete_documents(self, ids: list[str]) -> None:
+        if ids:
+            self._collection.delete(ids=ids)
 
+    def similarity_search(self, query: str, k: int = 5, where: dict | None = None) -> list[Document]:
+        query_embedding = self._embeddings.embed_query(query)
         results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=k,
             where=where,
             include=["documents", "metadatas", "distances"],
         )
-
         documents: list[Document] = []
         if not results["documents"]:
             return documents
-
         for doc, meta, dist in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
+            results["documents"][0], results["metadatas"][0], results["distances"][0]
         ):
             metadata = dict(meta or {})
             metadata["score"] = 1.0 - float(dist)
             documents.append(Document(page_content=doc, metadata=metadata))
-
         return documents
 
     def count(self) -> int:
