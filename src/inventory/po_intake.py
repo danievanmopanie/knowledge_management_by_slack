@@ -14,6 +14,7 @@ from src.inventory.image_ocr import DeliveryImageOcr, IMAGE_EXTENSIONS
 from src.inventory.items import ItemCatalogService
 from src.inventory.procurement import PurchaseOrder, PurchaseOrderLine
 from src.inventory.repository import InventoryRepository
+from src.inventory.suppliers import SupplierService
 from src.knowledge.file_loader import extract_text
 
 
@@ -113,6 +114,7 @@ class PurchaseOrderIntakeWorkflow:
         self.repository = repository or InventoryRepository()
         self.parser = parser or PurchaseOrderDocumentParser()
         self.items = ItemCatalogService(self.repository)
+        self.suppliers = SupplierService(self.repository)
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -149,6 +151,7 @@ class PurchaseOrderIntakeWorkflow:
     ) -> tuple[StagedPurchaseOrder, str]:
         if not purchase_order_id or not supplier:
             raise InventoryDomainError("PO number and supplier are required.")
+        governed_supplier = self.suppliers.require_active(supplier)
         with self.repository._connect() as conn:
             existing = conn.execute(
                 "SELECT 1 FROM inventory_purchase_orders WHERE purchase_order_id=?",
@@ -161,7 +164,7 @@ class PurchaseOrderIntakeWorkflow:
         self._validate_lines(lines)
         po = PurchaseOrder(
             purchase_order_id=purchase_order_id,
-            supplier=supplier,
+            supplier=governed_supplier.supplier_id,
             lines=lines,
             created_by=actor,
             external_reference=external_reference,
@@ -169,7 +172,7 @@ class PurchaseOrderIntakeWorkflow:
         staged = StagedPurchaseOrder(
             staging_id=f"PO-STAGE-{uuid4().hex[:10]}",
             purchase_order_id=purchase_order_id,
-            supplier=supplier,
+            supplier=governed_supplier.supplier_id,
             actor=actor,
             source_path=str(source_path),
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -203,7 +206,8 @@ class PurchaseOrderIntakeWorkflow:
         value = sum(line.quantity_ordered * line.unit_price for line in po.lines)
         preview = (
             f"*PO preview* `{staged.staging_id}` for `{purchase_order_id}`\n"
-            f"Supplier: *{supplier}* | Lines: *{len(po.lines)}* | Units: *{total}* | Value: *{value:.2f}*\n"
+            f"Supplier: *{governed_supplier.name}* (`{governed_supplier.supplier_id}`) | "
+            f"Lines: *{len(po.lines)}* | Units: *{total}* | Value: *{value:.2f}*\n"
             f"Confirm with `confirm po {staged.staging_id}` or cancel with `cancel po {staged.staging_id}`."
         )
         return staged, preview
@@ -219,9 +223,10 @@ class PurchaseOrderIntakeWorkflow:
         if row["actor"] != actor:
             raise InventoryDomainError("Only the user who staged this PO may confirm it.")
         payload = json.loads(row["po_json"])
+        governed_supplier = self.suppliers.require_active(payload["supplier"])
         po = PurchaseOrder(
             purchase_order_id=payload["purchase_order_id"],
-            supplier=payload["supplier"],
+            supplier=governed_supplier.supplier_id,
             created_by=payload["created_by"],
             created_at=datetime.fromisoformat(payload["created_at"]),
             external_reference=payload.get("external_reference", ""),
@@ -252,7 +257,10 @@ class PurchaseOrderIntakeWorkflow:
                 "UPDATE inventory_staged_purchase_orders SET status='confirmed' WHERE staging_id=?",
                 (staging_id,),
             )
-        return f"Purchase order `{po.purchase_order_id}` confirmed with {len(po.lines)} line(s)."
+        return (
+            f"Purchase order `{po.purchase_order_id}` confirmed with {len(po.lines)} line(s) "
+            f"for supplier `{governed_supplier.supplier_id}`."
+        )
 
     def cancel(self, staging_id: str, *, actor: str) -> str:
         with self.repository.transaction() as conn:
