@@ -1,0 +1,18 @@
+[Unit]
+Description=Knowledge Management by Slack – scheduled KB backup
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/knowledge_management_by_slack
+# Adjust user/group to the account that runs the bot on the GX10
+User=danie
+Group=danie
+Environment=PYTHONUNBUFFERED=1
+# Load the same .env the bot uses
+EnvironmentFile=-/opt/knowledge_management_by_slack/.env
+ExecStart=/opt/knowledge_management_by_slack/.venv/bin/python /opt/knowledge_management_by_slack/scripts/run_scheduled_backup.py
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
