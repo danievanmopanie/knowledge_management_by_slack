@@ -151,7 +151,8 @@ class SerializedAssetAuditService:
                 (token, token),
             ).fetchone()
             asset_id = asset["asset_id"] if asset else ""
-            actual_location = asset["location_id"] if asset else ""
+            ledger_location = asset["location_id"] if asset else ""
+            observed_location = audit.location_id
             expected = None
             if asset_id:
                 expected = conn.execute(
@@ -163,7 +164,7 @@ class SerializedAssetAuditService:
                 expected_location = expected["expected_location"]
             elif asset:
                 result = "misplaced"
-                expected_location = actual_location
+                expected_location = ledger_location
             else:
                 result = "unknown"
                 expected_location = ""
@@ -180,7 +181,7 @@ class SerializedAssetAuditService:
                 asset_id=asset_id,
                 result=result,
                 expected_location=expected_location,
-                actual_location=actual_location,
+                actual_location=observed_location,
                 scanned_by=actor,
                 scanned_at=datetime.now(timezone.utc),
             )
