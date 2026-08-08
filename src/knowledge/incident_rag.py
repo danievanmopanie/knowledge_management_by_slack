@@ -16,46 +16,82 @@ logger = logging.getLogger(__name__)
 
 INCIDENT_COLLECTION = "incidents"
 
+# Per-field caps so one noisy journal does not dominate the embedding
+FIELD_LIMITS = {
+    "short_description": 500,
+    "description": 2000,
+    "work_notes": 2500,
+    "comments": 1500,
+    "resolution_notes": 1500,
+}
+
 
 def _clean(text: str) -> str:
     text = re.sub(r"\s+", " ", text or "").strip()
     return text
 
 
+def _clip(text: str, limit: int) -> str:
+    text = _clean(text)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " …"
+
+
+def _dedupe_append(parts: list[str], label: str, value: str) -> None:
+    """Append labelled free text if non-empty and not already covered."""
+    value = _clean(value)
+    if not value:
+        return
+    # Skip if this exact text (or a near-identical prefix) is already present
+    lowered = value.lower()
+    for existing in parts:
+        if lowered in existing.lower() or existing.lower() in lowered:
+            return
+    parts.append(f"{label}: {value}")
+
+
 def _incident_to_text(inc: Incident) -> str:
     """
     Build an embedding-optimised representation of an incident.
 
-    Priority order for semantic matching:
-    1. Problem summary + description (what failed / symptoms)
-    2. Category / subcategory (problem class)
-    3. Location + assignment group (operational context)
-    4. Identifiers last (useful for display, weak for pure semantics)
-    """
-    summary = _clean(inc.short_description)
-    description = _clean(inc.description)
-    category = _clean(inc.category)
-    subcategory = _clean(inc.subcategory)
-    location = _clean(inc.location)
-    group = _clean(inc.assignment_group)
+    Free-text columns embedded (in priority order):
+      1. Short Description – problem headline
+      2. Description – full problem statement
+      3. Resolution Notes – how it was fixed (high value for future similar issues)
+      4. Work Notes – technician investigation trail
+      5. Comments – caller / additional context
 
-    # Lead with the actual problem text – this drives similarity
-    head: list[str] = []
-    if summary:
-        head.append(summary)
-    if description and description.lower() != summary.lower():
-        # Cap very long work notes so embeddings focus on the issue
-        head.append(description[:1200])
+    Structured fields (category, location, group) follow for operational context.
+    """
+    free_text_parts: list[str] = []
+
+    short_desc = _clip(inc.short_description, FIELD_LIMITS["short_description"])
+    if short_desc:
+        free_text_parts.append(short_desc)
+
+    description = _clip(inc.description, FIELD_LIMITS["description"])
+    if description and description.lower() != short_desc.lower():
+        free_text_parts.append(f"Description: {description}")
+
+    resolution = _clip(inc.resolution_notes, FIELD_LIMITS["resolution_notes"])
+    _dedupe_append(free_text_parts, "Resolution", resolution)
+
+    work_notes = _clip(inc.work_notes, FIELD_LIMITS["work_notes"])
+    _dedupe_append(free_text_parts, "Work notes", work_notes)
+
+    comments = _clip(inc.comments, FIELD_LIMITS["comments"])
+    _dedupe_append(free_text_parts, "Comments", comments)
 
     taxonomy: list[str] = []
-    if category:
-        taxonomy.append(f"category: {category}")
-    if subcategory:
-        taxonomy.append(f"subcategory: {subcategory}")
-    if location:
-        taxonomy.append(f"location: {location}")
-    if group:
-        taxonomy.append(f"assignment group: {group}")
+    if inc.category:
+        taxonomy.append(f"category: {_clean(inc.category)}")
+    if inc.subcategory:
+        taxonomy.append(f"subcategory: {_clean(inc.subcategory)}")
+    if inc.location:
+        taxonomy.append(f"location: {_clean(inc.location)}")
+    if inc.assignment_group:
+        taxonomy.append(f"assignment group: {_clean(inc.assignment_group)}")
 
     tail: list[str] = []
     if inc.number:
@@ -63,9 +99,9 @@ def _incident_to_text(inc: Incident) -> str:
     if inc.state:
         tail.append(f"state: {_clean(inc.state)}")
 
-    parts = []
-    if head:
-        parts.append(" ".join(head))
+    parts: list[str] = []
+    if free_text_parts:
+        parts.append("\n".join(free_text_parts))
     if taxonomy:
         parts.append(" | ".join(taxonomy))
     if tail:
@@ -86,6 +122,9 @@ def _incident_metadata(inc: Incident) -> dict[str, Any]:
         "location": inc.location or "",
         "category": inc.category or "",
         "subcategory": inc.subcategory or "",
+        "has_work_notes": bool(_clean(inc.work_notes)),
+        "has_comments": bool(_clean(inc.comments)),
+        "has_resolution_notes": bool(_clean(inc.resolution_notes)),
     }
     if inc.opened_at:
         meta["opened_at"] = inc.opened_at.isoformat()
@@ -123,8 +162,8 @@ class IncidentRAG:
     """
     Incident-focused RAG layer.
 
-    Uses a dedicated embedding model (see INCIDENT_EMBEDDING_MODEL) optimised
-    for short technical problem statements, separate from general knowledge embeddings.
+    Embeds free-text columns:
+    Short Description, Description, Work Notes, Comments, Resolution Notes.
     """
 
     def __init__(
@@ -178,7 +217,6 @@ class IncidentRAG:
         where: dict | None = None,
     ) -> list[Document]:
         """Semantic search over past incidents."""
-        # Light query normalisation – keep technician language intact
         query = _clean(query)
         return self.vector_store.similarity_search(query, k=k, where=where)
 
@@ -187,7 +225,7 @@ class IncidentRAG:
         query: str,
         k: int = 5,
         include_graph: bool = True,
-        max_chars: int = 4000,
+        max_chars: int = 4500,
     ) -> str:
         """Build a context block of similar past incidents for the LLM."""
         docs = self.similar_incidents(query, k=k)
