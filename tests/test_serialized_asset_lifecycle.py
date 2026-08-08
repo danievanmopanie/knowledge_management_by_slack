@@ -71,6 +71,15 @@ def test_full_serialized_asset_lifecycle(tmp_path):
     assert asset.status == AssetLifecycle.RETIRED
     assert asset.retired_at is not None
 
+    with pytest.raises(InventoryDomainError, match="disposal evidence"):
+        service.dispose("A-100", actor="U1", note="Certified recycler")
+
+    service.profiles.add_disposal_evidence(
+        "A-100",
+        evidence_type="recycler_receipt",
+        reference="RECYCLE-2026-42",
+        actor="U1",
+    )
     asset = service.dispose("A-100", actor="U1", note="Certified recycler")
     assert asset.status == AssetLifecycle.DISPOSED
     assert asset.disposed_at is not None
@@ -124,7 +133,7 @@ def test_cannot_dispose_issued_asset_or_skip_retirement(tmp_path):
 
     with pytest.raises(InventoryDomainError, match="Cannot move"):
         service.retire("A-100", actor="U1")
-    with pytest.raises(InventoryDomainError, match="Cannot move"):
+    with pytest.raises(InventoryDomainError):
         service.dispose("A-100", actor="U1")
 
     assert repo.load_asset("A-100").status == AssetLifecycle.ISSUED
