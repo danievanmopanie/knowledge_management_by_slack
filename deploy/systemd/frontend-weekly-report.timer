@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Frontend Support performance report (Mondays 07:30)
+Requires=frontend-weekly-report.service
+
+[Timer]
+# Monday 07:30 local time – adjust if you prefer another day
+OnCalendar=Mon *-*-* 07:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
