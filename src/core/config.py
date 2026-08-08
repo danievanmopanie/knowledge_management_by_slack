@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # Paths
     vectorstore_path: Path = Path("./data/vectorstore")
     raw_docs_path: Path = Path("./data/raw")
+    backup_root: Path = Path("./data/backups")
+
+    # Backup policy
+    backup_include_raw: bool = True
+    backup_retention_count: int = 14  # keep last N backups
+    backup_label_prefix: str = "scheduled"
 
     # App
     log_level: str = "INFO"
