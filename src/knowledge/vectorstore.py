@@ -52,6 +52,7 @@ class VectorStore:
         metadatas = metadatas or [{} for _ in documents]
         if ids is None:
             import uuid
+
             ids = [str(uuid.uuid4()) for _ in documents]
         batch_size = batch_size or (
             settings.incident_embedding_batch_size if self.embedding_purpose == "incident" else 128
@@ -68,14 +69,25 @@ class VectorStore:
                 metadatas=metadatas[start:end],
                 ids=ids[start:end],
             )
-            logger.info("Embedded batch %s–%s / %s into '%s'", start + 1, end, total, self.collection_name)
+            logger.info(
+                "Embedded batch %s–%s / %s into '%s'",
+                start + 1,
+                end,
+                total,
+                self.collection_name,
+            )
         return ids
 
     def delete_documents(self, ids: list[str]) -> None:
         if ids:
             self._collection.delete(ids=ids)
 
-    def similarity_search(self, query: str, k: int = 5, where: dict | None = None) -> list[Document]:
+    def similarity_search(
+        self,
+        query: str,
+        k: int = 5,
+        where: dict | None = None,
+    ) -> list[Document]:
         query_embedding = self._embeddings.embed_query(query)
         results = self._collection.query(
             query_embeddings=[query_embedding],
@@ -86,12 +98,35 @@ class VectorStore:
         documents: list[Document] = []
         if not results["documents"]:
             return documents
-        for doc, meta, dist in zip(
-            results["documents"][0], results["metadatas"][0], results["distances"][0]
+        for doc, meta, dist, doc_id in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+            results["ids"][0],
         ):
             metadata = dict(meta or {})
+            metadata.setdefault("chunk_id", doc_id)
             metadata["score"] = 1.0 - float(dist)
+            metadata["semantic_score"] = metadata["score"]
             documents.append(Document(page_content=doc, metadata=metadata))
+        return documents
+
+    def all_documents(self, where: dict | None = None) -> list[Document]:
+        """Return indexed chunks for local lexical ranking.
+
+        Chroma remains a rebuildable index; this method exists so the first hybrid
+        retrieval implementation does not require another external search service.
+        """
+        result = self._collection.get(where=where, include=["documents", "metadatas"])
+        documents: list[Document] = []
+        for doc_id, doc, meta in zip(
+            result.get("ids") or [],
+            result.get("documents") or [],
+            result.get("metadatas") or [],
+        ):
+            metadata = dict(meta or {})
+            metadata.setdefault("chunk_id", doc_id)
+            documents.append(Document(page_content=doc or "", metadata=metadata))
         return documents
 
     def count(self) -> int:
