@@ -5,21 +5,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
 from src.core.config import settings
 from src.inventory.domain import SerializedAsset, StockTransaction
-from src.inventory.procurement import (
-    Delivery,
-    DeliveryStatus,
-    PurchaseOrder,
-    PurchaseOrderLine,
-    PurchaseOrderStatus,
-    ReconciliationDiscrepancy,
-)
+from src.inventory.procurement import Delivery, PurchaseOrder, ReconciliationDiscrepancy
 
 
 class InventoryRepository:
@@ -56,7 +47,8 @@ class InventoryRepository:
                     tracking_mode TEXT NOT NULL,
                     unit_price REAL NOT NULL DEFAULT 0,
                     model TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY (purchase_order_id) REFERENCES inventory_purchase_orders(purchase_order_id)
+                    FOREIGN KEY (purchase_order_id)
+                        REFERENCES inventory_purchase_orders(purchase_order_id)
                 );
                 CREATE TABLE IF NOT EXISTS inventory_deliveries (
                     delivery_id TEXT PRIMARY KEY,
@@ -142,26 +134,47 @@ class InventoryRepository:
         finally:
             conn.close()
 
-    def save_purchase_order(self, po: PurchaseOrder, conn: sqlite3.Connection | None = None) -> None:
+    def save_purchase_order(
+        self,
+        po: PurchaseOrder,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
         owns = conn is None
         conn = conn or self._connect()
         try:
             conn.execute(
                 """INSERT INTO inventory_purchase_orders VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(purchase_order_id) DO UPDATE SET
-                supplier=excluded.supplier, created_by=excluded.created_by,
-                status=excluded.status, created_at=excluded.created_at,
+                supplier=excluded.supplier,
+                created_by=excluded.created_by,
+                status=excluded.status,
+                created_at=excluded.created_at,
                 external_reference=excluded.external_reference""",
-                (po.purchase_order_id, po.supplier, po.created_by, po.status.value,
-                 po.created_at.isoformat(), po.external_reference),
+                (
+                    po.purchase_order_id,
+                    po.supplier,
+                    po.created_by,
+                    po.status.value,
+                    po.created_at.isoformat(),
+                    po.external_reference,
+                ),
             )
             for line in po.lines:
                 conn.execute(
                     """INSERT INTO inventory_po_lines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(line_id) DO UPDATE SET quantity_received=excluded.quantity_received""",
-                    (line.line_id, po.purchase_order_id, line.sku, line.description,
-                     line.quantity_ordered, line.quantity_received, line.tracking_mode.value,
-                     line.unit_price, line.model),
+                    ON CONFLICT(line_id) DO UPDATE SET
+                    quantity_received=excluded.quantity_received""",
+                    (
+                        line.line_id,
+                        po.purchase_order_id,
+                        line.sku,
+                        line.description,
+                        line.quantity_ordered,
+                        line.quantity_received,
+                        line.tracking_mode.value,
+                        line.unit_price,
+                        line.model,
+                    ),
                 )
             if owns:
                 conn.commit()
@@ -173,55 +186,109 @@ class InventoryRepository:
         conn.execute(
             """INSERT INTO inventory_deliveries VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(delivery_id) DO UPDATE SET status=excluded.status""",
-            (delivery.delivery_id, delivery.purchase_order_id, delivery.supplier_delivery_note,
-             delivery.received_by, delivery.received_at.isoformat(), delivery.status.value),
+            (
+                delivery.delivery_id,
+                delivery.purchase_order_id,
+                delivery.supplier_delivery_note,
+                delivery.received_by,
+                delivery.received_at.isoformat(),
+                delivery.status.value,
+            ),
         )
         for line in delivery.lines:
             conn.execute(
-                """INSERT OR REPLACE INTO inventory_delivery_lines VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (line.delivery_line_id, delivery.delivery_id, line.po_line_id, line.sku,
-                 line.quantity_delivered, line.damaged_quantity, json.dumps(line.serial_numbers), line.note),
+                """INSERT OR REPLACE INTO inventory_delivery_lines
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    line.delivery_line_id,
+                    delivery.delivery_id,
+                    line.po_line_id,
+                    line.sku,
+                    line.quantity_delivered,
+                    line.damaged_quantity,
+                    json.dumps(line.serial_numbers),
+                    line.note,
+                ),
             )
 
-    def post_stock_transaction(self, tx: StockTransaction, conn: sqlite3.Connection) -> None:
+    def post_stock_transaction(
+        self,
+        tx: StockTransaction,
+        conn: sqlite3.Connection,
+    ) -> None:
         if tx.transaction_type != "receive":
             raise ValueError("Atomic receiving currently supports receive transactions only.")
         conn.execute(
             """INSERT INTO inventory_stock_balances(sku, location_id, on_hand, reserved)
             VALUES (?, ?, ?, 0)
-            ON CONFLICT(sku, location_id) DO UPDATE SET on_hand=on_hand+excluded.on_hand""",
+            ON CONFLICT(sku, location_id) DO UPDATE SET
+            on_hand=on_hand+excluded.on_hand""",
             (tx.sku, tx.to_location, tx.quantity),
         )
         conn.execute(
-            """INSERT INTO inventory_stock_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (tx.transaction_id, tx.sku, tx.quantity, tx.transaction_type, tx.actor,
-             tx.at.isoformat(), tx.from_location, tx.to_location, tx.asset_id,
-             tx.customer_ref, tx.reference, tx.note),
+            """INSERT INTO inventory_stock_transactions
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                tx.transaction_id,
+                tx.sku,
+                tx.quantity,
+                tx.transaction_type,
+                tx.actor,
+                tx.at.isoformat(),
+                tx.from_location,
+                tx.to_location,
+                tx.asset_id,
+                tx.customer_ref,
+                tx.reference,
+                tx.note,
+            ),
         )
 
     def save_asset(self, asset: SerializedAsset, conn: sqlite3.Connection) -> None:
         conn.execute(
-            """INSERT INTO inventory_assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (asset.asset_id, asset.sku, asset.serial_number, asset.status.value,
-             asset.location_id, asset.assigned_to, asset.customer_ref,
-             asset.purchase_order_id, asset.received_at.isoformat() if asset.received_at else None,
-             asset.warranty_end.isoformat() if asset.warranty_end else None,
-             asset.retired_at.isoformat() if asset.retired_at else None,
-             asset.disposed_at.isoformat() if asset.disposed_at else None,
-             json.dumps(asset.metadata)),
+            """INSERT INTO inventory_assets
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                asset.asset_id,
+                asset.sku,
+                asset.serial_number,
+                asset.status.value,
+                asset.location_id,
+                asset.assigned_to,
+                asset.customer_ref,
+                asset.purchase_order_id,
+                asset.received_at.isoformat() if asset.received_at else None,
+                asset.warranty_end.isoformat() if asset.warranty_end else None,
+                asset.retired_at.isoformat() if asset.retired_at else None,
+                asset.disposed_at.isoformat() if asset.disposed_at else None,
+                json.dumps(asset.metadata),
+            ),
         )
 
-    def save_discrepancy(self, po_id: str, delivery_id: str,
-                         discrepancy: ReconciliationDiscrepancy,
-                         conn: sqlite3.Connection) -> None:
+    def save_discrepancy(
+        self,
+        po_id: str,
+        delivery_id: str,
+        discrepancy: ReconciliationDiscrepancy,
+        conn: sqlite3.Connection,
+    ) -> None:
         conn.execute(
             """INSERT INTO inventory_exceptions(
-            delivery_id,purchase_order_id,discrepancy_type,delivery_line_id,po_line_id,sku,
-            expected_quantity,actual_quantity,damaged_quantity,detail) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (delivery_id, po_id, discrepancy.discrepancy_type.value,
-             discrepancy.delivery_line_id, discrepancy.po_line_id, discrepancy.sku,
-             discrepancy.expected_quantity, discrepancy.actual_quantity,
-             discrepancy.damaged_quantity, discrepancy.detail),
+            delivery_id,purchase_order_id,discrepancy_type,delivery_line_id,
+            po_line_id,sku,expected_quantity,actual_quantity,damaged_quantity,detail)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                delivery_id,
+                po_id,
+                discrepancy.discrepancy_type.value,
+                discrepancy.delivery_line_id,
+                discrepancy.po_line_id,
+                discrepancy.sku,
+                discrepancy.expected_quantity,
+                discrepancy.actual_quantity,
+                discrepancy.damaged_quantity,
+                discrepancy.detail,
+            ),
         )
 
     def stock_on_hand(self, sku: str, location_id: str) -> int:
