@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekday Work Management execution check (12:00 - has today's scheduled work been touched?)
+Requires=wm-execution-check.service
+
+[Timer]
+# Weekday middays, 12:00 local time - matches DAILY_EXECUTION_CUTOFF_HOUR
+# in .env; keep these in sync if you change one.
+OnCalendar=Mon..Fri *-*-* 12:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

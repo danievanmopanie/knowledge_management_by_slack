@@ -9,7 +9,7 @@ import re
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from src.bot.router import route_message
+from src.bot.router import route_message, route_reaction
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -115,6 +115,35 @@ def handle_message(event, say):
                 text=f"Sorry, I could not process the upload.\n`{type(e).__name__}: {e}`",
                 thread_ts=thread_ts,
             )
+
+
+@app.event("reaction_added")
+def handle_reaction_added(event, client):
+    """
+    Route emoji reactions to the owning agent.
+
+    Currently only #work-management acts on reactions (✅/❌ approve-reject,
+    🚧/⛔/✔️ execution status - see src/agents/work_management/reactions.py).
+    Other agents' default BaseAgent.handle_reaction() returns None, so this
+    is a silent no-op everywhere else.
+    """
+    item = event.get("item", {})
+    channel = item.get("channel")
+    if item.get("type") != "message" or not channel:
+        return
+
+    logger.info(
+        "Reaction '%s' by %s on %s in %s", event.get("reaction"), event.get("user"), item.get("ts"), channel
+    )
+
+    try:
+        response = _run_async(route_reaction(channel, event))
+    except Exception as e:
+        logger.exception("Error while routing reaction")
+        response = f"Sorry, something went wrong handling that reaction.\n`{type(e).__name__}: {e}`"
+
+    if response:
+        client.chat_postMessage(channel=channel, thread_ts=item.get("ts"), text=response)
 
 
 def start():

@@ -2,10 +2,14 @@
 
 **Project Name:** Knowledge Management by Slack  
 **Repository:** `knowledge_management_by_slack`  
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** 8 August 2026  
 **Author:** Danie Ungerer  
 **Status:** Draft for Implementation
+
+**Change Log:**
+- v1.1 (8 August 2026) — Extended `#work-management` scope (FR-30–FR-35, §5, §8, §13) to formally include the Work Approver, Work Executioner and Routine Keeper agents alongside the previously-scoped Planner, Scheduler and Resource Coordinator.
+- v1.0 (8 August 2026) — Initial draft.
 
 ---
 
@@ -80,7 +84,7 @@ All processing (LLM inference, embeddings, vector storage, and agent orchestrati
 |--------------------------|-------------------------------------------|-----------------------|
 | `#frontend-support`      | Frontend Support Knowledge Agent          | Answer support questions, retrieve relevant knowledge, guide troubleshooting, summarise threads |
 | `#inventory`             | Inventory Management Agent                | Query stock/assets, track items, provide status, support basic inventory operations |
-| `#work-management`       | Work Management Orchestrator + specials   | Planner, Scheduler and Resource Coordinator agents working together |
+| `#work-management`       | Work Management Orchestrator + specialists | Work Approver, Planner, Scheduler, Resource Coordinator and Work Executioner agents working together against a shared work item, plus a Routine Keeper enforcing the weekly cadence |
 | `#knowledge-uploads`     | Knowledge Ingest Agent                    | Accept uploaded documents/CSVs, process them, and add them to the knowledge base |
 
 ---
@@ -111,11 +115,17 @@ All processing (LLM inference, embeddings, vector storage, and agent orchestrati
 ### 6.4 `#work-management` Channel
 
 - FR-30: The system shall support a multi-agent pattern consisting of at least:
+  - Work Approver Agent
   - Planner Agent
   - Scheduler Agent
   - Resource Coordinator Agent
-- FR-31: A coordinating agent shall be able to delegate sub-tasks to the specialist agents.
+  - Work Executioner Agent
+  - Routine Keeper Agent
+- FR-31: A coordinating agent (Work Management Orchestrator) shall be able to delegate sub-tasks to the specialist agents and track a shared work item through the sequence Approve → Plan → Schedule → Resource → Execute.
 - FR-32: The agents shall assist with breaking down work, proposing schedules, and identifying resource needs.
+- FR-33: The Work Approver Agent shall record an approve/reject decision on each submitted work item. A request flagged urgent shall be able to bypass the weekly planning cycle and proceed directly to the Work Executioner Agent.
+- FR-34: The Work Executioner Agent shall track the status of scheduled work (Not started / In progress / Blocked / Done) against the current week's locked plan, and shall be able to raise a new work item for unfinished or newly-discovered work.
+- FR-35: The Routine Keeper Agent shall run on a fixed schedule, independent of any Slack message or mention, and shall check whether each of the following occurred on time: the weekly planning session produced a locked plan; each submitted work item received an approve/reject decision within the configured SLA; each day's scheduled work received a status update; a weekly accountability rollup was produced. On a missed or late routine, it shall escalate to the named accountable person for that routine rather than take any corrective action itself. The Routine Keeper Agent shall never itself approve, reject, plan, schedule, resource, lock, or execute a work item.
 
 ### 6.5 `#knowledge-uploads` Channel
 
@@ -152,23 +162,38 @@ Slack Workspace
           │
           ▼
 Slack Bolt Application (Router + Event Handlers)
-          │
+          │  (app_mention, message, and — for #work-management —
+          │   reaction_added events: ✅/❌ approve, 🚧/⛔/✔️ status)
           ▼
 Agent Orchestration Layer (LangGraph)
   ├── Frontend Support Agent
   ├── Inventory Agent
   ├── Work Management Orchestrator
+  │     ├── Work Approver
   │     ├── Planner
   │     ├── Scheduler
-  │     └── Resource Coordinator
+  │     ├── Resource Coordinator
+  │     └── Work Executioner
   └── Knowledge Ingest Agent
           │
           ├── Local LLM (Ollama / vLLM on GX10)
+          ├── Work Management Store (SQLite — work items, approvals, locked plans)
           └── Knowledge Layer
                 ├── Vector Database (Chroma or Qdrant)
                 ├── Local Embeddings
                 └── Raw Document Store
+
+Scheduled Jobs (systemd timers — outside the Slack message path)
+  ├── Frontend Support daily / weekly reports          [existing]
+  ├── Knowledge base backup                             [existing]
+  └── Routine Keeper checks                             [new]
+        planning session locked? · approvals within SLA?
+        daily execution status given? · weekly rollup done?
+        → reads the Work Management Store directly, escalates into
+          #work-management via the same publisher used for reports
 ```
+
+The Routine Keeper is deliberately drawn outside the LangGraph orchestration layer: it is triggered by `systemd` timers, not by a Slack message, and it only reads the Work Management Store and posts — it does not participate in the message-handling graph.
 
 ---
 
@@ -233,7 +258,9 @@ The solution will be considered successful when:
 - Basic human-in-the-loop confirmations
 
 **Phase 3 – Multi-Agent Work Management**
-- `#work-management` with Planner / Scheduler / Resource Coordinator pattern
+- `#work-management` with Work Approver / Planner / Scheduler / Resource Coordinator / Work Executioner agents, coordinated by the Work Management Orchestrator
+- Local Work Management Store (SQLite) for work items, approvals and locked weekly plans
+- Routine Keeper scheduled checks (systemd timers), reusing the existing report/backup scheduling pattern, enforcing the weekly planning → approval → execution cadence
 
 **Phase 4 – Hardening & Extensibility**
 - Better observability, deployment packaging, additional agents as needed

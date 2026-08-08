@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly Work Management planning check (Fridays 17:00 - is next week's plan locked?)
+Requires=wm-planning-check.service
+
+[Timer]
+# Friday 17:00 local time - matches PLANNING_SESSION_CUTOFF_HOUR in .env;
+# keep these in sync if you change one.
+OnCalendar=Fri *-*-* 17:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

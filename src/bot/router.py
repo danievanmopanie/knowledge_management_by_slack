@@ -66,3 +66,18 @@ async def route_message(
 
     logger.info("Routing to agent '%s' for channel %s", agent.name, channel_id)
     return await agent.handle(text, context)
+
+
+async def route_reaction(channel_id: str, event: dict[str, Any]) -> str | None:
+    """
+    Route a `reaction_added` event to the appropriate agent, if any.
+
+    Returns None (and does nothing) for channels whose agent doesn't
+    implement reaction handling - see BaseAgent.handle_reaction default.
+    """
+    agent = _channel_to_agent(channel_id)
+    if agent is None:
+        return None
+
+    context: dict[str, Any] = {"channel_id": channel_id}
+    return await agent.handle_reaction(event, context)

@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekday Work Management approval SLA check (08:00 - anything unapproved past SLA?)
+Requires=wm-approval-sla.service
+
+[Timer]
+# Weekday mornings, 08:00 local time
+OnCalendar=Mon..Fri *-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

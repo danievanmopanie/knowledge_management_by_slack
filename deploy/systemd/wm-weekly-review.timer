@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Work Management accountability review (Mondays 08:00)
+Requires=wm-weekly-review.service
+
+[Timer]
+# Monday 08:00 local time - adjust if you prefer another day/time
+OnCalendar=Mon *-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

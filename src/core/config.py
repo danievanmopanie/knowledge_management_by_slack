@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -51,6 +52,14 @@ class Settings(BaseSettings):
     report_weekly_enabled: bool = True
     report_weekly_location: str | None = None
     report_daily_hours: int = 24
+
+    # Work Management (#work-management)
+    work_management_db_path: Path = Path("./data/work_management/workmgmt.db")
+    work_approval_sla_hours: int = 24
+    planning_session_day: str = "Friday"
+    planning_session_cutoff_hour: int = 17
+    daily_execution_cutoff_hour: int = 12
+    routine_keeper_enabled: bool = True
 
     # App
     log_level: str = "INFO"
