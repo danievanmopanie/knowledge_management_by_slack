@@ -1,4 +1,4 @@
-"""Hybrid RAG retriever: Vector similarity + lightweight Graph expansion."""
+"""Hybrid RAG retriever with access-controlled vector results."""
 
 from __future__ import annotations
 
@@ -7,21 +7,20 @@ from typing import Any
 
 from langchain_core.documents import Document
 
+from src.core.context import RequestContext
 from src.knowledge.graphstore import GraphStore
 from src.knowledge.vectorstore import VectorStore
+from src.security.access import can_read
 
 
 @dataclass
 class RetrievalResult:
-    """Combined result from hybrid retrieval."""
     documents: list[Document] = field(default_factory=list)
     graph_context: list[dict[str, Any]] = field(default_factory=list)
     query: str = ""
 
     def to_context_string(self, max_chars: int = 6000) -> str:
-        """Format retrieved knowledge into a single context block for the LLM."""
         parts: list[str] = []
-
         if self.documents:
             parts.append("### Relevant Knowledge Articles & Notes")
             for i, doc in enumerate(self.documents, 1):
@@ -30,39 +29,21 @@ class RetrievalResult:
                 header = f"[{i}] Source: {source}"
                 if score is not None:
                     header += f" (relevance: {score:.2f})"
-                parts.append(header)
-                parts.append(doc.page_content.strip())
-                parts.append("")
-
+                parts.extend([header, doc.page_content.strip(), ""])
         if self.graph_context:
             parts.append("### Related Entities & Relationships")
             for item in self.graph_context:
-                rel = item.get("relation", "related_to")
-                entity = item.get("entity")
-                etype = item.get("type", "entity")
-                parts.append(f"- ({rel}) {entity} [{etype}]")
+                parts.append(
+                    f"- ({item.get('relation', 'related_to')}) {item.get('entity')} "
+                    f"[{item.get('type', 'entity')}]"
+                )
             parts.append("")
-
         text = "\n".join(parts).strip()
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n\n[Context truncated]"
-        return text
+        return text if len(text) <= max_chars else text[:max_chars] + "\n\n[Context truncated]"
 
 
 class HybridRetriever:
-    """
-    Hybrid retrieval pipeline:
-
-    1. Vector search (semantic similarity over document chunks)
-    2. Lightweight graph expansion (related entities)
-    3. Merge into a single context for the agent
-    """
-
-    def __init__(
-        self,
-        vector_store: VectorStore | None = None,
-        graph_store: GraphStore | None = None,
-    ):
+    def __init__(self, vector_store: VectorStore | None = None, graph_store: GraphStore | None = None):
         self.vector_store = vector_store or VectorStore()
         self.graph_store = graph_store or GraphStore()
 
@@ -72,37 +53,27 @@ class HybridRetriever:
         k: int = 5,
         graph_depth: int = 1,
         where: dict | None = None,
+        context: RequestContext | None = None,
     ) -> RetrievalResult:
-        # 1. Vector similarity search
-        documents = self.vector_store.similarity_search(query, k=k, where=where)
+        # Over-fetch before ACL filtering so denied chunks do not crowd out permitted ones.
+        candidates = self.vector_store.similarity_search(query, k=max(k * 5, k), where=where)
+        documents = [doc for doc in candidates if can_read(doc.metadata, context)][:k]
 
-        # 2. Graph expansion – extract potential entity names from the query
-        #    and from top document metadata, then expand relationships
         graph_context: list[dict[str, Any]] = []
         candidate_entities = set(self.graph_store.search_entities(query, limit=5))
-
         for doc in documents:
-            # If ingest stored entity mentions in metadata, use them
             entities = doc.metadata.get("entities") or []
             if isinstance(entities, str):
                 entities = [e.strip() for e in entities.split(",") if e.strip()]
             candidate_entities.update(entities)
-
         for entity in list(candidate_entities)[:8]:
-            related = self.graph_store.get_related(entity, max_depth=graph_depth)
-            graph_context.extend(related)
+            graph_context.extend(self.graph_store.get_related(entity, max_depth=graph_depth))
 
-        # Deduplicate graph results
-        seen = set()
+        seen: set[tuple[Any, Any]] = set()
         unique_graph = []
         for item in graph_context:
             key = (item.get("entity"), item.get("relation"))
             if key not in seen:
                 seen.add(key)
                 unique_graph.append(item)
-
-        return RetrievalResult(
-            documents=documents,
-            graph_context=unique_graph,
-            query=query,
-        )
+        return RetrievalResult(documents=documents, graph_context=unique_graph, query=query)
