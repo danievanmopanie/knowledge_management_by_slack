@@ -33,6 +33,22 @@ docs = [
     "python-docx>=1.1.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Start CI with high-signal correctness rules. Broaden this as existing code is cleaned up.
+select = ["E9", "F63", "F7", "F82"]
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
