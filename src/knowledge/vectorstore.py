@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from langchain_core.documents import Document
 
 from src.core.config import settings
 from src.knowledge.embeddings import get_embeddings
+
+logger = logging.getLogger(__name__)
 
 
 class VectorStore:
@@ -42,8 +45,9 @@ class VectorStore:
         documents: list[str],
         metadatas: list[dict[str, Any]] | None = None,
         ids: list[str] | None = None,
+        batch_size: int | None = None,
     ) -> list[str]:
-        """Embed and add documents to the collection. Returns the IDs used."""
+        """Embed and add documents in batches (important for large incident CSVs)."""
         if not documents:
             return []
 
@@ -53,14 +57,35 @@ class VectorStore:
 
             ids = [str(uuid.uuid4()) for _ in documents]
 
-        embeddings = self._embeddings.embed_documents(documents)
-
-        self._collection.add(
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids,
+        batch_size = batch_size or (
+            settings.incident_embedding_batch_size
+            if self.embedding_purpose == "incident"
+            else 128
         )
+        batch_size = max(1, int(batch_size))
+
+        total = len(documents)
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            batch_docs = documents[start:end]
+            batch_meta = metadatas[start:end]
+            batch_ids = ids[start:end]
+
+            embeddings = self._embeddings.embed_documents(batch_docs)
+            self._collection.add(
+                documents=batch_docs,
+                embeddings=embeddings,
+                metadatas=batch_meta,
+                ids=batch_ids,
+            )
+            logger.info(
+                "Embedded batch %s–%s / %s into collection '%s'",
+                start + 1,
+                end,
+                total,
+                self.collection_name,
+            )
+
         return ids
 
     def similarity_search(
@@ -89,7 +114,7 @@ class VectorStore:
             results["distances"][0],
         ):
             metadata = dict(meta or {})
-            metadata["score"] = 1.0 - float(dist)  # distance → similarity
+            metadata["score"] = 1.0 - float(dist)
             documents.append(Document(page_content=doc, metadata=metadata))
 
         return documents
