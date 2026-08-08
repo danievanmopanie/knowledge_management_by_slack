@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 from langchain_core.documents import Document
 
+from src.core.config import settings
 from src.knowledge.graphstore import GraphStore
 from src.knowledge.vectorstore import VectorStore
 from src.reporting.incidents import Incident, load_all_incidents
@@ -16,13 +17,13 @@ logger = logging.getLogger(__name__)
 
 INCIDENT_COLLECTION = "incidents"
 
-# Per-field caps so one noisy journal does not dominate the embedding
+# Per-field caps so large journals do not dominate embeddings
 FIELD_LIMITS = {
     "short_description": 500,
-    "description": 2000,
-    "work_notes": 2500,
-    "comments": 1500,
-    "resolution_notes": 1500,
+    "description": 1500,
+    "work_notes": 2000,
+    "comments": 1200,
+    "resolution_notes": 1200,
 }
 
 
@@ -39,11 +40,9 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _dedupe_append(parts: list[str], label: str, value: str) -> None:
-    """Append labelled free text if non-empty and not already covered."""
     value = _clean(value)
     if not value:
         return
-    # Skip if this exact text (or a near-identical prefix) is already present
     lowered = value.lower()
     for existing in parts:
         if lowered in existing.lower() or existing.lower() in lowered:
@@ -53,16 +52,8 @@ def _dedupe_append(parts: list[str], label: str, value: str) -> None:
 
 def _incident_to_text(inc: Incident) -> str:
     """
-    Build an embedding-optimised representation of an incident.
-
-    Free-text columns embedded (in priority order):
-      1. Short Description – problem headline
-      2. Description – full problem statement
-      3. Resolution Notes – how it was fixed (high value for future similar issues)
-      4. Work Notes – technician investigation trail
-      5. Comments – caller / additional context
-
-    Structured fields (category, location, group) follow for operational context.
+    Embedding text from free-text columns:
+    Short Description, Description, Resolution Notes, Work Notes, Comments.
     """
     free_text_parts: list[str] = []
 
@@ -134,7 +125,6 @@ def _incident_metadata(inc: Incident) -> dict[str, Any]:
 
 
 def _link_incident_graph(graph: GraphStore, inc: Incident) -> None:
-    """Create lightweight entity relationships for an incident."""
     node_id = f"incident:{inc.number}"
     graph.add_entity(
         node_id,
@@ -160,10 +150,10 @@ def _link_incident_graph(graph: GraphStore, inc: Incident) -> None:
 
 class IncidentRAG:
     """
-    Incident-focused RAG layer.
+    Incident RAG using lightweight BGE embeddings + Qwen3 for answers.
 
-    Embeds free-text columns:
-    Short Description, Description, Work Notes, Comments, Resolution Notes.
+    Free-text embedded: Short Description, Description, Work Notes,
+    Comments, Resolution Notes.
     """
 
     def __init__(
@@ -178,12 +168,11 @@ class IncidentRAG:
         self.graph_store = graph_store or GraphStore()
 
     def index_incidents(self, incidents: Iterable[Incident]) -> dict[str, int]:
-        """Embed and store incidents; update graph relationships."""
+        """Embed and store incidents in batches (safe for large CSVs)."""
         docs: list[str] = []
         metas: list[dict[str, Any]] = []
         ids: list[str] = []
 
-        count = 0
         for inc in incidents:
             text = _incident_to_text(inc)
             if not text.strip():
@@ -192,22 +181,34 @@ class IncidentRAG:
             metas.append(_incident_metadata(inc))
             ids.append(f"incident-{inc.number}")
             _link_incident_graph(self.graph_store, inc)
-            count += 1
 
+        count = len(docs)
         if docs:
             try:
                 self.vector_store._collection.delete(ids=ids)
             except Exception:
                 pass
-            self.vector_store.add_documents(docs, metadatas=metas, ids=ids)
+
+            logger.info(
+                "Indexing %s incidents with model '%s' (batch_size=%s)",
+                count,
+                settings.incident_embedding_model,
+                settings.incident_embedding_batch_size,
+            )
+            self.vector_store.add_documents(
+                docs,
+                metadatas=metas,
+                ids=ids,
+                batch_size=settings.incident_embedding_batch_size,
+            )
             self.graph_store.save()
 
         logger.info("Indexed %s incidents into incident RAG", count)
         return {"indexed": count, "collection_total": self.vector_store.count()}
 
     def index_from_disk(self) -> dict[str, int]:
-        """Load all known incident CSVs and index them."""
         incidents = load_all_incidents()
+        logger.info("Loaded %s incidents from disk for reindex", len(incidents))
         return self.index_incidents(incidents)
 
     def similar_incidents(
@@ -216,7 +217,6 @@ class IncidentRAG:
         k: int = 5,
         where: dict | None = None,
     ) -> list[Document]:
-        """Semantic search over past incidents."""
         query = _clean(query)
         return self.vector_store.similarity_search(query, k=k, where=where)
 
@@ -227,7 +227,6 @@ class IncidentRAG:
         include_graph: bool = True,
         max_chars: int = 4500,
     ) -> str:
-        """Build a context block of similar past incidents for the LLM."""
         docs = self.similar_incidents(query, k=k)
         if not docs:
             return ""
