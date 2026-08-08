@@ -10,6 +10,7 @@ from src.core.context import RequestContext
 from src.core.errors import safe_error_message
 from src.inventory.assisted_receiving import AssistedReceivingWorkflow
 from src.inventory.commands import InventoryCommandService
+from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import InventoryDomainError
 from src.inventory.overview import InventoryOverviewService
 from src.inventory.po_intake import PurchaseOrderIntakeWorkflow
@@ -23,6 +24,19 @@ HELP = """*Inventory Agent*
 *Operations overview*
 • `inventory summary`
 • `overdue loans`
+
+*Customers and custody*
+Create governed recipients before reserving or issuing inventory:
+• `create customer EMP-42 type employee name Jane Smith`
+• `create customer CONT-12 type contractor name John Doe site SITE-A`
+• `customers`
+• `customer EMP-42`
+• `customer assets EMP-42`
+• `customer history EMP-42`
+• `customer overdue EMP-42`
+• `deactivate customer EMP-42`
+• `activate customer EMP-42`
+Customer types: `employee`, `contractor`, `department`, `external`.
 
 *Storage locations*
 • `create location SITE-A type site site SITE-A name Main Site`
@@ -94,6 +108,17 @@ STAGE_COUNT_RE = re.compile(
 CONFIRM_COUNT_RE = re.compile(r"^confirm\s+count\s+(?P<count>\S+)$", re.I)
 CANCEL_COUNT_RE = re.compile(r"^cancel\s+count\s+(?P<count>\S+)$", re.I)
 PENDING_COUNTS_RE = re.compile(r"^pending\s+counts(?:\s+at\s+(?P<location>\S+))?$", re.I)
+CREATE_CUSTOMER_RE = re.compile(
+    r"^create\s+customer\s+(?P<customer>\S+)\s+type\s+(?P<type>\S+)\s+name\s+(?P<name>.+?)(?:\s+site\s+(?P<site>\S+))?(?:\s+email\s+(?P<email>\S+))?$",
+    re.I,
+)
+CUSTOMERS_RE = re.compile(r"^customers(?:\s+all)?$", re.I)
+CUSTOMER_RE = re.compile(r"^customer\s+(?P<customer>\S+)$", re.I)
+CUSTOMER_ASSETS_RE = re.compile(r"^customer\s+assets\s+(?P<customer>\S+)$", re.I)
+CUSTOMER_HISTORY_RE = re.compile(r"^customer\s+history\s+(?P<customer>\S+)$", re.I)
+CUSTOMER_OVERDUE_RE = re.compile(r"^customer\s+overdue\s+(?P<customer>\S+)$", re.I)
+ACTIVATE_CUSTOMER_RE = re.compile(r"^activate\s+customer\s+(?P<customer>\S+)$", re.I)
+DEACTIVATE_CUSTOMER_RE = re.compile(r"^deactivate\s+customer\s+(?P<customer>\S+)$", re.I)
 
 
 class InventoryAgent(BaseAgent):
@@ -105,6 +130,7 @@ class InventoryAgent(BaseAgent):
         self.po_intake = PurchaseOrderIntakeWorkflow()
         self.stock_counts = StockReconciliationWorkflow(self.commands.repository)
         self.overview = InventoryOverviewService(self.commands.repository)
+        self.customers = CustomerCustodyService(self.commands.repository)
 
     async def handle(self, message: str, context: RequestContext) -> str:
         text = (message or "").strip()
@@ -119,6 +145,59 @@ class InventoryAgent(BaseAgent):
                 return self._inventory_summary()
             if text.lower() == "overdue loans":
                 return self._overdue_loans()
+            if match := CREATE_CUSTOMER_RE.match(text):
+                customer = self.customers.create(
+                    customer_id=match.group("customer"),
+                    customer_type=match.group("type"),
+                    name=match.group("name"),
+                    site=match.group("site") or "",
+                    email=match.group("email") or "",
+                    actor=actor,
+                )
+                return (
+                    f"Created *{customer.customer_type}* customer `{customer.customer_id}` — "
+                    f"{customer.name}{f' ({customer.site})' if customer.site else ''}."
+                )
+            if CUSTOMERS_RE.match(text):
+                rows = self.customers.list(include_inactive=text.lower().endswith(" all"))
+                if not rows:
+                    return "No inventory customers found."
+                lines = ["*Inventory customers*"]
+                for item in rows[:50]:
+                    state = "active" if item.active else "inactive"
+                    site = f" @ `{item.site}`" if item.site else ""
+                    lines.append(
+                        f"• `{item.customer_id}` — {item.name} [{item.customer_type}] {state}{site}"
+                    )
+                return "\n".join(lines)
+            if match := CUSTOMER_ASSETS_RE.match(text):
+                return self._customer_assets(match.group("customer"))
+            if match := CUSTOMER_HISTORY_RE.match(text):
+                return self._customer_history(match.group("customer"))
+            if match := CUSTOMER_OVERDUE_RE.match(text):
+                return self._customer_overdue(match.group("customer"))
+            if match := ACTIVATE_CUSTOMER_RE.match(text):
+                customer = self.customers.set_active(match.group("customer"), active=True)
+                return f"Activated inventory customer `{customer.customer_id}`."
+            if match := DEACTIVATE_CUSTOMER_RE.match(text):
+                customer = self.customers.set_active(match.group("customer"), active=False)
+                return f"Deactivated inventory customer `{customer.customer_id}`."
+            if match := CUSTOMER_RE.match(text):
+                customer = self.customers.get(match.group("customer"))
+                if customer is None:
+                    raise InventoryDomainError(f"Unknown inventory customer: {match.group('customer')}")
+                assets = self.customers.current_assets(customer.customer_id)
+                overdue = self.customers.overdue_assets(customer.customer_id)
+                return (
+                    f"*Customer {customer.customer_id}*\n"
+                    f"• Name: {customer.name}\n"
+                    f"• Type: `{customer.customer_type}`\n"
+                    f"• Site: `{customer.site or '—'}`\n"
+                    f"• Email: `{customer.email or '—'}`\n"
+                    f"• Status: *{'active' if customer.active else 'inactive'}*\n"
+                    f"• Serialized assets currently held: *{len(assets)}*\n"
+                    f"• Overdue loan assets: *{len(overdue)}*"
+                )
             if match := CONFIRM_RECEIPT_RE.match(text):
                 return self.receiving.confirm(match.group("receipt"), actor=actor)
             if match := CANCEL_RECEIPT_RE.match(text):
@@ -243,5 +322,51 @@ class InventoryAgent(BaseAgent):
                 f"• `{item.asset_id}` / `{item.sku}` — `{item.assigned_to or '—'}` "
                 f"customer `{item.customer_ref or '—'}` — due `{item.due_at.date().isoformat()}` "
                 f"(*{item.days_overdue} day(s) overdue*)"
+            )
+        return "\n".join(lines)
+
+    def _customer_assets(self, customer_id: str) -> str:
+        customer = self.customers.get(customer_id)
+        if customer is None:
+            raise InventoryDomainError(f"Unknown inventory customer: {customer_id}")
+        rows = self.customers.current_assets(customer.customer_id)
+        if not rows:
+            return f"Customer `{customer.customer_id}` currently holds no serialized assets."
+        lines = [f"*Assets held by {customer.name} (`{customer.customer_id}`)*"]
+        for item in rows[:50]:
+            due = item["return_due_at"] or "—"
+            lines.append(
+                f"• `{item['asset_id']}` / `{item['sku']}` serial `{item['serial_number']}` — "
+                f"{item['allocation_type'] or '—'} — assigned `{item['assigned_to'] or '—'}` — due `{due}`"
+            )
+        return "\n".join(lines)
+
+    def _customer_history(self, customer_id: str) -> str:
+        customer = self.customers.get(customer_id)
+        if customer is None:
+            raise InventoryDomainError(f"Unknown inventory customer: {customer_id}")
+        rows = self.customers.custody_history(customer.customer_id)
+        if not rows:
+            return f"Customer `{customer.customer_id}` has no serialized-asset custody history."
+        lines = [f"*Custody history — {customer.name} (`{customer.customer_id}`)*"]
+        for item in rows[:50]:
+            lines.append(
+                f"• `{item['at']}` — `{item['asset_id']}` / `{item['sku'] or '—'}`: "
+                f"{item['from_status']} → *{item['to_status']}* by `{item['actor']}`"
+            )
+        return "\n".join(lines)
+
+    def _customer_overdue(self, customer_id: str) -> str:
+        customer = self.customers.get(customer_id)
+        if customer is None:
+            raise InventoryDomainError(f"Unknown inventory customer: {customer_id}")
+        rows = self.customers.overdue_assets(customer.customer_id)
+        if not rows:
+            return f"Customer `{customer.customer_id}` has no overdue serialized loans."
+        lines = [f"*Overdue loans — {customer.name} (`{customer.customer_id}`)*"]
+        for item in rows[:50]:
+            lines.append(
+                f"• `{item['asset_id']}` / `{item['sku']}` — assigned `{item['assigned_to'] or '—'}` — "
+                f"due `{item['return_due_at']}`"
             )
         return "\n".join(lines)
