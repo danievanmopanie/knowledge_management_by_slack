@@ -1,63 +1,71 @@
-"""Inventory Management Agent – coordinator entry for #inventory."""
+"""Inventory Management Agent – Slack coordinator for deterministic inventory operations."""
 
 from __future__ import annotations
 
+import logging
+
 from src.agents.base import BaseAgent
 from src.core.context import RequestContext
+from src.core.errors import safe_error_message
+from src.inventory.commands import InventoryCommandService
+from src.inventory.domain import InventoryDomainError
+
+logger = logging.getLogger(__name__)
 
 HELP = """*Inventory Agent*
 
-Lifecycle is enforced (Ordered → Received → In Storeroom → Issued / Loan → Returned → …).
+The inventory agent now executes deterministic inventory operations against the local SQLite inventory store.
 
-Examples:
-• Attach an approved quote → bulk create order
-• `deliver PO-2026-0001` + delivery-note photo
-• Photo of barcode + `receive against PO-2026-0001`
-• `store A-1042 shelf-B3`
-• `issue A-1042 to @user dedicated`
-• `issue A-1042 to @user loan until 2026-08-20`
-• `return A-1042`
-• `status A-1042` / `status PO-2026-0001`
-• `escalate PO-2026-0001 – short shipped 2 units`
+*Serialized assets*
+• `status asset A-1042`
+• `store asset A-1042 at SHELF-B3`
+• `issue asset A-1042 to U123 customer EMP-42 dedicated`
+• `issue asset A-1042 to U123 customer EMP-42 loan until 2026-08-20`
+• `return asset A-1042`
+• `repair asset A-1042 at REPAIR-CAGE`
+• `quarantine asset A-1042 at QUARANTINE-CAGE`
+• `retire asset A-1042`
+• `dispose asset A-1042`
 
-Barcode photos are decoded locally (pyzbar). Hardware scanners that type into Slack also work.
+*Quantity stock*
+• `stock MOUSE-01 at STORE-A`
+• `low stock`
+• `reserve stock MOUSE-01 5 at STORE-A for EMP-42`
+• `issue stock MOUSE-01 5 from STORE-A to EMP-42`
+• `issue stock MOUSE-01 5 from STORE-A to EMP-42 reservation <id>`
+• `return stock MOUSE-01 2 to STORE-A from EMP-42`
+• `transfer stock MOUSE-01 10 from STORE-A to STORE-B`
+• `count stock MOUSE-01 at STORE-A = 97`
+
+Receiving against purchase orders is implemented in the domain layer; document/photo-assisted Slack receiving is the next workflow slice.
 """
 
 
 class InventoryAgent(BaseAgent):
-    """Slack-facing coordinator stub for inventory requests."""
+    """Slack-facing inventory coordinator that only invokes deterministic domain services."""
 
     name = "inventory"
 
+    def __init__(self):
+        self.commands = InventoryCommandService()
+
     async def handle(self, message: str, context: RequestContext) -> str:
         text = (message or "").strip()
-        files = context.files
-
-        if not text and not files:
+        if not text and not context.files:
+            return HELP
+        if text.lower() in {"help", "?", "hi", "hello"}:
             return HELP
 
-        lower = text.lower()
-        if lower in {"help", "?", "hi", "hello"}:
-            return HELP
-
-        if files and any(
-            k in lower for k in ("quote", "order", "po", "deliver", "receive", "barcode")
-        ):
+        if context.files:
             return (
-                "Received your attachment for inventory processing.\n"
-                "Order / intake / barcode pipelines are scaffolded "
-                "(`src/inventory/`); full LangGraph wiring is next.\n\n"
-                f"Message: {text or '(no text)'}"
+                "I received the attachment, but file-assisted inventory receiving is not enabled in the "
+                "Slack command path yet. Use a deterministic inventory command or type `help`."
             )
 
-        if lower.startswith("status"):
-            return (
-                "Status lookup will query the local inventory store.\n"
-                f"Requested: `{text}`"
-            )
-
-        return (
-            "Inventory Agent received your request.\n"
-            f"You said: {text}\n\n"
-            "Type `help` for supported flows. Architecture: `docs/INVENTORY_ARCHITECTURE.md`."
-        )
+        try:
+            return self.commands.execute(text, actor=context.user_id or "slack-user")
+        except InventoryDomainError as exc:
+            return f"Inventory rule prevented that operation: {exc}"
+        except Exception:
+            logger.exception("Inventory command failed request_id=%s", context.request_id)
+            return safe_error_message(context.request_id)
