@@ -3,6 +3,22 @@ from src.inventory.domain import AssetLifecycle, SerializedAsset, StockTransacti
 from src.inventory.repository import InventoryRepository
 
 
+def seed_locations(commands):
+    commands.execute("create location SITE-A type site site SITE-A name Main Site", actor="admin")
+    commands.execute(
+        "create location STORE-A type storeroom site SITE-A name Main Store parent SITE-A",
+        actor="admin",
+    )
+    commands.execute(
+        "create location STORE-B type storeroom site SITE-A name Secondary Store parent SITE-A",
+        actor="admin",
+    )
+    commands.execute(
+        "create location SHELF-B3 type shelf site SITE-A name Shelf B3 parent STORE-A",
+        actor="admin",
+    )
+
+
 def seed_asset(repo):
     with repo.transaction() as conn:
         repo.save_asset(
@@ -37,6 +53,7 @@ def test_asset_commands_drive_persisted_lifecycle(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     seed_asset(repo)
     commands = InventoryCommandService(repo)
+    seed_locations(commands)
 
     response = commands.execute("store asset A-1 at SHELF-B3", actor="U1")
     assert "in_stock" in response
@@ -51,6 +68,7 @@ def test_asset_commands_drive_persisted_lifecycle(tmp_path):
     assert "issued" in status
     assert "EMP-42" in status
     assert "2026-08-20" in status
+    assert "Shelf B3" in status
 
     commands.execute("return asset A-1", actor="U1")
     persisted = repo.load_asset("A-1")
@@ -63,6 +81,7 @@ def test_stock_commands_reserve_issue_transfer_and_count(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     seed_stock(repo)
     commands = InventoryCommandService(repo)
+    seed_locations(commands)
 
     status = commands.execute("stock MOUSE-01 at STORE-A", actor="U1")
     assert "On hand: *10*" in status
@@ -86,6 +105,32 @@ def test_stock_commands_reserve_issue_transfer_and_count(tmp_path):
     result = commands.execute("count stock MOUSE-01 at STORE-A = 3", actor="U1")
     assert "variance *-1*" in result
     assert repo.stock_on_hand("MOUSE-01", "STORE-A") == 3
+
+
+def test_location_commands_build_and_show_hierarchy(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    commands = InventoryCommandService(repo)
+    seed_locations(commands)
+
+    listing = commands.execute("locations site SITE-A", actor="U1")
+    assert "STORE-A" in listing
+    assert "SHELF-B3" in listing
+
+    path = commands.execute("location path SHELF-B3", actor="U1")
+    assert path == "`SITE-A` → `STORE-A` → `SHELF-B3`"
+
+
+def test_unknown_location_is_rejected_for_stock_and_putaway(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    seed_asset(repo)
+    commands = InventoryCommandService(repo)
+
+    try:
+        commands.execute("store asset A-1 at MADE-UP-SHELF", actor="U1")
+    except Exception as exc:
+        assert "Unknown inventory location" in str(exc)
+    else:
+        raise AssertionError("Expected unknown-location failure")
 
 
 def test_unknown_command_is_rejected(tmp_path):
