@@ -89,7 +89,7 @@ class RetrievalResult:
             )
             for i, candidate in enumerate(self.candidates, 1):
                 source = candidate.metadata.get("source", "unknown")
-                header = f"[{i}] Evidence: {candidate.evidence_id} | Source: {source}"
+                header = f"[E{i}] Evidence: {candidate.evidence_id} | Source: {source}"
                 if candidate.score is not None:
                     header += f" (rank: {candidate.score:.2f})"
                 parts.extend([header, candidate.content.strip(), ""])
