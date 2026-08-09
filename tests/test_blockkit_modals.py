@@ -17,7 +17,11 @@ def test_issue_asset_modal_shapes_and_toggles_loan_date():
     view = modals.build_issue_asset_modal(channel_id="C1", thread_ts="123.45")
     assert view["callback_id"] == ids.MODAL_ISSUE_ASSET
     block_ids = {block["block_id"] for block in view["blocks"]}
-    assert block_ids == {"asset", "recipient", "customer", "allocation"}
+    assert block_ids == {"asset", "recipient", "customer", "customer_create", "allocation"}
+
+    create_block = next(block for block in view["blocks"] if block["block_id"] == "customer_create")
+    assert create_block["accessory"]["action_id"] == ids.HOME_OPEN_CREATE_CUSTOMER
+    assert create_block["accessory"]["text"]["text"] == "New Customer"
 
     with_loan = modals.build_issue_asset_modal(channel_id="C1", show_loan_date=True)
     assert "due" in {block["block_id"] for block in with_loan["blocks"]}
@@ -48,6 +52,12 @@ def test_issue_asset_command_from_state_loan():
         modals.issue_asset_command_from_state(values)
         == "issue asset A-1042 to U123 customer EMP-42 loan until 2026-08-20"
     )
+
+
+def test_create_customer_modal_can_prefill_customer_id():
+    view = modals.build_create_customer_modal(channel_id="C1", initial_customer="EMP-42")
+    customer_block = next(block for block in view["blocks"] if block["block_id"] == "customer")
+    assert customer_block["element"]["initial_value"] == "EMP-42"
 
 
 def test_create_customer_command_from_state_round_trips_into_real_parser(tmp_path):
