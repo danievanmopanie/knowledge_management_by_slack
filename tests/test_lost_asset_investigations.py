@@ -78,6 +78,32 @@ def test_open_assign_note_close_found_investigation(tmp_path):
     assert "audit_investigation_status" not in repo.load_asset("A-1").metadata
 
 
+def test_confirmed_lost_updates_authoritative_asset_and_movement(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    commands = seed(repo)
+    opened = commands.execute("open lost investigation COR-1", actor="tech")
+    investigation_id = opened.split("`")[1]
+
+    commands.execute(
+        f"close lost investigation {investigation_id} outcome confirmed_lost note exhaustive search failed",
+        actor="U-SEC",
+    )
+
+    asset = repo.load_asset("A-1")
+    assert asset is not None
+    assert asset.status == AssetLifecycle.LOST
+    assert asset.location_id == "STORE-A"
+    assert asset.assigned_to == ""
+    assert asset.customer_ref == ""
+    assert asset.metadata["last_known_location"] == "STORE-A"
+    assert asset.metadata["loss_investigation_id"] == investigation_id
+    movement = repo.asset_movements("A-1")[-1]
+    assert movement["from_status"] == "in_stock"
+    assert movement["to_status"] == "lost"
+    assert movement["from_location"] == "STORE-A"
+    assert movement["to_location"] == "STORE-A"
+
+
 def test_open_from_correction_is_idempotent(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     commands = seed(repo)

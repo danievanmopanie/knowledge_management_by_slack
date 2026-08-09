@@ -45,6 +45,7 @@ ALLOWED_TRANSITIONS: dict[AssetLifecycle, set[AssetLifecycle]] = {
         AssetLifecycle.REPAIR,
         AssetLifecycle.RETIRED,
     },
+    AssetLifecycle.LOST: set(),
     AssetLifecycle.RETIRED: {AssetLifecycle.DISPOSED},
     AssetLifecycle.DISPOSED: set(),
 }

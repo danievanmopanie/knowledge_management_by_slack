@@ -112,6 +112,8 @@ class AssetOpsCommandService:
             physical = f"at `{home_text}`"
         elif asset.status in {AssetLifecycle.IN_STOCK, AssetLifecycle.RECEIVED}:
             physical = f"stored at `{home_text}`"
+        elif asset.status == AssetLifecycle.LOST:
+            physical = f"unknown — confirmed lost; last known location `{home_text}`"
         else:
             physical = f"last recorded home location `{home_text}`"
         return (

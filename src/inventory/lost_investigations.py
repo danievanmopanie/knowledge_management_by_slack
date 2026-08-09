@@ -119,7 +119,14 @@ class LostAssetInvestigationService:
                 WHERE investigation_id=?""",
                 (outcome, now.isoformat(), actor, item.investigation_id),
             )
-            self._event(conn, item.investigation_id, "closed", actor, f"{outcome}: {note.strip()}", at=now)
+            self._event(
+                conn,
+                item.investigation_id,
+                "closed",
+                actor,
+                f"{outcome}: {note.strip()}",
+                at=now,
+            )
             if outcome == "found":
                 conn.execute(
                     """UPDATE inventory_assets
@@ -130,6 +137,55 @@ class LostAssetInvestigationService:
                     WHERE asset_id=?""",
                     (item.asset_id,),
                 )
+            elif outcome == "confirmed_lost":
+                asset = conn.execute(
+                    "SELECT status,location_id,customer_ref FROM inventory_assets WHERE asset_id=?",
+                    (item.asset_id,),
+                ).fetchone()
+                if not asset:
+                    raise InventoryDomainError(f"Unknown serialized asset: {item.asset_id}")
+                if asset["status"] != "lost":
+                    conn.execute(
+                        """UPDATE inventory_assets
+                        SET status='lost',assigned_to='',customer_ref='',allocation_type=NULL,
+                            return_due_at=NULL,
+                            metadata_json=json_set(
+                                metadata_json,
+                                '$.last_known_location', location_id,
+                                '$.loss_investigation_id', ?,
+                                '$.loss_finding_id', ?,
+                                '$.loss_correction_id', ?,
+                                '$.loss_confirmed_at', ?,
+                                '$.loss_confirmed_by', ?
+                            )
+                        WHERE asset_id=?""",
+                        (
+                            item.investigation_id,
+                            item.finding_id,
+                            item.correction_id,
+                            now.isoformat(),
+                            actor,
+                            item.asset_id,
+                        ),
+                    )
+                    conn.execute(
+                        """INSERT INTO inventory_asset_movements(
+                            movement_id,asset_id,from_status,to_status,actor,at,
+                            from_location,to_location,customer_ref,note
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            str(uuid4()),
+                            item.asset_id,
+                            asset["status"],
+                            "lost",
+                            actor,
+                            now.isoformat(),
+                            asset["location_id"],
+                            asset["location_id"],
+                            asset["customer_ref"],
+                            f"Confirmed lost via investigation {item.investigation_id}: {note.strip()}",
+                        ),
+                    )
         return self.require(item.investigation_id)
 
     def list(self, *, status: str = "open", owner: str = "") -> list[LostAssetInvestigation]:
