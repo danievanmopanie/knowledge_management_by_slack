@@ -20,6 +20,11 @@ _work_management = WorkManagementAgent()
 _knowledge_ingest = KnowledgeIngestAgent()
 
 
+def get_inventory_agent() -> InventoryAgent:
+    """Return the shared InventoryAgent singleton (used by Block Kit interactivity handlers)."""
+    return _inventory
+
+
 def _channel_to_agent(channel_id: str | None):
     """Return the agent instance for a given Slack channel ID."""
     if not channel_id:

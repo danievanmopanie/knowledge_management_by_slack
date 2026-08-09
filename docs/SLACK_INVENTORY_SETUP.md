@@ -132,6 +132,33 @@ The receiving workflow is intentionally staged:
 
 OCR/extraction output cannot directly change authoritative inventory. Confirmation is always a separate action.
 
+## 11. Enable interactivity (required for the Block Kit UI — App Home, modals, buttons)
+
+The bot now ships an App Home dashboard, fill-in-the-blank modals (Issue Asset, Return
+Asset, Create Customer, Create Location), and Confirm/Cancel buttons on staged PO/receipt/
+count replies. None of this works until the following is done **manually** in the Slack
+app admin dashboard at https://api.slack.com/apps — no code change can do this for you.
+
+1. Select the inventory bot's app in https://api.slack.com/apps.
+2. **Features → Interactivity & Shortcuts**: toggle **On**. Because this app runs in
+   Socket Mode, no Request URL needs to be filled in — Bolt receives button/modal events
+   over the existing socket connection automatically once this is enabled.
+3. **Features → App Home**: toggle **Home Tab** on.
+4. **OAuth & Permissions → Bot Token Scopes**: add
+   - `views:write` (required to open/update modals and publish the Home tab)
+   - `users:read` (needed to resolve the `users_select` picker used on the Issue Asset modal)
+5. Slack will show a banner that scopes changed. Click **Reinstall App to Workspace** (top
+   of the OAuth & Permissions page) and approve.
+6. If the `xoxb-...` Bot Token changed after reinstalling, copy the new value into
+   `SLACK_BOT_TOKEN` in `.env`.
+7. Restart the bot process so it picks up the new scopes/token.
+8. Sanity check: open the bot under Slack's left sidebar **Apps**. The **Home** tab should
+   show a dashboard with buttons (Issue Asset, Return Asset, New Customer, New Location,
+   Inventory Summary) the first time you open it after the bot restarts.
+
+No Socket Mode / app-level token changes are needed — the existing `connections:write`
+app-token scope already covers receiving interactivity events over the socket.
+
 ## Pilot safety recommendation
 
 Start with a dedicated test workspace/channel or clearly identified pilot data. Do not load the organisation's full production inventory before validating the end-to-end Slack flows, permissions, backups and operational procedures with a small representative dataset.
