@@ -21,6 +21,7 @@ class AssetLifecycle(str, Enum):
     RETURNED = "returned"
     REPAIR = "repair"
     QUARANTINE = "quarantine"
+    LOST = "lost"
     RETIRED = "retired"
     DISPOSED = "disposed"
 
