@@ -120,11 +120,41 @@ def register(app: AsyncApp) -> None:
 
     @app.action(ids.HOME_OPEN_CREATE_CUSTOMER)
     async def open_create_customer(ack, body, client):
-        await _open_home_modal(
-            ack,
-            body,
-            client,
-            modals.build_create_customer_modal(channel_id=_home_channel_id(), thread_ts=None),
+        await ack()
+        user_id = body.get("user", {}).get("id")
+        nested_issue_view = body.get("view")
+        if not _home_access_allowed(user_id):
+            if nested_issue_view:
+                await client.views_push(
+                    trigger_id=body["trigger_id"],
+                    view=modals.build_access_denied_modal(),
+                )
+            else:
+                await client.views_open(
+                    trigger_id=body["trigger_id"],
+                    view=modals.build_access_denied_modal(),
+                )
+            return
+
+        if nested_issue_view:
+            values = (nested_issue_view.get("state") or {}).get("values") or {}
+            initial_customer = (
+                (values.get("customer", {}).get("value", {}) or {}).get("value") or ""
+            ).strip()
+            metadata = modals.load_private_metadata(nested_issue_view.get("private_metadata"))
+            await client.views_push(
+                trigger_id=body["trigger_id"],
+                view=modals.build_create_customer_modal(
+                    channel_id=metadata.get("channel_id") or _home_channel_id(),
+                    thread_ts=metadata.get("thread_ts"),
+                    initial_customer=initial_customer,
+                ),
+            )
+            return
+
+        await client.views_open(
+            trigger_id=body["trigger_id"],
+            view=modals.build_create_customer_modal(channel_id=_home_channel_id(), thread_ts=None),
         )
 
     @app.action(ids.HOME_OPEN_CREATE_LOCATION)
