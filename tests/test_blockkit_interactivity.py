@@ -38,6 +38,7 @@ def registered_app():
 def fake_client():
     client = AsyncMock()
     client.views_open.return_value = {"view": {"id": "V123"}}
+    client.views_push.return_value = {"view": {"id": "V124"}}
     return client
 
 
@@ -78,6 +79,35 @@ def test_app_home_action_opens_access_denied_modal_for_user_outside_allowlist(mo
     ack.assert_awaited_once()
     view = client.views_open.await_args.kwargs["view"]
     assert "not authorized" in view["blocks"][0]["text"]["text"]
+
+
+def test_issue_asset_new_customer_pushes_nested_modal_and_prefills_id(monkeypatch):
+    monkeypatch.setattr(interactivity.settings, "inventory_interactive_allowed_user_ids", "U1")
+    app = registered_app()
+    client = fake_client()
+    ack = AsyncMock()
+    body = {
+        "trigger_id": "T1",
+        "user": {"id": "U1"},
+        "view": {
+            "id": "VISSUE",
+            "private_metadata": '{"channel_id": "CINV", "thread_ts": null}',
+            "state": {
+                "values": {
+                    "customer": {"value": {"value": "EMP-42"}},
+                }
+            },
+        },
+    }
+
+    asyncio.run(app.actions[ids.HOME_OPEN_CREATE_CUSTOMER](ack, body, client))
+
+    ack.assert_awaited_once()
+    client.views_open.assert_not_awaited()
+    client.views_push.assert_awaited_once()
+    pushed = client.views_push.await_args.kwargs["view"]
+    customer_block = next(block for block in pushed["blocks"] if block["block_id"] == "customer")
+    assert customer_block["element"]["initial_value"] == "EMP-42"
 
 
 def test_inventory_summary_opens_loading_modal_before_running_query(monkeypatch):
