@@ -79,6 +79,19 @@ def build_issue_asset_modal(
             },
         },
         {
+            "type": "section",
+            "block_id": "customer_create",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Customer not registered yet?* Create the customer here, then return to this Issue Asset form.",
+            },
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "New Customer"},
+                "action_id": ids.HOME_OPEN_CREATE_CUSTOMER,
+            },
+        },
+        {
             "type": "input",
             "block_id": "allocation",
             "dispatch_action": True,
@@ -162,7 +175,12 @@ def return_asset_command_from_state(values: dict) -> str:
     return f"return asset {asset_id}"
 
 
-def build_create_customer_modal(*, channel_id: str, thread_ts: str | None = None) -> dict:
+def build_create_customer_modal(
+    *,
+    channel_id: str,
+    thread_ts: str | None = None,
+    initial_customer: str = "",
+) -> dict:
     return {
         "type": "modal",
         "callback_id": ids.MODAL_CREATE_CUSTOMER,
@@ -179,6 +197,7 @@ def build_create_customer_modal(*, channel_id: str, thread_ts: str | None = None
                     "type": "plain_text_input",
                     "action_id": "value",
                     "placeholder": {"type": "plain_text", "text": "EMP-42"},
+                    **({"initial_value": initial_customer} if initial_customer else {}),
                 },
             },
             {
