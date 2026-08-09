@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from src.inventory.commands import InventoryCommandService
-from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import AssetLifecycle, InventoryDomainError, SerializedAsset
 from src.inventory.repository import InventoryRepository
 from src.knowledge.file_loader import UploadValidationError, _reject_html_masquerading_as_file
