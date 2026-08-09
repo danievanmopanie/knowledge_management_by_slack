@@ -9,6 +9,8 @@ import re
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
+from src.bot.blockkit.actions import attach_confirm_cancel
+from src.bot.interactivity import register as register_interactivity
 from src.bot.readiness import validate_slack_readiness
 from src.bot.router import route_message
 from src.core.config import settings
@@ -21,6 +23,8 @@ app = AsyncApp(
     token=settings.slack_bot_token,
     signing_secret=settings.slack_signing_secret,
 )
+
+register_interactivity(app)
 
 
 def _clean_mention_text(text: str) -> str:
@@ -57,7 +61,7 @@ async def handle_app_mention(event, say):
         logger.exception("Request failed request_id=%s", context.request_id)
         response = safe_error_message(context.request_id)
 
-    await say(text=response, thread_ts=context.thread_ts)
+    await say(text=response, thread_ts=context.thread_ts, blocks=attach_confirm_cancel(response))
 
 
 @app.event("message")

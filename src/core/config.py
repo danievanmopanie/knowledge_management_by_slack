@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     slack_bot_token: str
     slack_app_token: str
     slack_signing_secret: str
+    inventory_interactive_allowed_user_ids: str = ""
 
     # Response model – intelligent answers (Qwen3 on GX10)
     llm_base_url: str = "http://localhost:11434/v1"
