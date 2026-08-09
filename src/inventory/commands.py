@@ -6,6 +6,8 @@ families can extend it without growing one monolithic file indefinitely.
 
 from __future__ import annotations
 
+import re
+
 from src.inventory.asset_ops_commands import AssetOpsCommandService
 from src.inventory.audit_commands import AssetAuditCommandService
 from src.inventory.audit_correction_commands import AssetAuditCorrectionCommandService
@@ -16,6 +18,22 @@ from src.inventory.loss_commands import AssetLossCommandService
 from src.inventory.lost_investigation_commands import LostAssetInvestigationCommandService
 from src.inventory.profile_commands import AssetProfileCommandService
 from src.inventory.repository import InventoryRepository
+
+
+_SLACK_ID_WRAPPER = re.compile(r"(?<!\S)(?:`([^`\s]+)`|<([^<>\s]+)>)(?!\S)")
+
+
+def _normalise_slack_identifier_wrappers(text: str) -> str:
+    """Strip harmless Slack/Markdown wrappers around standalone command identifiers.
+
+    Examples: `` `SVC-123` `` -> ``SVC-123`` and ``<RCV-123>`` -> ``RCV-123``.
+    Free-text notes and normal punctuation are left untouched.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        return match.group(1) or match.group(2) or match.group(0)
+
+    return _SLACK_ID_WRAPPER.sub(replace, text)
 
 
 class InventoryCommandService(BaseInventoryCommandService):
@@ -37,7 +55,7 @@ class InventoryCommandService(BaseInventoryCommandService):
             raise InventoryDomainError(
                 "Send one inventory command per Slack message so fields and notes cannot be merged accidentally."
             )
-        text = " ".join(raw.split())
+        text = _normalise_slack_identifier_wrappers(" ".join(raw.split()))
         for service in (
             self.asset_ops_commands,
             self.profile_commands,
