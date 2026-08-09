@@ -5,8 +5,29 @@ from __future__ import annotations
 from src.bot.blockkit import ids
 
 
-def build_home_view() -> dict:
+def build_home_view(*, authorized: bool = True) -> dict:
     """Return the Block Kit view published to a user's App Home tab."""
+    if not authorized:
+        return {
+            "type": "home",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": "Inventory Agent"},
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "You are not authorized to run inventory actions from App Home. "
+                            "Ask an administrator to add your Slack user ID to "
+                            "`INVENTORY_INTERACTIVE_ALLOWED_USER_IDS`."
+                        ),
+                    },
+                },
+            ],
+        }
     return {
         "type": "home",
         "blocks": [

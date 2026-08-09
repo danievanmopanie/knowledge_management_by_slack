@@ -21,6 +21,12 @@ _STAGE_PATTERNS: tuple[tuple[str, re.Pattern, str, str], ...] = (
     ("count", re.compile(r"confirm count (?P<id>[\w-]+)"), ids.CONFIRM_COUNT, ids.CANCEL_COUNT),
 )
 
+_CONFIRM_CANCEL_BLOCK_IDS = {
+    "inventory_po_confirm_cancel",
+    "inventory_receipt_confirm_cancel",
+    "inventory_count_confirm_cancel",
+}
+
 
 def build_confirm_cancel_blocks(kind: str, staged_id: str) -> list[dict]:
     confirm_action, cancel_action = {
@@ -53,9 +59,24 @@ def build_confirm_cancel_blocks(kind: str, staged_id: str) -> list[dict]:
 
 
 def attach_confirm_cancel(response_text: str) -> list[dict] | None:
-    """Return Confirm/Cancel blocks for a staged PO/receipt/count reply, else None."""
+    """Return the visible preview and Confirm/Cancel controls for staged replies."""
     for kind, pattern, _confirm_action, _cancel_action in _STAGE_PATTERNS:
         match = pattern.search(response_text)
         if match:
-            return build_confirm_cancel_blocks(kind, match.group("id"))
+            return [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": response_text[:3000]},
+                },
+                *build_confirm_cancel_blocks(kind, match.group("id")),
+            ]
     return None
+
+
+def remove_confirm_cancel_blocks(blocks: list[dict]) -> list[dict]:
+    """Remove only this feature's controls while preserving the visible preview."""
+    return [
+        block
+        for block in blocks
+        if block.get("block_id") not in _CONFIRM_CANCEL_BLOCK_IDS
+    ]

@@ -18,3 +18,10 @@ def test_home_view_has_expected_buttons():
         ids.HOME_OPEN_CREATE_LOCATION,
         ids.HOME_OPEN_INVENTORY_SUMMARY,
     }
+
+
+def test_home_view_hides_actions_from_unauthorized_users():
+    view = build_home_view(authorized=False)
+
+    assert not any(block.get("type") == "actions" for block in view["blocks"])
+    assert "not authorized" in view["blocks"][1]["text"]["text"]

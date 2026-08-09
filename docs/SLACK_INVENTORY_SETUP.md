@@ -40,6 +40,7 @@ Copy the resulting `xoxb-...` token into `SLACK_BOT_TOKEN`.
 In **Features → Event Subscriptions**, enable events and subscribe the bot to:
 
 - `app_mention`
+- `app_home_opened`
 - `message.channels`
 
 For a private inventory channel, also subscribe to:
@@ -81,6 +82,7 @@ SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 SLACK_SIGNING_SECRET=...
 CHANNEL_INVENTORY=C...
+INVENTORY_INTERACTIVE_ALLOWED_USER_IDS=U0123456789,U9876543210
 ```
 
 For inventory-only testing, the frontend-support, work-management and knowledge-upload channel variables can be left blank.
@@ -144,14 +146,19 @@ app admin dashboard at https://api.slack.com/apps — no code change can do this
    Socket Mode, no Request URL needs to be filled in — Bolt receives button/modal events
    over the existing socket connection automatically once this is enabled.
 3. **Features → App Home**: toggle **Home Tab** on.
-4. **OAuth & Permissions → Bot Token Scopes**: add
-   - `views:write` (required to open/update modals and publish the Home tab)
-   - `users:read` (needed to resolve the `users_select` picker used on the Issue Asset modal)
-5. Slack will show a banner that scopes changed. Click **Reinstall App to Workspace** (top
-   of the OAuth & Permissions page) and approve.
-6. If the `xoxb-...` Bot Token changed after reinstalling, copy the new value into
-   `SLACK_BOT_TOKEN` in `.env`.
-7. Restart the bot process so it picks up the new scopes/token.
+4. **Features → Event Subscriptions**: ensure `app_home_opened` is included under bot
+   events. The view APIs and Slack-populated `users_select` element do not require
+   `views:write` or `users:read`; the existing `chat:write` scope is used when an action
+   posts its result to the inventory channel.
+5. Add the Slack user IDs allowed to run App Home inventory operations to `.env`:
+
+   ```text
+   INVENTORY_INTERACTIVE_ALLOWED_USER_IDS=U0123456789,U9876543210
+   ```
+
+   App Home remains visible without this setting, but its inventory actions are disabled.
+6. Reinstall the app only if you changed event subscriptions or existing OAuth scopes.
+7. Restart the bot process so it picks up the updated configuration.
 8. Sanity check: open the bot under Slack's left sidebar **Apps**. The **Home** tab should
    show a dashboard with buttons (Issue Asset, Return Asset, New Customer, New Location,
    Inventory Summary) the first time you open it after the bot restarts.

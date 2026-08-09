@@ -66,4 +66,13 @@ def validate_slack_readiness(settings) -> SlackReadiness:
                 f"Slack channel {channel_id} is assigned to multiple agents: {', '.join(names)}."
             )
 
+    interactive_users = (
+        getattr(settings, "inventory_interactive_allowed_user_ids", "") or ""
+    ).strip()
+    if not interactive_users:
+        warnings.append(
+            "INVENTORY_INTERACTIVE_ALLOWED_USER_IDS is empty; inventory App Home actions "
+            "will be disabled."
+        )
+
     return SlackReadiness(errors=tuple(errors), warnings=tuple(warnings))

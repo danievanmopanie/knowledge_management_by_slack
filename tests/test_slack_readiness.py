@@ -8,6 +8,7 @@ def settings(**overrides):
         slack_bot_token="xoxb-test",
         slack_app_token="xapp-test",
         slack_signing_secret="secret",
+        inventory_interactive_allowed_user_ids="UADMIN",
         channel_inventory="CINV",
         channel_frontend_support="CFRONT",
         channel_work_management="CWORK",
@@ -51,3 +52,9 @@ def test_placeholder_tokens_are_rejected():
     result = validate_slack_readiness(settings(slack_bot_token="xoxb-your-bot-token"))
     assert result.ready is False
     assert any("SLACK_BOT_TOKEN" in item for item in result.errors)
+
+
+def test_empty_inventory_interactive_allowlist_is_a_warning():
+    result = validate_slack_readiness(settings(inventory_interactive_allowed_user_ids=""))
+    assert result.ready is True
+    assert any("INVENTORY_INTERACTIVE_ALLOWED_USER_IDS" in item for item in result.warnings)

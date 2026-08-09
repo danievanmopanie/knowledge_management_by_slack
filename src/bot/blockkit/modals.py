@@ -314,3 +314,24 @@ def build_inventory_summary_modal(summary_text: str) -> dict:
             {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}},
         ],
     }
+
+
+def build_access_denied_modal() -> dict:
+    """Explain why an App Home action is unavailable without exposing inventory data."""
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Inventory Access"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "You are not authorized to run inventory actions from App Home. "
+                        "Contact an inventory administrator if you need access."
+                    ),
+                },
+            }
+        ],
+    }
