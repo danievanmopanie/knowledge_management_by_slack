@@ -41,6 +41,16 @@ def validate_slack_file(file_info: dict[str, Any]) -> tuple[str, str]:
     return safe_name, suffix
 
 
+def _reject_html_masquerading_as_file(path: Path) -> None:
+    """Catch Slack auth/permission pages returned with a successful HTTP response."""
+    prefix = path.read_bytes()[:1024].lstrip().lower()
+    if prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html"):
+        raise UploadValidationError(
+            "Slack returned an HTML page instead of the attachment. "
+            "Reinstall the Slack app with the `files:read` bot scope and retry."
+        )
+
+
 async def download_slack_file(file_info: dict[str, Any], target_dir: Path | None = None) -> Path:
     """Stream a validated Slack file to the controlled staging directory."""
     url = file_info.get("url_private_download") or file_info.get("url_private")
@@ -66,6 +76,7 @@ async def download_slack_file(file_info: dict[str, Any], target_dir: Path | None
                         if written > settings.max_upload_bytes:
                             raise UploadValidationError("File exceeds the configured upload-size limit")
                         out.write(chunk)
+        _reject_html_masquerading_as_file(target_path)
     except Exception:
         target_path.unlink(missing_ok=True)
         raise
