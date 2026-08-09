@@ -203,8 +203,10 @@ class AssetLossGovernanceService:
         note: str,
     ) -> AssetLossCase:
         item = self.require(loss_id)
-        if item.status not in {"approved", "written_off"}:
-            raise InventoryDomainError("Only approved or written-off loss cases can be recovered.")
+        if item.status not in {"pending_approval", "approved", "written_off"}:
+            raise InventoryDomainError(
+                "Only an active confirmed-loss case can be recovered."
+            )
         location = self.locations.require_active(location_id)
         if not recovery_reference.strip():
             raise InventoryDomainError("Asset recovery requires a recovery/reversal reference.")
@@ -213,11 +215,50 @@ class AssetLossGovernanceService:
         asset = self.repository.load_asset(item.asset_id)
         if asset is None:
             raise InventoryDomainError(f"Unknown serialized asset: {item.asset_id}")
+        if asset.status.value != "lost":
+            raise InventoryDomainError(
+                f"Asset {item.asset_id} is not in confirmed-lost lifecycle state."
+            )
         now = datetime.now(timezone.utc)
         with self.repository.transaction() as conn:
             conn.execute(
-                "UPDATE inventory_assets SET location_id=? WHERE asset_id=?",
-                (location.location_id, item.asset_id),
+                """UPDATE inventory_assets
+                SET status='quarantine',location_id=?,assigned_to='',customer_ref='',
+                    allocation_type=NULL,return_due_at=NULL,
+                    metadata_json=json_set(
+                        metadata_json,
+                        '$.recovery_reference', ?,
+                        '$.recovered_at', ?,
+                        '$.recovered_by', ?,
+                        '$.recovery_location', ?
+                    )
+                WHERE asset_id=?""",
+                (
+                    location.location_id,
+                    recovery_reference.strip(),
+                    now.isoformat(),
+                    actor,
+                    location.location_id,
+                    item.asset_id,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO inventory_asset_movements(
+                    movement_id,asset_id,from_status,to_status,actor,at,
+                    from_location,to_location,customer_ref,note
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    str(uuid4()),
+                    item.asset_id,
+                    "lost",
+                    "quarantine",
+                    actor,
+                    now.isoformat(),
+                    asset.location_id,
+                    location.location_id,
+                    "",
+                    f"Recovered under {recovery_reference.strip()}: {note.strip()}",
+                ),
             )
             conn.execute(
                 """UPDATE inventory_asset_loss_cases
