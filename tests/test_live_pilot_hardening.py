@@ -83,6 +83,31 @@ def test_returned_asset_can_be_routed_to_repair_from_inspection(tmp_path):
     assert asset.location_id == "REPAIR-CAGE"
 
 
+def test_slack_backticks_around_service_id_are_accepted(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    commands = InventoryCommandService(repo)
+    seed_asset(repo, status=AssetLifecycle.REPAIR)
+    opened = commands.execute("open service inspection for asset A-1 note test", actor="TECH")
+    service_id = opened.split("`")[1]
+
+    result = commands.execute(f"service `{service_id}`", actor="TECH")
+
+    assert service_id in result
+    assert "Status: *open*" in result
+
+
+def test_angle_brackets_around_service_id_are_accepted(tmp_path):
+    repo = InventoryRepository(tmp_path / "inventory.db")
+    commands = InventoryCommandService(repo)
+    seed_asset(repo, status=AssetLifecycle.REPAIR)
+    opened = commands.execute("open service inspection for asset A-1 note test", actor="TECH")
+    service_id = opened.split("`")[1]
+
+    result = commands.execute(f"service <{service_id}>", actor="TECH")
+
+    assert service_id in result
+
+
 def test_multiline_slack_commands_are_rejected(tmp_path):
     repo = InventoryRepository(tmp_path / "inventory.db")
     commands = InventoryCommandService(repo)
