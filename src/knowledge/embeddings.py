@@ -47,10 +47,20 @@ class PrefixedEmbeddings:
 
 
 def _make_openai_embeddings(model: str, base_url: str | None = None) -> OpenAIEmbeddings:
+    """Create an OpenAI-compatible embeddings client for Ollama.
+
+    LangChain's OpenAIEmbeddings tokenises inputs by default when checking the
+    embedding context length. That makes the OpenAI SDK send token arrays to
+    compatible providers. Ollama is most reliable when it receives the raw
+    text strings, so context-length tokenisation is deliberately disabled.
+    Ollama handles over-length input truncation itself.
+    """
     return OpenAIEmbeddings(
         base_url=base_url or settings.embedding_base_url,
         api_key=settings.llm_api_key,
         model=model,
+        check_embedding_ctx_length=False,
+        encoding_format="float",
     )
 
 
