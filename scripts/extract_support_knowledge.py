@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 
+from src.core.config import settings
 from src.knowledge.support_extraction import SupportKnowledgeExtractor
 from src.reporting.incidents import load_all_incidents
 
@@ -29,16 +31,40 @@ def parse_args() -> argparse.Namespace:
 
 
 async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
     args = parse_args()
     incidents = load_all_incidents()
+    loaded_count = len(incidents)
+
     if args.resolved_only:
         incidents = [
             incident
             for incident in incidents
             if (incident.state or "").strip().lower() in {"resolved", "closed"}
         ]
+    eligible_count = len(incidents)
+
     if args.limit > 0:
         incidents = incidents[: args.limit]
+
+    worker_count = args.concurrency or settings.support_extraction_concurrency
+    print(
+        "Support extraction starting\n"
+        f"  loaded_from_disk: {loaded_count}\n"
+        f"  eligible_after_filters: {eligible_count}\n"
+        f"  selected_this_run: {len(incidents)}\n"
+        f"  model: {settings.support_extraction_model}\n"
+        f"  concurrency: {worker_count}\n"
+        f"  force: {args.force}\n",
+        flush=True,
+    )
+
+    if not incidents:
+        print("No incidents matched the requested filters.", flush=True)
+        return
 
     extractor = SupportKnowledgeExtractor()
     stats = await extractor.extract_many(
@@ -47,8 +73,13 @@ async def main() -> None:
         concurrency=args.concurrency,
     )
     print(
-        f"Support extraction complete: processed={stats['processed']} "
-        f"failed={stats['failed']} total_selected={len(incidents)}"
+        "Support extraction complete: "
+        f"processed={stats['processed']} "
+        f"cached={stats['cached']} "
+        f"extracted={stats['extracted']} "
+        f"failed={stats['failed']} "
+        f"total_selected={len(incidents)}",
+        flush=True,
     )
 
 
