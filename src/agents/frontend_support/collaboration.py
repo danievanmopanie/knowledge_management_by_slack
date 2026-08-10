@@ -1,0 +1,474 @@
+"""Collaborative thread intelligence for #frontend-support.
+
+The channel is intentionally not a ticket queue. This module listens to ordinary
+conversation, stores who contributed what, classifies messages cheaply, and only
+asks the expensive support agent to intervene when the message is technically
+meaningful.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+
+from src.core.config import settings
+from src.knowledge.support_graph import GraphEntity, SupportEntityType, SupportKnowledgeGraph, SupportRelation
+
+INCIDENT_RE = re.compile(r"\bINC\d{4,}\b", re.IGNORECASE)
+RESOLUTION_PATTERNS = (
+    re.compile(r"\bthat(?:'s| is)\s+(fixed|solved|resolved)\s+(it|the issue|the problem)?\b", re.I),
+    re.compile(r"\b(that|this|it)\s+(fixed|solved|resolved)\s+(it|the issue|the problem)?\b", re.I),
+    re.compile(r"\bworking\s+now\b", re.I),
+    re.compile(r"\bissue\s+(is\s+)?resolved\b", re.I),
+    re.compile(r"\bproblem\s+(is\s+)?resolved\b", re.I),
+    re.compile(r"\bgot\s+it\s+working\b", re.I),
+)
+TECHNICAL_HINTS = (
+    "error",
+    "issue",
+    "problem",
+    "not working",
+    "fails",
+    "failing",
+    "failed",
+    "unable",
+    "cannot",
+    "can't",
+    "crash",
+    "prompt",
+    "password",
+    "outlook",
+    "teams",
+    "windows",
+    "laptop",
+    "printer",
+    "network",
+    "wifi",
+    "vpn",
+    "application",
+    "device",
+    "service",
+    "incident",
+)
+TROUBLESHOOTING_HINTS = (
+    "tried",
+    "restarted",
+    "rebooted",
+    "reinstalled",
+    "cleared",
+    "reset",
+    "tested",
+    "checked",
+    "removed",
+    "updated",
+    "recreated",
+    "disabled",
+    "enabled",
+)
+SOCIAL_HINTS = (
+    "thanks",
+    "thank you",
+    "nice one",
+    "well done",
+    "great work",
+    "good job",
+    "awesome",
+    "morning",
+    "afternoon",
+    "congrats",
+)
+
+
+class MessageKind(StrEnum):
+    SOCIAL = "social"
+    TECHNICAL_QUESTION = "technical_question"
+    SUPPORT_SIGNAL = "support_signal"
+    TROUBLESHOOTING = "troubleshooting"
+    INCIDENT_REFERENCE = "incident_reference"
+    POSSIBLE_RESOLUTION = "possible_resolution"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class CollaborationDecision:
+    kind: MessageKind
+    invoke_agent: bool = False
+    prompt_for_incident: bool = False
+    prompt_for_capture: bool = False
+    incident_number: str | None = None
+    agent_query: str = ""
+
+
+@dataclass(frozen=True)
+class ThreadState:
+    channel_id: str
+    thread_ts: str
+    requester_id: str
+    incident_number: str | None
+    status: str
+    resolver_id: str | None
+    root_message: str
+    participants: tuple[str, ...]
+
+
+class FrontendThreadStore:
+    """SQLite persistence for thread state and attributed human contributions."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or settings.platform_db_path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS frontend_thread_state (
+                    channel_id TEXT NOT NULL,
+                    thread_ts TEXT NOT NULL,
+                    requester_id TEXT NOT NULL,
+                    incident_number TEXT,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    resolver_id TEXT,
+                    root_message TEXT NOT NULL DEFAULT '',
+                    participants_json TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY (channel_id, thread_ts)
+                );
+
+                CREATE TABLE IF NOT EXISTS frontend_thread_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id TEXT NOT NULL,
+                    thread_ts TEXT NOT NULL,
+                    message_ts TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    message_kind TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    UNIQUE(channel_id, message_ts)
+                );
+
+                CREATE TABLE IF NOT EXISTS frontend_reusable_knowledge (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id TEXT NOT NULL,
+                    thread_ts TEXT NOT NULL,
+                    incident_number TEXT NOT NULL,
+                    requester_id TEXT NOT NULL,
+                    resolver_id TEXT,
+                    symptom TEXT NOT NULL,
+                    resolution TEXT NOT NULL,
+                    contributors_json TEXT NOT NULL,
+                    source_events_json TEXT NOT NULL,
+                    confirmed_by TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'trusted',
+                    UNIQUE(channel_id, thread_ts)
+                );
+                """
+            )
+
+    def ensure_thread(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        requester_id: str,
+        root_message: str,
+    ) -> ThreadState:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO frontend_thread_state
+                    (channel_id, thread_ts, requester_id, root_message, participants_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (channel_id, thread_ts, requester_id, root_message, json.dumps([requester_id])),
+            )
+        return self.get_thread(channel_id, thread_ts)
+
+    def get_thread(self, channel_id: str, thread_ts: str) -> ThreadState:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM frontend_thread_state WHERE channel_id=? AND thread_ts=?",
+                (channel_id, thread_ts),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown frontend-support thread {channel_id}/{thread_ts}")
+        return ThreadState(
+            channel_id=row["channel_id"],
+            thread_ts=row["thread_ts"],
+            requester_id=row["requester_id"],
+            incident_number=row["incident_number"],
+            status=row["status"],
+            resolver_id=row["resolver_id"],
+            root_message=row["root_message"],
+            participants=tuple(json.loads(row["participants_json"] or "[]")),
+        )
+
+    def add_event(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        message_ts: str,
+        user_id: str,
+        kind: MessageKind,
+        text: str,
+    ) -> None:
+        state = self.get_thread(channel_id, thread_ts)
+        participants = list(state.participants)
+        if user_id not in participants:
+            participants.append(user_id)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO frontend_thread_events
+                    (channel_id, thread_ts, message_ts, user_id, message_kind, text)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (channel_id, thread_ts, message_ts, user_id, kind.value, text),
+            )
+            conn.execute(
+                """
+                UPDATE frontend_thread_state SET participants_json=?
+                WHERE channel_id=? AND thread_ts=?
+                """,
+                (json.dumps(participants), channel_id, thread_ts),
+            )
+
+    def bind_incident(self, channel_id: str, thread_ts: str, incident_number: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE frontend_thread_state SET incident_number=?
+                WHERE channel_id=? AND thread_ts=?
+                """,
+                (incident_number.upper(), channel_id, thread_ts),
+            )
+
+    def mark_possible_resolution(
+        self, channel_id: str, thread_ts: str, resolver_id: str
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE frontend_thread_state SET status='possible_resolution', resolver_id=?
+                WHERE channel_id=? AND thread_ts=?
+                """,
+                (resolver_id, channel_id, thread_ts),
+            )
+
+    def recent_events(self, channel_id: str, thread_ts: str, limit: int = 12) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT message_ts, user_id, message_kind, text
+                FROM frontend_thread_events
+                WHERE channel_id=? AND thread_ts=?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (channel_id, thread_ts, limit),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def confirm_knowledge(self, channel_id: str, thread_ts: str, actor_id: str) -> str:
+        state = self.get_thread(channel_id, thread_ts)
+        if actor_id not in {state.requester_id, state.resolver_id}:
+            return "Only the original requester or the identified resolver can confirm this knowledge capture."
+        if not state.incident_number:
+            return "Please add the ServiceNow incident number to this thread before capturing it as reusable knowledge."
+
+        events = self.recent_events(channel_id, thread_ts, limit=50)
+        resolution_events = [e for e in events if e["message_kind"] == MessageKind.POSSIBLE_RESOLUTION.value]
+        resolution = resolution_events[-1]["text"] if resolution_events else events[-1]["text"]
+        contributors = sorted({e["user_id"] for e in events})
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO frontend_reusable_knowledge
+                    (channel_id, thread_ts, incident_number, requester_id, resolver_id,
+                     symptom, resolution, contributors_json, source_events_json,
+                     confirmed_by, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'trusted')
+                """,
+                (
+                    channel_id,
+                    thread_ts,
+                    state.incident_number,
+                    state.requester_id,
+                    state.resolver_id,
+                    state.root_message,
+                    resolution,
+                    json.dumps(contributors),
+                    json.dumps(events),
+                    actor_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE frontend_thread_state SET status='resolved'
+                WHERE channel_id=? AND thread_ts=?
+                """,
+                (channel_id, thread_ts),
+            )
+        return f"Captured this resolution as trusted reusable knowledge for {state.incident_number}."
+
+
+class FrontendCollaborationService:
+    def __init__(
+        self,
+        store: FrontendThreadStore | None = None,
+        graph: SupportKnowledgeGraph | None = None,
+    ):
+        self.store = store or FrontendThreadStore()
+        self.graph = graph or SupportKnowledgeGraph()
+
+    @staticmethod
+    def classify(text: str) -> MessageKind:
+        clean = " ".join((text or "").split())
+        lowered = clean.lower()
+        if not clean:
+            return MessageKind.OTHER
+        if any(pattern.search(clean) for pattern in RESOLUTION_PATTERNS):
+            return MessageKind.POSSIBLE_RESOLUTION
+        if INCIDENT_RE.search(clean) and len(clean.split()) <= 8:
+            return MessageKind.INCIDENT_REFERENCE
+        if any(hint in lowered for hint in TROUBLESHOOTING_HINTS):
+            return MessageKind.TROUBLESHOOTING
+        if "?" in clean and any(hint in lowered for hint in TECHNICAL_HINTS):
+            return MessageKind.TECHNICAL_QUESTION
+        if any(hint in lowered for hint in TECHNICAL_HINTS):
+            return MessageKind.SUPPORT_SIGNAL
+        if any(hint in lowered for hint in SOCIAL_HINTS):
+            return MessageKind.SOCIAL
+        return MessageKind.OTHER
+
+    def observe(
+        self,
+        *,
+        channel_id: str,
+        message_ts: str,
+        thread_ts: str | None,
+        user_id: str,
+        text: str,
+    ) -> CollaborationDecision:
+        root_ts = thread_ts or message_ts
+        is_root = thread_ts is None
+        kind = self.classify(text)
+
+        if is_root:
+            self.store.ensure_thread(
+                channel_id=channel_id,
+                thread_ts=root_ts,
+                requester_id=user_id,
+                root_message=text,
+            )
+        else:
+            try:
+                self.store.get_thread(channel_id, root_ts)
+            except KeyError:
+                self.store.ensure_thread(
+                    channel_id=channel_id,
+                    thread_ts=root_ts,
+                    requester_id=user_id,
+                    root_message="",
+                )
+
+        self.store.add_event(
+            channel_id=channel_id,
+            thread_ts=root_ts,
+            message_ts=message_ts,
+            user_id=user_id,
+            kind=kind,
+            text=text,
+        )
+        state = self.store.get_thread(channel_id, root_ts)
+
+        incident_match = INCIDENT_RE.search(text or "")
+        incident_number = incident_match.group(0).upper() if incident_match else None
+        if incident_number and user_id == state.requester_id:
+            self.store.bind_incident(channel_id, root_ts, incident_number)
+            state = self.store.get_thread(channel_id, root_ts)
+
+        if kind == MessageKind.POSSIBLE_RESOLUTION:
+            self.store.mark_possible_resolution(channel_id, root_ts, user_id)
+            return CollaborationDecision(
+                kind=kind,
+                prompt_for_capture=True,
+                incident_number=state.incident_number,
+            )
+
+        meaningful = {
+            MessageKind.TECHNICAL_QUESTION,
+            MessageKind.SUPPORT_SIGNAL,
+            MessageKind.TROUBLESHOOTING,
+        }
+        invoke_agent = kind in meaningful
+        prompt_for_incident = bool(
+            is_root and kind in meaningful and not state.incident_number
+        )
+
+        return CollaborationDecision(
+            kind=kind,
+            invoke_agent=invoke_agent,
+            prompt_for_incident=prompt_for_incident,
+            incident_number=state.incident_number,
+            agent_query=self.build_agent_query(channel_id, root_ts) if invoke_agent else "",
+        )
+
+    def build_agent_query(self, channel_id: str, thread_ts: str) -> str:
+        state = self.store.get_thread(channel_id, thread_ts)
+        events = self.store.recent_events(channel_id, thread_ts)
+        lines = [
+            "Current collaborative Slack thread:",
+            f"Incident: {state.incident_number or 'not yet supplied'}",
+            f"Requester: {state.requester_id}",
+        ]
+        for event in events:
+            lines.append(
+                f"- {event['user_id']} [{event['message_kind']}]: {event['text']}"
+            )
+        lines.append(
+            "Respond only if you can add useful troubleshooting knowledge, repeat-incident evidence, or a concise collaborative next step."
+        )
+        return "\n".join(lines)
+
+    def confirm_knowledge(self, channel_id: str, thread_ts: str, actor_id: str) -> str:
+        result = self.store.confirm_knowledge(channel_id, thread_ts, actor_id)
+        if not result.startswith("Captured this resolution"):
+            return result
+
+        state = self.store.get_thread(channel_id, thread_ts)
+        events = self.store.recent_events(channel_id, thread_ts, limit=50)
+        resolution_events = [e for e in events if e["message_kind"] == MessageKind.POSSIBLE_RESOLUTION.value]
+        resolution_text = resolution_events[-1]["text"] if resolution_events else "Confirmed resolution"
+        incident = self.graph.add_incident(
+            state.incident_number or "unknown",
+            short_description=state.root_message,
+            state="Resolved",
+        )
+        if state.root_message:
+            self.graph.add_symptom(incident, state.root_message, confidence=1.0)
+        self.graph.add_resolution(
+            incident,
+            resolution_text,
+            resolver=state.resolver_id,
+            confidence=1.0,
+        )
+        thread = self.graph.link_thread(incident, channel_id, thread_ts)
+        knowledge = GraphEntity(
+            SupportEntityType.KNOWLEDGE_ITEM,
+            f"slack:{channel_id}:{thread_ts}",
+            f"Reusable resolution for {state.incident_number}",
+            {"status": "trusted", "source": "slack_thread"},
+        )
+        self.graph.relate(thread, knowledge, SupportRelation.PROMOTED_TO)
+        self.graph.save()
+        return result
