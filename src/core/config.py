@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     llm_api_key: str = "ollama"
     llm_model: str = "qwen3:30b-a3b"
 
+    # Lightweight support extraction model – batch graph construction
+    support_extraction_model: str = "qwen3:4b"
+    support_extraction_temperature: float = 0.0
+    support_extraction_concurrency: int = 2
+    support_extraction_max_chars: int = 12000
+
     # Embeddings – general knowledge / runbooks
     embedding_base_url: str = "http://localhost:11434/v1"
     embedding_model: str = "nomic-embed-text"
