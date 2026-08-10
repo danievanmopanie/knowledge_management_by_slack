@@ -273,17 +273,62 @@ class SupportKnowledgeExtractor:
         force: bool = False,
         concurrency: int | None = None,
     ) -> dict[str, int]:
-        semaphore = asyncio.Semaphore(concurrency or settings.support_extraction_concurrency)
-        stats = {"processed": 0, "failed": 0}
+        worker_count = concurrency or settings.support_extraction_concurrency
+        semaphore = asyncio.Semaphore(worker_count)
+        total = len(incidents)
+        stats = {"processed": 0, "failed": 0, "cached": 0, "extracted": 0}
+
+        logger.info(
+            "Starting support extraction: total=%d model='%s' concurrency=%d force=%s",
+            total,
+            settings.support_extraction_model,
+            worker_count,
+            force,
+        )
 
         async def process(incident: Incident) -> None:
             async with semaphore:
+                cached = None if force else self.cache.get(incident)
+                mode = "cached" if cached is not None else "model"
+                evidence_chars = len(incident_extraction_text(incident))
+                logger.info(
+                    "Starting %s [%s]: mode=%s evidence_chars=%d",
+                    incident.number,
+                    incident.state or "unknown",
+                    mode,
+                    evidence_chars,
+                )
                 try:
-                    await self.extract_and_apply(incident, force=force)
+                    if cached is not None:
+                        self.apply(incident, cached)
+                        stats["cached"] += 1
+                    else:
+                        await self.extract_and_apply(incident, force=force)
+                        stats["extracted"] += 1
                     stats["processed"] += 1
+                    completed = stats["processed"] + stats["failed"]
+                    logger.info(
+                        "Completed %s [%d/%d]: %s (processed=%d cached=%d extracted=%d failed=%d)",
+                        incident.number,
+                        completed,
+                        total,
+                        mode,
+                        stats["processed"],
+                        stats["cached"],
+                        stats["extracted"],
+                        stats["failed"],
+                    )
                 except Exception:
                     stats["failed"] += 1
-                    logger.exception("Support extraction failed for %s", incident.number)
+                    completed = stats["processed"] + stats["failed"]
+                    logger.exception(
+                        "Failed %s [%d/%d] (processed=%d failed=%d)",
+                        incident.number,
+                        completed,
+                        total,
+                        stats["processed"],
+                        stats["failed"],
+                    )
 
         await asyncio.gather(*(process(incident) for incident in incidents))
         return stats
