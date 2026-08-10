@@ -16,9 +16,13 @@ logger = logging.getLogger(__name__)
 def publish_report_to_channel(
     text: str,
     channel_id: str | None = None,
+    thread_ts: str | None = None,
 ) -> dict[str, Any]:
     """
     Post a report message to the Frontend Support channel (or override).
+
+    Pass thread_ts to reply within an existing thread (used by the Builder
+    Agent worker to post results back into the originating Slack thread).
 
     Slack has a practical limit around 40k characters per message; we keep
     reports well under that. Long reports can later be split or uploaded as files.
@@ -41,6 +45,7 @@ def publish_report_to_channel(
             channel=channel,
             text=text,
             mrkdwn=True,
+            thread_ts=thread_ts,
         )
         logger.info("Published report to %s (ts=%s)", channel, result.get("ts"))
         return {"ok": True, "channel": channel, "ts": result.get("ts")}

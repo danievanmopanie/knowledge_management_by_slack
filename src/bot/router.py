@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from src.agents.builder import BuilderAgent
 from src.agents.frontend_support import FrontendSupportAgent
 from src.agents.inventory import InventoryAgent
 from src.agents.knowledge_ingest import KnowledgeIngestAgent
@@ -18,6 +19,7 @@ _frontend_support = FrontendSupportAgent()
 _inventory = InventoryAgent()
 _work_management = WorkManagementAgent()
 _knowledge_ingest = KnowledgeIngestAgent()
+_builder = BuilderAgent()
 
 
 def get_inventory_agent() -> InventoryAgent:
@@ -35,6 +37,7 @@ def _channel_to_agent(channel_id: str | None):
         settings.channel_inventory: _inventory,
         settings.channel_work_management: _work_management,
         settings.channel_knowledge_uploads: _knowledge_ingest,
+        settings.channel_builder_agent: _builder,
     }
     return mapping.get(channel_id)
 
@@ -53,7 +56,8 @@ async def route_message(message: str, context: RequestContext) -> str:
             "This channel is not yet configured for an agent.\n"
             "Please set the channel IDs in your `.env` file:\n"
             "`CHANNEL_FRONTEND_SUPPORT`, `CHANNEL_INVENTORY`, "
-            "`CHANNEL_WORK_MANAGEMENT`, `CHANNEL_KNOWLEDGE_UPLOADS`."
+            "`CHANNEL_WORK_MANAGEMENT`, `CHANNEL_KNOWLEDGE_UPLOADS`, "
+            "`CHANNEL_BUILDER_AGENT`."
         )
 
     logger.info(
