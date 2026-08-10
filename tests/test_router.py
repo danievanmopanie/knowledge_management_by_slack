@@ -40,9 +40,20 @@ def test_unconfigured_channel_returns_setup_guidance(monkeypatch):
     monkeypatch.setattr(router.settings, "channel_frontend_support", None)
     monkeypatch.setattr(router.settings, "channel_work_management", None)
     monkeypatch.setattr(router.settings, "channel_knowledge_uploads", None)
+    monkeypatch.setattr(router.settings, "channel_builder_agent", None)
     context = RequestContext.from_slack(channel_id="COTHER", user_id="U123")
 
     result = asyncio.run(router.route_message("hello", context))
 
     assert "not yet configured" in result
     assert "CHANNEL_INVENTORY" in result
+
+
+def test_builder_channel_maps_to_builder_agent(monkeypatch):
+    monkeypatch.setattr(router.settings, "channel_builder_agent", "CBUILD")
+    monkeypatch.setattr(router.settings, "channel_inventory", "CINV")
+    monkeypatch.setattr(router.settings, "channel_frontend_support", "CFRONT")
+    monkeypatch.setattr(router.settings, "channel_work_management", "CWORK")
+    monkeypatch.setattr(router.settings, "channel_knowledge_uploads", "CKNOW")
+
+    assert router._channel_to_agent("CBUILD") is router._builder

@@ -78,6 +78,23 @@ class Settings(BaseSettings):
     channel_inventory: str | None = None
     channel_work_management: str | None = None
     channel_knowledge_uploads: str | None = None
+    channel_builder_agent: str | None = None
+
+    # Builder Agent (Aider-driven autonomous coding tasks)
+    builder_agent_allowed_user_ids: str = ""
+    builder_repo_path: Path = Path("./data/builder/repo")
+    builder_workdir: Path = Path("./data/builder/worktrees")
+    builder_aider_model: str = "ollama_chat/qwen3-coder:30b"
+    builder_task_timeout_seconds: int = 1800
+    builder_poll_interval_seconds: int = 15
+    builder_git_remote: str = "origin"
+    builder_base_branch: str = "main"
+
+    # GitHub (pull request creation for Builder Agent)
+    github_token: str = ""
+    github_api_base_url: str = "https://api.github.com"
+    github_repo_owner: str = ""
+    github_repo_name: str = ""
 
 
 settings = Settings()
