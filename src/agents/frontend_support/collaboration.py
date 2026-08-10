@@ -20,6 +20,7 @@ from src.knowledge.support_graph import GraphEntity, SupportEntityType, SupportK
 
 INCIDENT_RE = re.compile(r"\bINC\d{4,}\b", re.IGNORECASE)
 RESOLUTION_PATTERNS = (
+    re.compile(r"\bthat(?:'s| is)\s+(fixed|solved|resolved)\s+(it|the issue|the problem)?\b", re.I),
     re.compile(r"\b(that|this|it)\s+(fixed|solved|resolved)\s+(it|the issue|the problem)?\b", re.I),
     re.compile(r"\bworking\s+now\b", re.I),
     re.compile(r"\bissue\s+(is\s+)?resolved\b", re.I),
@@ -32,6 +33,7 @@ TECHNICAL_HINTS = (
     "problem",
     "not working",
     "fails",
+    "failing",
     "failed",
     "unable",
     "cannot",
@@ -372,9 +374,6 @@ class FrontendCollaborationService:
             try:
                 self.store.get_thread(channel_id, root_ts)
             except KeyError:
-                # Threads that pre-date the feature are still learnable; the first
-                # observed participant becomes the requester until Slack history
-                # backfill is added.
                 self.store.ensure_thread(
                     channel_id=channel_id,
                     thread_ts=root_ts,
