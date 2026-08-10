@@ -52,33 +52,41 @@ class GraphStore:
         max_depth: int = 1,
         relation_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return neighbouring entities up to max_depth."""
+        """Return outgoing relationships up to max_depth, preserving parallel edge types."""
         if entity_id not in self.graph:
             return []
 
-        results = []
+        results: list[dict[str, Any]] = []
         visited = {entity_id}
         current_layer = {entity_id}
 
         for depth in range(1, max_depth + 1):
-            next_layer = set()
+            next_layer: set[str] = set()
             for node in current_layer:
-                for _, neighbor, edge_data in self.graph.out_edges(node, data=True):
+                for _, neighbor, _key, edge_data in self.graph.out_edges(
+                    node, data=True, keys=True
+                ):
                     rel = edge_data.get("relation")
                     if relation_filter and rel != relation_filter:
                         continue
+
+                    # A MultiDiGraph may contain multiple meaningful relations
+                    # between the same two entities (for example TRIED and
+                    # FAILED_ACTION). Always return the edge; only traversal is
+                    # de-duplicated by node.
+                    results.append(
+                        {
+                            "entity": neighbor,
+                            "type": self.graph.nodes[neighbor].get("type"),
+                            "relation": rel,
+                            "depth": depth,
+                            "properties": dict(self.graph.nodes[neighbor]),
+                            "edge_properties": dict(edge_data),
+                        }
+                    )
                     if neighbor not in visited:
                         visited.add(neighbor)
                         next_layer.add(neighbor)
-                        results.append(
-                            {
-                                "entity": neighbor,
-                                "type": self.graph.nodes[neighbor].get("type"),
-                                "relation": rel,
-                                "depth": depth,
-                                "properties": dict(self.graph.nodes[neighbor]),
-                            }
-                        )
             current_layer = next_layer
             if not current_layer:
                 break
