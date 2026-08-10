@@ -1,9 +1,11 @@
-"""RAG for incident context – index and retrieve similar past incidents."""
+"""RAG for incident context – field-aware indexing and incident-level retrieval."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections import defaultdict
 from typing import Any, Iterable
 
 from langchain_core.documents import Document
@@ -22,8 +24,9 @@ from src.reporting.incidents import Incident, load_all_incidents
 logger = logging.getLogger(__name__)
 
 INCIDENT_COLLECTION = "incidents"
+FIELD_GROUPS = ("problem", "troubleshooting", "resolution")
 
-# Per-field caps so large journals do not dominate embeddings
+# Per-field caps so large journals do not dominate embeddings.
 FIELD_LIMITS = {
     "short_description": 500,
     "description": 1500,
@@ -34,8 +37,7 @@ FIELD_LIMITS = {
 
 
 def _clean(text: str) -> str:
-    text = re.sub(r"\s+", " ", text or "").strip()
-    return text
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def _clip(text: str, limit: int) -> str:
@@ -45,73 +47,86 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rstrip() + " …"
 
 
-def _dedupe_append(parts: list[str], label: str, value: str) -> None:
-    value = _clean(value)
-    if not value:
-        return
-    lowered = value.lower()
-    for existing in parts:
-        if lowered in existing.lower() or existing.lower() in lowered:
-            return
-    parts.append(f"{label}: {value}")
+def _dedupe_values(values: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Remove blank or materially duplicated free-text values while preserving labels."""
+    kept: list[tuple[str, str]] = []
+    for label, value in values:
+        value = _clean(value)
+        if not value:
+            continue
+        lowered = value.lower()
+        if any(lowered in existing.lower() or existing.lower() in lowered for _, existing in kept):
+            continue
+        kept.append((label, value))
+    return kept
 
 
-def _incident_to_text(inc: Incident) -> str:
-    """
-    Embedding text from free-text columns:
-    Short Description, Description, Resolution Notes, Work Notes, Comments.
-    """
-    free_text_parts: list[str] = []
-
-    short_desc = _clip(inc.short_description, FIELD_LIMITS["short_description"])
-    if short_desc:
-        free_text_parts.append(short_desc)
-
-    description = _clip(inc.description, FIELD_LIMITS["description"])
-    if description and description.lower() != short_desc.lower():
-        free_text_parts.append(f"Description: {description}")
-
-    resolution = _clip(inc.resolution_notes, FIELD_LIMITS["resolution_notes"])
-    _dedupe_append(free_text_parts, "Resolution", resolution)
-
-    work_notes = _clip(inc.work_notes, FIELD_LIMITS["work_notes"])
-    _dedupe_append(free_text_parts, "Work notes", work_notes)
-
-    comments = _clip(inc.comments, FIELD_LIMITS["comments"])
-    _dedupe_append(free_text_parts, "Comments", comments)
-
-    taxonomy: list[str] = []
+def _taxonomy_tail(inc: Incident) -> str:
+    values: list[str] = []
     if inc.category:
-        taxonomy.append(f"category: {_clean(inc.category)}")
+        values.append(f"category: {_clean(inc.category)}")
     if inc.subcategory:
-        taxonomy.append(f"subcategory: {_clean(inc.subcategory)}")
+        values.append(f"subcategory: {_clean(inc.subcategory)}")
     if inc.location:
-        taxonomy.append(f"location: {_clean(inc.location)}")
+        values.append(f"location: {_clean(inc.location)}")
     if inc.assignment_group:
-        taxonomy.append(f"assignment group: {_clean(inc.assignment_group)}")
-
-    tail: list[str] = []
-    if inc.number:
-        tail.append(f"incident {inc.number}")
+        values.append(f"assignment group: {_clean(inc.assignment_group)}")
     if inc.state:
-        tail.append(f"state: {_clean(inc.state)}")
+        values.append(f"state: {_clean(inc.state)}")
+    if inc.number:
+        values.append(f"incident: {inc.number}")
+    return " | ".join(values)
 
-    parts: list[str] = []
-    if free_text_parts:
-        parts.append("\n".join(free_text_parts))
-    if taxonomy:
-        parts.append(" | ".join(taxonomy))
+
+def _field_document(inc: Incident, field_group: str) -> str:
+    """Build one semantically focused embedding document for an incident field group."""
+    if field_group == "problem":
+        values = _dedupe_values(
+            [
+                ("Short description", _clip(inc.short_description, FIELD_LIMITS["short_description"])),
+                ("Description", _clip(inc.description, FIELD_LIMITS["description"])),
+            ]
+        )
+    elif field_group == "troubleshooting":
+        values = _dedupe_values(
+            [
+                ("Work notes", _clip(inc.work_notes, FIELD_LIMITS["work_notes"])),
+                ("Comments", _clip(inc.comments, FIELD_LIMITS["comments"])),
+            ]
+        )
+    elif field_group == "resolution":
+        values = _dedupe_values(
+            [("Resolution notes", _clip(inc.resolution_notes, FIELD_LIMITS["resolution_notes"]))]
+        )
+    else:
+        raise ValueError(f"Unknown incident field group: {field_group}")
+
+    if not values:
+        return ""
+
+    parts = [f"{label}: {value}" for label, value in values]
+    tail = _taxonomy_tail(inc)
     if tail:
-        parts.append(" | ".join(tail))
-
+        parts.append(tail)
     return "\n".join(parts)
 
 
-def _incident_metadata(inc: Incident) -> dict[str, Any]:
+def _incident_to_text(inc: Incident) -> str:
+    """Compatibility view combining the three focused field documents."""
+    parts = []
+    for field_group in FIELD_GROUPS:
+        text = _field_document(inc, field_group)
+        if text:
+            parts.append(f"[{field_group}]\n{text}")
+    return "\n\n".join(parts)
+
+
+def _incident_metadata(inc: Incident, field_group: str) -> dict[str, Any]:
     meta: dict[str, Any] = {
         "source": f"incident:{inc.number}",
         "doc_type": "incident",
         "number": inc.number,
+        "field_group": field_group,
         "state": inc.state or "",
         "assignment_group": inc.assignment_group or "",
         "assigned_to": inc.assigned_to or "",
@@ -155,15 +170,56 @@ def _link_incident_graph(graph: GraphStore, inc: Incident) -> None:
     link(inc.subcategory, "subcategory", "subcategorised_as")
 
 
+def _aggregate_incident_hits(raw_docs: list[Document], k: int) -> list[Document]:
+    """Aggregate field-level vector matches back to one ranked document per incident."""
+    grouped: dict[str, list[Document]] = defaultdict(list)
+    for doc in raw_docs:
+        number = str((doc.metadata or {}).get("number") or "").strip()
+        if number:
+            grouped[number].append(doc)
+
+    aggregated: list[Document] = []
+    for number, docs in grouped.items():
+        docs.sort(key=lambda d: float((d.metadata or {}).get("score", 0.0)), reverse=True)
+        best = docs[0]
+        best_meta = dict(best.metadata or {})
+
+        by_group: dict[str, Document] = {}
+        for doc in docs:
+            group = str((doc.metadata or {}).get("field_group") or "combined")
+            by_group.setdefault(group, doc)
+
+        ordered_groups = [g for g in FIELD_GROUPS if g in by_group]
+        ordered_groups.extend(g for g in by_group if g not in ordered_groups)
+        sections: list[str] = []
+        field_scores: dict[str, float] = {}
+        for group in ordered_groups:
+            doc = by_group[group]
+            score = float((doc.metadata or {}).get("score", 0.0))
+            field_scores[group] = score
+            sections.append(f"{group.title()} match (relevance={score:.2f})\n{doc.page_content.strip()}")
+
+        best_meta["matched_fields"] = ",".join(ordered_groups)
+        best_meta["field_scores_json"] = json.dumps(field_scores, sort_keys=True)
+        best_meta["score"] = float(best_meta.get("score", 0.0))
+        best_meta["semantic_score"] = best_meta["score"]
+        best_meta["chunk_id"] = f"incident-{number}-aggregate"
+        aggregated.append(Document(page_content="\n\n".join(sections), metadata=best_meta))
+
+    aggregated.sort(key=lambda d: float((d.metadata or {}).get("score", 0.0)), reverse=True)
+    return aggregated[:k]
+
+
 class IncidentRAG:
-    """
-    Incident RAG using lightweight BGE embeddings + Qwen3 for answers.
+    """Incident RAG with field-aware BGE embeddings and incident-level ranking.
 
-    Free-text embedded: Short Description, Description, Work Notes,
-    Comments, Resolution Notes.
+    Three semantic views are indexed independently:
+    - problem: Short Description + Description
+    - troubleshooting: Work Notes + Comments
+    - resolution: Resolution Notes
 
-    Daily CSV uploads: content-hash dedupe skips unchanged rows so we do not
-    re-embed identical ServiceNow exports.
+    Retrieval searches those focused documents, then aggregates the matches back
+    to one incident so callers still receive an incident-level result list.
     """
 
     def __init__(
@@ -183,16 +239,12 @@ class IncidentRAG:
         *,
         force: bool = False,
     ) -> dict[str, int]:
-        """
-        Embed and store incidents in batches.
-
-        By default only new or changed rows are embedded (content-hash check).
-        Pass force=True to re-embed everything.
-        """
+        """Embed new/changed incidents as focused field documents."""
         incident_list = list(incidents)
         if not incident_list:
             return {
                 "indexed": 0,
+                "indexed_documents": 0,
                 "skipped_unchanged": 0,
                 "collection_total": self.vector_store.count(),
             }
@@ -212,26 +264,38 @@ class IncidentRAG:
         docs: list[str] = []
         metas: list[dict[str, Any]] = []
         ids: list[str] = []
+        indexed_incidents = 0
 
         for inc in to_index:
-            text = _incident_to_text(inc)
-            if not text.strip():
-                continue
-            docs.append(text)
-            metas.append(_incident_metadata(inc))
-            ids.append(f"incident-{inc.number}")
-            _link_incident_graph(self.graph_store, inc)
-
-        count = len(docs)
-        if docs:
+            incident_docs = 0
+            # Remove legacy combined and all focused IDs before upserting this incident.
+            stale_ids = [f"incident-{inc.number}"] + [
+                f"incident-{inc.number}-{field_group}" for field_group in FIELD_GROUPS
+            ]
             try:
-                self.vector_store._collection.delete(ids=ids)
+                self.vector_store.delete_documents(stale_ids)
             except Exception:
-                pass
+                logger.debug("Could not pre-delete incident vector IDs for %s", inc.number, exc_info=True)
 
+            for field_group in FIELD_GROUPS:
+                text = _field_document(inc, field_group)
+                if not text:
+                    continue
+                docs.append(text)
+                metas.append(_incident_metadata(inc, field_group))
+                ids.append(f"incident-{inc.number}-{field_group}")
+                incident_docs += 1
+
+            if incident_docs:
+                indexed_incidents += 1
+                _link_incident_graph(self.graph_store, inc)
+
+        if docs:
             logger.info(
-                "Indexing %s changed incidents with model '%s' (batch_size=%s); skipped %s unchanged",
-                count,
+                "Indexing %s field documents across %s changed incidents with model '%s' "
+                "(batch_size=%s); skipped %s unchanged",
+                len(docs),
+                indexed_incidents,
                 settings.incident_embedding_model,
                 settings.incident_embedding_batch_size,
                 skipped,
@@ -244,16 +308,13 @@ class IncidentRAG:
             )
             self.graph_store.save()
         else:
-            logger.info(
-                "No changed incidents to embed (skipped %s unchanged)",
-                skipped,
-            )
+            logger.info("No changed incidents to embed (skipped %s unchanged)", skipped)
 
-        # Persist full hash index so tomorrow's export can skip unchanged rows
         save_hash_index(index)
 
         return {
-            "indexed": count,
+            "indexed": indexed_incidents,
+            "indexed_documents": len(docs),
             "skipped_unchanged": skipped,
             "collection_total": self.vector_store.count(),
         }
@@ -269,8 +330,14 @@ class IncidentRAG:
         k: int = 5,
         where: dict | None = None,
     ) -> list[Document]:
+        """Search focused field documents and return one aggregated result per incident."""
         query = _clean(query)
-        return self.vector_store.similarity_search(query, k=k, where=where)
+        if not query:
+            return []
+        # Fetch extra field hits because several can belong to the same incident.
+        raw_k = max(k * len(FIELD_GROUPS), k)
+        raw_docs = self.vector_store.similarity_search(query, k=raw_k, where=where)
+        return _aggregate_incident_hits(raw_docs, k)
 
     def build_context(
         self,
@@ -292,6 +359,9 @@ class IncidentRAG:
                 f"| group={meta.get('assignment_group', '')} "
                 f"| loc={meta.get('location', '')}"
             )
+            matched_fields = str(meta.get("matched_fields") or "").replace(",", ", ")
+            if matched_fields:
+                header += f" | matched={matched_fields}"
             score = meta.get("score")
             if score is not None:
                 header += f" | relevance={float(score):.2f}"
