@@ -10,6 +10,7 @@ from src.agents.base import BaseAgent
 from src.core.context import RequestContext
 from src.core.errors import safe_error_message
 from src.knowledge.citations import evidence_labels, render_evidence_section, sanitize_citations
+from src.knowledge.retrieval_models import RetrievalQuery
 from src.knowledge.support_evidence import SupportEvidenceService
 from src.llm.client import get_llm
 
@@ -47,9 +48,27 @@ class FrontendSupportAgent(BaseAgent):
 
     def __init__(self):
         self.evidence = SupportEvidenceService()
+        self.retriever = self.evidence.retriever
+        self.incident_rag = self.evidence.incident_rag
         self.llm = get_llm()
 
     async def handle(self, message: str, context: RequestContext) -> str:
+        if not hasattr(self, "evidence"):
+            try:
+                result = self.retriever.search(
+                    RetrievalQuery(text=message, context=context, limit=5, graph_depth=1)
+                )
+                incident_context = self.incident_rag.build_context(message, k=5)
+            except Exception:
+                logger.exception("Legacy support evidence retrieval failed request_id=%s", context.request_id)
+                return safe_error_message(context.request_id)
+            if not result.should_answer and not incident_context:
+                return INSUFFICIENT_EVIDENCE_RESPONSE
+            self.evidence = SupportEvidenceService(
+                retriever=self.retriever,
+                incident_rag=self.incident_rag,
+            )
+
         try:
             package = self.evidence.build(message, context, limit=5)
         except Exception:
