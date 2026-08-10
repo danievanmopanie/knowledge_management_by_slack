@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Increment when the embedding/index representation changes. Including this in
 # the hash forces one controlled rebuild after an indexing schema migration,
 # then normal unchanged-row skipping resumes.
-INCIDENT_EMBEDDING_SCHEMA_VERSION = 2
+INCIDENT_EMBEDDING_SCHEMA_VERSION = 3
 
 # Fields that drive the embedding / meaning of an incident.
 # If any of these change, we re-embed. Purely operational churn is ignored
