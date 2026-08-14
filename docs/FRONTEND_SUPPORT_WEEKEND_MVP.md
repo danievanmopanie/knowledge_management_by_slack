@@ -62,9 +62,22 @@ Private conversations are stored separately from public thread events. The model
 
 This allows a technician to ask basic questions, request explanations or explore troubleshooting privately without exposing the private conversation to the team.
 
+### Slack app settings required for private coaching
+
+In the Slack app configuration:
+
+1. Add the bot token scope `im:history` if it is not already present.
+2. Keep `chat:write` enabled so the assistant can respond.
+3. Under **Event Subscriptions → Subscribe to bot events**, add `message.im`.
+4. Reinstall the Slack app to the workspace after adding OAuth scopes.
+
+The existing public-channel message subscription remains required for ambient `#frontend-support` listening.
+
 ## Voice notes
 
 Voice-note support is local. Slack audio is downloaded to the controlled staging area, transcribed on the GX10 with `faster-whisper`, then deleted after transcription. The transcript is processed like a typed technician message.
+
+The Slack bot requires `files:read` so it can download a voice note shared in a conversation it can access. Reinstall the app after adding that scope if necessary.
 
 Install the optional voice dependency:
 
