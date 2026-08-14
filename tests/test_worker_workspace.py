@@ -30,6 +30,16 @@ def builder_repo(tmp_path, monkeypatch):
 
     repo_path = tmp_path / "worker_repo"
     subprocess.run(["git", "clone", str(origin), str(repo_path)], check=True, capture_output=True)
+    # Git identity is repository-local configuration and is not copied by clone.
+    # Configure the throwaway clone explicitly so CI does not depend on runner globals.
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "user.name", "Test"],
+        check=True,
+    )
 
     monkeypatch.setattr(settings, "builder_repo_path", repo_path)
     monkeypatch.setattr(settings, "builder_workdir", tmp_path / "worktrees")
