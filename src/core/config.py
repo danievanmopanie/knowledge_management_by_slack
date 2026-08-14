@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     support_extraction_concurrency: int = 2
     support_extraction_max_chars: int = 12000
 
+    # Local voice-note transcription for field technicians
+    voice_notes_enabled: bool = True
+    voice_transcription_model: str = "small"
+    voice_transcription_device: str = "cuda"
+    voice_transcription_compute_type: str = "float16"
+
     # Embeddings – general knowledge / runbooks
     embedding_base_url: str = "http://localhost:11434/v1"
     embedding_model: str = "nomic-embed-text"
@@ -65,9 +71,13 @@ class Settings(BaseSettings):
 
     # Reporting
     report_daily_enabled: bool = True
+    report_afternoon_enabled: bool = True
     report_weekly_enabled: bool = True
     report_weekly_location: str | None = None
     report_daily_hours: int = 24
+    report_afternoon_hours: int = 10
+    report_aging_days: int = 3
+    report_stale_hours: int = 24
 
     # App
     log_level: str = "INFO"
@@ -78,6 +88,7 @@ class Settings(BaseSettings):
     channel_inventory: str | None = None
     channel_work_management: str | None = None
     channel_knowledge_uploads: str | None = None
+    channel_create_knowledge: str | None = None
     channel_builder_agent: str | None = None
 
     # Builder Agent (Aider-driven autonomous coding tasks)

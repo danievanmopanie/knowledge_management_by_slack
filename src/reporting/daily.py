@@ -1,115 +1,78 @@
-"""Daily Frontend Support focus report (07:00)."""
+"""Morning Frontend Support operational focus report (07:00)."""
 
 from __future__ import annotations
 
 import logging
-from collections import Counter
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.core.config import settings
 from src.knowledge.retriever import HybridRetriever
 from src.llm.client import get_llm
-from src.reporting.incidents import (
-    filter_incidents,
-    load_all_incidents,
-    recent_window,
-)
+from src.reporting.operations import build_snapshot, render_operations_digest
 
 logger = logging.getLogger(__name__)
 
-DAILY_SYSTEM_PROMPT = """You are an operations lead for an IT Frontend Support team.
+DAILY_SYSTEM_PROMPT = """You are a highly practical operations lead for an IT Frontend Support team.
 
-Produce a clear, practical *Focus of the Day* briefing for technicians starting their shift.
+Produce a short morning *Focus of the Day* briefing that helps technicians decide where to spend attention.
 
 Requirements:
+- Sound like a useful team lead in Slack, not a dashboard dump
+- Lead with the 2-4 things that actually matter today
+- Highlight emerging themes and repeated symptoms from recent activity
+- Call out aging and stale open work that needs movement
+- Compare assignment groups and locations when that cross-team view is useful
+- Surface evidence that another location/group may already have encountered the same pattern
+- Do not shame individuals or turn the report into a performance leaderboard
+- Distinguish facts in the incident data from inference
 - Be concise and actionable
-- Highlight the main themes from recent incidents
-- Suggest what the team should watch for / prioritise today
-- Call out any repeating patterns or high-impact issues
-- Use plain language suitable for Slack
-- If data is thin, say so and give best-effort guidance from available knowledge
+- If data is thin or incomplete, say so
 
-Structure your reply with short sections and bullet points.
+Use short natural sections. Avoid restating every count supplied to you.
 """
-
-
-def _incident_digest(incidents: list) -> str:
-    if not incidents:
-        return "No structured incident records found for the last 24 hours."
-
-    lines = [f"Incidents in window: {len(incidents)}"]
-    groups = Counter((i.assignment_group or "Unassigned") for i in incidents)
-    categories = Counter((i.category or i.short_description[:40] or "Other") for i in incidents)
-    states = Counter((i.state or "Unknown") for i in incidents)
-
-    lines.append("\nBy assignment group:")
-    for name, count in groups.most_common(8):
-        lines.append(f"- {name}: {count}")
-
-    lines.append("\nTop themes/categories:")
-    for name, count in categories.most_common(8):
-        lines.append(f"- {name}: {count}")
-
-    lines.append("\nBy state:")
-    for name, count in states.most_common():
-        lines.append(f"- {name}: {count}")
-
-    lines.append("\nSample recent incidents:")
-    for inc in incidents[:12]:
-        lines.append(
-            f"- {inc.number}: {inc.short_description or '(no summary)'} "
-            f"[{inc.assignment_group or 'no group'} | {inc.state or 'state?'}]"
-        )
-
-    return "\n".join(lines)
 
 
 async def generate_daily_focus_report(
     hours: int = 24,
     use_knowledge: bool = True,
 ) -> str:
-    """
-    Generate the daily Focus of the Day report for #frontend-support.
-
-    Combines:
-    - Structured incident exports (CSV) when available
-    - Hybrid RAG knowledge for context / themes
-    - Local LLM synthesis aimed at technicians
-    """
-    since, until = recent_window(hours=hours)
-    incidents = filter_incidents(load_all_incidents(), since=since, until=until)
-    digest = _incident_digest(incidents)
+    """Generate a morning operational intelligence brief for #frontend-support."""
+    snapshot = build_snapshot(
+        window_hours=hours,
+        aging_days=settings.report_aging_days,
+        stale_hours=settings.report_stale_hours,
+    )
+    digest = render_operations_digest(snapshot)
 
     knowledge_context = ""
     if use_knowledge:
         try:
-            retriever = HybridRetriever()
-            # Query oriented toward operational themes
-            result = retriever.retrieve(
-                "common frontend support incidents themes troubleshooting priorities",
+            result = HybridRetriever().retrieve(
+                "recurring frontend support incidents recent themes known fixes operational priorities",
                 k=6,
             )
             knowledge_context = result.to_context_string(max_chars=3500)
         except Exception:
-            logger.exception("Knowledge retrieval failed for daily report")
+            logger.exception("Knowledge retrieval failed for morning support report")
 
     now_local = datetime.now().strftime("%Y-%m-%d %H:%M")
     user_prompt_parts = [
         f"Report date/time: {now_local}",
-        f"Window: last {hours} hours ({since.isoformat()} → {until.isoformat()})",
+        f"Recent-activity window: last {hours} hours",
+        f"Aging threshold: {settings.report_aging_days} days",
+        f"Stale threshold: {settings.report_stale_hours} hours without an update",
         "",
-        "### Incident digest",
         digest,
     ]
     if knowledge_context:
-        user_prompt_parts.extend(["", "### Related knowledge base context", knowledge_context])
+        user_prompt_parts.extend(["", "### Related governed knowledge", knowledge_context])
 
     user_prompt_parts.extend(
         [
             "",
-            "Write the Focus of the Day briefing for the Frontend Support technicians now.",
+            "Write the morning Frontend Support focus briefing now. Prioritise insight over statistics.",
         ]
     )
 
@@ -122,16 +85,17 @@ async def generate_daily_focus_report(
     try:
         response = await llm.ainvoke(messages)
         body = response.content if hasattr(response, "content") else str(response)
-    except Exception as e:
-        logger.exception("LLM failed generating daily report")
+    except Exception as exc:
+        logger.exception("LLM failed generating morning report")
         body = (
-            "*Daily Focus Report* (fallback – LLM unavailable)\n\n"
+            "*Morning Support Focus* (fallback – LLM unavailable)\n\n"
             f"{digest}\n\n"
-            f"_Generation error: {type(e).__name__}: {e}_"
+            f"_Generation error: {type(exc).__name__}: {exc}_"
         )
 
     header = (
-        f"*Daily Focus of the Day* — Frontend Support\n"
-        f"_{now_local} · last {hours}h · {len(incidents)} incident(s) in data_\n\n"
+        "*Morning Frontend Support Pulse*\n"
+        f"_{now_local} · {len(snapshot.open_incidents)} open · "
+        f"{len(snapshot.aging_incidents)} aging · {len(snapshot.stale_incidents)} stale_\n\n"
     )
     return header + body.strip()

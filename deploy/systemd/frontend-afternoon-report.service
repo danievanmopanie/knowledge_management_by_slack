@@ -1,0 +1,16 @@
+[Unit]
+Description=Knowledge Management by Slack – afternoon Frontend Support handover
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/knowledge_management_by_slack
+User=danie
+Group=danie
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/knowledge_management_by_slack/.env
+ExecStart=/opt/knowledge_management_by_slack/.venv/bin/python /opt/knowledge_management_by_slack/scripts/run_afternoon_report.py
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

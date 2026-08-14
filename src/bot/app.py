@@ -11,13 +11,14 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from src.agents.frontend_support.agent import INSUFFICIENT_EVIDENCE_RESPONSE
 from src.agents.frontend_support.collaboration import MessageKind
+from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.blockkit.actions import attach_confirm_cancel
 from src.bot.frontend_actions import build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service as get_frontend_service
 from src.bot.frontend_interactivity import register as register_frontend_interactivity
 from src.bot.interactivity import register as register_interactivity
 from src.bot.readiness import validate_slack_readiness
-from src.bot.router import route_message
+from src.bot.router import route_frontend_support, route_message
 from src.core.config import settings
 from src.core.context import RequestContext
 from src.core.errors import safe_error_message
@@ -47,6 +48,17 @@ def _context_from_event(event: dict) -> RequestContext:
     )
 
 
+async def _resolve_message_text(event: dict) -> str:
+    """Return typed text plus a local transcript when a Slack voice note is attached."""
+    text = (event.get("text") or "").strip()
+    transcript = await transcribe_first_voice_note(event.get("files", []))
+    if not transcript:
+        return text
+    if text:
+        return f"{text}\n\nVoice note transcript: {transcript}"
+    return transcript
+
+
 @app.event("app_mention")
 async def handle_app_mention(event, say):
     """Route @mentions to the appropriate agent based on channel."""
@@ -70,6 +82,29 @@ async def handle_app_mention(event, say):
     await say(text=response, thread_ts=context.thread_ts, blocks=attach_confirm_cancel(response))
 
 
+async def _handle_private_frontend_message(
+    event: dict, say, context: RequestContext, text: str
+) -> bool:
+    """Provide a psychologically safe one-on-one Frontend Support coaching lane in Slack DMs."""
+    if event.get("channel_type") != "im" or not text or not event.get("user"):
+        return False
+
+    service = get_frontend_service()
+    query = service.observe_private(
+        channel_id=context.channel_id,
+        message_ts=event.get("ts", ""),
+        user_id=event["user"],
+        text=text,
+    )
+    try:
+        response = await route_frontend_support(query, context)
+    except Exception:
+        logger.exception("Private frontend coaching failed request_id=%s", context.request_id)
+        response = safe_error_message(context.request_id)
+    await say(text=response)
+    return True
+
+
 async def _handle_frontend_message(event: dict, say, context: RequestContext, text: str) -> bool:
     """Observe ordinary #frontend-support chat and intervene only when useful."""
     if context.channel_id != settings.channel_frontend_support or not text or not event.get("user"):
@@ -90,41 +125,42 @@ async def _handle_frontend_message(event: dict, say, context: RequestContext, te
     )
 
     logger.info(
-        "Frontend collaboration request_id=%s kind=%s invoke=%s incident=%s",
+        "Frontend collaboration request_id=%s kind=%s invoke=%s incident=%s suppressed=%s",
         context.request_id,
         decision.kind,
         decision.invoke_agent,
         decision.incident_number,
+        decision.assistant_suppressed,
     )
+
+    if decision.kind == MessageKind.ASSISTANT_SUPPRESS:
+        await say(
+            text="Got it — I'll keep listening and remembering the thread, but I'll stay out unless you call me back in.",
+            thread_ts=root_ts,
+        )
+        return True
+    if decision.kind == MessageKind.ASSISTANT_RESUME:
+        await say(text="I'm back in. Carry on — I'll help where I can add value.", thread_ts=root_ts)
+        return True
 
     if decision.prompt_for_capture:
         state = service.store.get_thread(context.channel_id, root_ts)
         if not state.incident_number:
             await say(
                 text=(
-                    "It looks like this issue is resolved. Before we capture the knowledge, "
-                    "please ask the original requester to add the ServiceNow incident number "
-                    "(for example `INC0012345`) to this thread."
+                    "Looks like you may have this resolved. Add the ServiceNow incident number when you can "
+                    "so we can keep the fix referenceable and capture it properly."
                 ),
                 thread_ts=root_ts,
             )
             return True
-        prompt = "It looks like this issue is resolved. Capture this as reusable knowledge?"
+        prompt = "That looks like a possible resolution. Capture it as reusable operational knowledge?"
         await say(
             text=prompt,
             thread_ts=root_ts,
             blocks=build_resolution_capture_blocks(context.channel_id, root_ts),
         )
         return True
-
-    if decision.prompt_for_incident:
-        await say(
-            text=(
-                "Please add the ServiceNow incident number (for example `INC0012345`) "
-                "to this thread so anything we learn stays referenceable."
-            ),
-            thread_ts=root_ts,
-        )
 
     if not decision.invoke_agent:
         return True
@@ -135,7 +171,7 @@ async def _handle_frontend_message(event: dict, say, context: RequestContext, te
         thread_ts=root_ts,
     )
     try:
-        response = await route_message(decision.agent_query or text, agent_context)
+        response = await route_frontend_support(decision.agent_query or text, agent_context)
     except Exception:
         logger.exception("Frontend proactive response failed request_id=%s", context.request_id)
         return True
@@ -146,13 +182,19 @@ async def _handle_frontend_message(event: dict, say, context: RequestContext, te
     if response == INSUFFICIENT_EVIDENCE_RESPONSE and decision.kind == MessageKind.TROUBLESHOOTING:
         return True
 
+    if decision.prompt_for_incident and response != INSUFFICIENT_EVIDENCE_RESPONSE:
+        response = (
+            response.rstrip()
+            + "\n\n_If this is a ServiceNow incident, drop the INC number into the thread when convenient so the learning stays referenceable._"
+        )
+
     await say(text=response, thread_ts=root_ts)
     return True
 
 
 @app.event("message")
 async def handle_message(event, say):
-    """Observe frontend collaboration and auto-process knowledge uploads."""
+    """Observe support collaboration, private coaching, voice notes and knowledge uploads."""
     if event.get("subtype") in ("bot_message", "message_changed", "message_deleted"):
         return
 
@@ -160,12 +202,26 @@ async def handle_message(event, say):
         return
 
     context = _context_from_event(event)
-    text = event.get("text", "") or ""
+    try:
+        text = await _resolve_message_text(event)
+    except VoiceTranscriptionError as exc:
+        if context.channel_id == settings.channel_frontend_support or event.get("channel_type") == "im":
+            await say(text=f"I couldn't transcribe that voice note locally: {exc}")
+            return
+        text = event.get("text", "") or ""
+
+    if await _handle_private_frontend_message(event, say, context, text):
+        return
 
     if await _handle_frontend_message(event, say, context, text):
         return
 
-    if context.files and context.channel_id == settings.channel_knowledge_uploads:
+    knowledge_channels = {
+        channel
+        for channel in (settings.channel_knowledge_uploads, settings.channel_create_knowledge)
+        if channel
+    }
+    if context.files and context.channel_id in knowledge_channels:
         logger.info(
             "Knowledge upload request_id=%s files=%s",
             context.request_id,
@@ -201,11 +257,12 @@ def start() -> None:
 
     logger.info("Starting Knowledge Management by Slack bot...")
     logger.info(
-        "Configured channels → frontend_support=%s, inventory=%s, work_management=%s, knowledge_uploads=%s",
+        "Configured channels → frontend_support=%s, inventory=%s, work_management=%s, knowledge_uploads=%s, create_knowledge=%s",
         settings.channel_frontend_support,
         settings.channel_inventory,
         settings.channel_work_management,
         settings.channel_knowledge_uploads,
+        settings.channel_create_knowledge,
     )
     asyncio.run(_start_async())
 

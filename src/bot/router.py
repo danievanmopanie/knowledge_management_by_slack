@@ -27,6 +27,11 @@ def get_inventory_agent() -> InventoryAgent:
     return _inventory
 
 
+def get_frontend_support_agent() -> FrontendSupportAgent:
+    """Return the shared FrontendSupportAgent singleton for channel and DM coaching flows."""
+    return _frontend_support
+
+
 def _channel_to_agent(channel_id: str | None):
     """Return the agent instance for a given Slack channel ID."""
     if not channel_id:
@@ -37,9 +42,20 @@ def _channel_to_agent(channel_id: str | None):
         settings.channel_inventory: _inventory,
         settings.channel_work_management: _work_management,
         settings.channel_knowledge_uploads: _knowledge_ingest,
+        settings.channel_create_knowledge: _knowledge_ingest,
         settings.channel_builder_agent: _builder,
     }
     return mapping.get(channel_id)
+
+
+async def route_frontend_support(message: str, context: RequestContext) -> str:
+    """Route directly to Frontend Support, including private Slack DM coaching."""
+    logger.info(
+        "Routing request_id=%s directly to frontend support for channel %s",
+        context.request_id,
+        context.channel_id,
+    )
+    return await _frontend_support.handle(message, context)
 
 
 async def route_message(message: str, context: RequestContext) -> str:
@@ -57,7 +73,7 @@ async def route_message(message: str, context: RequestContext) -> str:
             "Please set the channel IDs in your `.env` file:\n"
             "`CHANNEL_FRONTEND_SUPPORT`, `CHANNEL_INVENTORY`, "
             "`CHANNEL_WORK_MANAGEMENT`, `CHANNEL_KNOWLEDGE_UPLOADS`, "
-            "`CHANNEL_BUILDER_AGENT`."
+            "`CHANNEL_CREATE_KNOWLEDGE`, `CHANNEL_BUILDER_AGENT`."
         )
 
     logger.info(
