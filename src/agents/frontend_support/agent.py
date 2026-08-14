@@ -47,6 +47,10 @@ INSUFFICIENT_EVIDENCE_RESPONSE = (
 GENERAL_GUIDANCE_PREFIX = "*General troubleshooting guidance — not an internally proven fix:*\n"
 
 
+def _is_private_coaching(message: str, context: RequestContext) -> bool:
+    return "private_coach" in context.roles or "PRIVATE COACHING SESSION" in message
+
+
 class FrontendSupportAgent(BaseAgent):
     """Answers collaboratively using governed knowledge, incident vectors and support graph evidence."""
 
@@ -93,7 +97,7 @@ class FrontendSupportAgent(BaseAgent):
                 logger.exception("Legacy support evidence retrieval failed request_id=%s", context.request_id)
                 return safe_error_message(context.request_id)
             if not result.should_answer and not incident_context:
-                if "private_coach" in context.roles:
+                if _is_private_coaching(message, context):
                     return await self._private_general_guidance(message, context)
                 return INSUFFICIENT_EVIDENCE_RESPONSE
             self.evidence = SupportEvidenceService(
@@ -108,7 +112,7 @@ class FrontendSupportAgent(BaseAgent):
             return safe_error_message(context.request_id)
 
         if not package.has_evidence:
-            if "private_coach" in context.roles:
+            if _is_private_coaching(message, context):
                 return await self._private_general_guidance(message, context)
             return INSUFFICIENT_EVIDENCE_RESPONSE
 
