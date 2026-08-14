@@ -44,6 +44,8 @@ INSUFFICIENT_EVIDENCE_RESPONSE = (
     "I can compare it with past incidents. If steps have already been tried, add them here so we can rule them out together."
 )
 
+GENERAL_GUIDANCE_PREFIX = "*General troubleshooting guidance — not an internally proven fix:*\n"
+
 
 class FrontendSupportAgent(BaseAgent):
     """Answers collaboratively using governed knowledge, incident vectors and support graph evidence."""
@@ -56,6 +58,30 @@ class FrontendSupportAgent(BaseAgent):
         self.incident_rag = self.evidence.incident_rag
         self.llm = get_llm()
 
+    async def _private_general_guidance(
+        self, message: str, context: RequestContext
+    ) -> str:
+        """Allow general model guidance in the private coaching lane without presenting it as internal truth."""
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(
+                content=(
+                    "No reliable internal incident or governed-knowledge evidence matched this private coaching request.\n"
+                    "Provide useful general technical explanation or troubleshooting guidance if you can. "
+                    "Do not invent internal incidents, organisational evidence, or known-success claims. "
+                    "Keep the guidance reversible and low-risk where possible, and ask for missing diagnostic detail when needed.\n\n"
+                    f"{message}"
+                )
+            ),
+        ]
+        try:
+            response = await self.llm.ainvoke(messages)
+            answer = response.content if hasattr(response, "content") else str(response)
+        except Exception:
+            logger.exception("Private general guidance failed request_id=%s", context.request_id)
+            return safe_error_message(context.request_id)
+        return GENERAL_GUIDANCE_PREFIX + answer.strip()
+
     async def handle(self, message: str, context: RequestContext) -> str:
         if not hasattr(self, "evidence"):
             try:
@@ -67,6 +93,8 @@ class FrontendSupportAgent(BaseAgent):
                 logger.exception("Legacy support evidence retrieval failed request_id=%s", context.request_id)
                 return safe_error_message(context.request_id)
             if not result.should_answer and not incident_context:
+                if "private_coach" in context.roles:
+                    return await self._private_general_guidance(message, context)
                 return INSUFFICIENT_EVIDENCE_RESPONSE
             self.evidence = SupportEvidenceService(
                 retriever=self.retriever,
@@ -80,6 +108,8 @@ class FrontendSupportAgent(BaseAgent):
             return safe_error_message(context.request_id)
 
         if not package.has_evidence:
+            if "private_coach" in context.roles:
+                return await self._private_general_guidance(message, context)
             return INSUFFICIENT_EVIDENCE_RESPONSE
 
         prompt_context = package.to_prompt_context()
