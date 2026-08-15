@@ -51,10 +51,6 @@ def _remove_capture_controls(blocks: list[dict]) -> list[dict]:
     return [block for block in blocks if block.get("block_id") != "frontend_resolution_capture"]
 
 
-def _remove_clarification_controls(blocks: list[dict]) -> list[dict]:
-    return [block for block in blocks if block.get("block_id") != "frontend_clarification"]
-
-
 def _knowledge_task_message(task: dict) -> str:
     contributors = ", ".join(task.get("contributors") or []) or "not yet attributed"
     return (
@@ -126,25 +122,34 @@ def register(app: AsyncApp) -> None:
         engine = get_clarifications()
 
         message = body.get("message") or {}
-        if message.get("ts"):
-            await client.chat_update(
-                channel=channel_id,
-                ts=message["ts"],
-                text=message.get("text", "Clarification received."),
-                blocks=_remove_clarification_controls(message.get("blocks", [])),
-            )
+        message_ts = message.get("ts")
 
         # "Other" deliberately keeps the question pending so the technician can
         # answer naturally in free text rather than being forced into a form.
         if value == "Other":
+            if message_ts:
+                await client.chat_update(
+                    channel=channel_id,
+                    ts=message_ts,
+                    text=f"Reply in your own words: {key.replace('_', ' ')}",
+                    blocks=[],
+                )
             await client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text=f"No problem — reply in your own words with the answer to: *{key.replace('_', ' ')}*.",
+                text=f"No problem — just type the {key.replace('_', ' ')} here in the thread.",
             )
             return
 
         engine.store.answer(channel_id, thread_ts, key, value)
+        if message_ts:
+            await client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text=f"✓ {key.replace('_', ' ').title()}: {label}",
+                blocks=[],
+            )
+
         service = get_service()
         synthetic_ts = f"clarify-{message.get('ts', '')}-{actor_id}-{key}"
         try:
@@ -175,8 +180,15 @@ def register(app: AsyncApp) -> None:
             )
             return
 
-        # Enough context now: run the normal support agent against the enriched
-        # thread. Local import avoids an import cycle with the Slack runtime.
+        # Enough context now: show visible progress before the slower retrieval +
+        # local LLM path, then replace the same message with the answer.
+        progress = await client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="Thanks — I have enough context now. Searching similar incidents and working out the best next step…",
+        )
+        progress_ts = progress.get("ts")
+
         from src.bot.router import route_frontend_support
 
         context = RequestContext.from_slack(
@@ -190,7 +202,16 @@ def register(app: AsyncApp) -> None:
         except Exception:
             logger.exception("Frontend Support clarification follow-up failed")
             response = "I captured that detail, but I couldn't complete the follow-up search. Reply normally and I'll try again."
-        await client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=response)
+
+        if progress_ts:
+            await client.chat_update(
+                channel=channel_id,
+                ts=progress_ts,
+                text=response,
+                blocks=[],
+            )
+        else:
+            await client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=response)
 
     @app.action(CAPTURE_RESOLUTION)
     async def capture_resolution(ack, body, client):
