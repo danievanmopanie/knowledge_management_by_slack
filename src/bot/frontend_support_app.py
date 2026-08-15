@@ -34,26 +34,33 @@ app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 register_frontend_interactivity(app)
 
 
+def _normalise_message_event(event: dict) -> dict | None:
+    """Return the effective human message for normal and edited Slack events.
+
+    Slack wraps edits in a ``message_changed`` envelope. Treat the edited
+    message as a fresh observation so a technician can clarify a terse support
+    post without needing to @mention the bot afterwards.
+    """
+    subtype = event.get("subtype")
+    if subtype == "message_deleted" or subtype == "bot_message":
+        return None
+    if subtype == "message_changed":
+        message = dict(event.get("message") or {})
+        if not message or message.get("subtype") == "bot_message" or not message.get("user"):
+            return None
+        message.setdefault("channel", event.get("channel", ""))
+        message.setdefault("channel_type", event.get("channel_type"))
+        return message
+    return event
+
+
 def _context(event: dict) -> RequestContext:
     return RequestContext.from_slack(
         channel_id=event.get("channel", ""),
         user_id=event.get("user"),
         thread_ts=event.get("thread_ts") or event.get("ts"),
         files=event.get("files", []),
-    )
-
-
-def _support_context(context: RequestContext, *, thread_ts: str | None = None) -> RequestContext:
-    """Mark the dedicated Slack support lane as allowed to use safe general guidance."""
-    return RequestContext.from_slack(
-        channel_id=context.channel_id,
-        user_id=context.user_id,
-        thread_ts=thread_ts or context.thread_ts,
-        files=list(context.files),
-        request_id=context.request_id,
-        roles=tuple(dict.fromkeys((*context.roles, "frontend_general_guidance"))),
-        groups=context.groups,
-        site=context.site,
+        roles=("general_support_fallback",),
     )
 
 
@@ -87,8 +94,14 @@ async def _private(event: dict, say, context: RequestContext, text: str) -> bool
         user_id=event["user"],
         text=text,
     )
+    private_context = RequestContext.from_slack(
+        channel_id=context.channel_id,
+        user_id=context.user_id,
+        thread_ts=context.thread_ts,
+        roles=("private_coach", "general_support_fallback"),
+    )
     try:
-        response = await _route_with_timing(query, context, lane="private")
+        response = await _route_with_timing(query, private_context, lane="private")
     except Exception:
         logger.exception("Private Frontend Support request failed")
         response = safe_error_message(context.request_id)
@@ -152,7 +165,12 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
     if not should_invoke:
         return True
 
-    agent_context = _support_context(context, thread_ts=root_ts)
+    agent_context = RequestContext.from_slack(
+        channel_id=context.channel_id,
+        user_id=context.user_id,
+        thread_ts=root_ts,
+        roles=("general_support_fallback",),
+    )
     query = compose_thread_query(
         service,
         channel_id=context.channel_id,
@@ -174,19 +192,20 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
 
 @app.event("message")
 async def handle_message(event, say):
-    if event.get("subtype") in ("bot_message", "message_changed", "message_deleted"):
+    effective_event = _normalise_message_event(event)
+    if effective_event is None:
         return
-    if "<@" in (event.get("text") or ""):
+    if "<@" in (effective_event.get("text") or ""):
         return
-    context = _context(event)
+    context = _context(effective_event)
     try:
-        text = await _text(event)
+        text = await _text(effective_event)
     except VoiceTranscriptionError as exc:
         await say(text=f"I couldn't transcribe that voice note locally: {exc}")
         return
-    if await _private(event, say, context, text):
+    if await _private(effective_event, say, context, text):
         return
-    await _public(event, say, context, text)
+    await _public(effective_event, say, context, text)
 
 
 @app.event("app_mention")
@@ -211,13 +230,17 @@ async def handle_mention(event, say):
             thread_ts=root_ts,
             latest_text=cleaned or "help with this",
         )
-        route_context = _support_context(context, thread_ts=root_ts)
     else:
         query = cleaned or event.get("text", "")
-        route_context = context
 
+    mention_context = RequestContext.from_slack(
+        channel_id=context.channel_id,
+        user_id=context.user_id,
+        thread_ts=root_ts or context.thread_ts,
+        roles=("general_support_fallback",),
+    )
     try:
-        response = await _route_with_timing(query, route_context, lane="mention")
+        response = await _route_with_timing(query, mention_context, lane="mention")
     except Exception:
         logger.exception("Frontend Support mention failed")
         response = safe_error_message(context.request_id)
