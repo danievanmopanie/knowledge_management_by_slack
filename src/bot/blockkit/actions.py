@@ -1,12 +1,9 @@
 """Confirm/Cancel buttons for staged PO / receipt / stock-count replies.
 
 `InventoryAgent.handle()` already returns a plain-text preview whenever it
-stages a PO, receipt, or stock count, telling the user to type
-`confirm <kind> <id>` / `cancel <kind> <id>`. Rather than changing that
-domain-facing text contract, `attach_confirm_cancel()` recognises those
-replies and extracts the staged id with a small regex, so the Slack delivery
-layer can attach real buttons without touching `src/inventory/` or
-`src/agents/inventory/agent.py` at all.
+stages a PO, receipt, or stock count. `attach_confirm_cancel()` recognises
+those replies and attaches the repo-wide Block Kit decision controls so typed
+commands remain a fallback rather than the primary UX.
 """
 
 from __future__ import annotations
@@ -14,6 +11,7 @@ from __future__ import annotations
 import re
 
 from src.bot.blockkit import ids
+from src.bot.blockkit.decisions import decision_actions, remove_action_blocks
 
 _STAGE_PATTERNS: tuple[tuple[str, re.Pattern, str, str], ...] = (
     ("po", re.compile(r"confirm po (?P<id>[\w-]+)"), ids.CONFIRM_PO, ids.CANCEL_PO),
@@ -35,26 +33,15 @@ def build_confirm_cancel_blocks(kind: str, staged_id: str) -> list[dict]:
         "count": (ids.CONFIRM_COUNT, ids.CANCEL_COUNT),
     }[kind]
     return [
-        {
-            "type": "actions",
-            "block_id": f"inventory_{kind}_confirm_cancel",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Confirm"},
-                    "style": "primary",
-                    "action_id": confirm_action,
-                    "value": staged_id,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Cancel"},
-                    "style": "danger",
-                    "action_id": cancel_action,
-                    "value": staged_id,
-                },
-            ],
-        }
+        decision_actions(
+            block_id=f"inventory_{kind}_confirm_cancel",
+            value=staged_id,
+            primary_action_id=confirm_action,
+            primary_label="Confirm",
+            secondary_action_id=cancel_action,
+            secondary_label="Cancel",
+            secondary_style="danger",
+        )
     ]
 
 
@@ -75,8 +62,4 @@ def attach_confirm_cancel(response_text: str) -> list[dict] | None:
 
 def remove_confirm_cancel_blocks(blocks: list[dict]) -> list[dict]:
     """Remove only this feature's controls while preserving the visible preview."""
-    return [
-        block
-        for block in blocks
-        if block.get("block_id") not in _CONFIRM_CANCEL_BLOCK_IDS
-    ]
+    return remove_action_blocks(blocks, *_CONFIRM_CANCEL_BLOCK_IDS)
