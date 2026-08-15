@@ -2,17 +2,18 @@
 
 Layers:
 1. Governed knowledge retrieval (articles, notes, uploaded documents)
-2. Historical incident vector retrieval
+2. Historical incident vector retrieval used only to *locate* relevant incidents
 3. Typed support graph context (people, symptoms, actions, resolutions)
 
-Conversational support is latency-sensitive. Governed and incident retrieval run in
-parallel, incident hits are reused rather than searched twice, and short-lived
-context-scoped caching avoids repeating identical work during active incidents.
+When an exact incident lookup is requested, vector similarity is bypassed and the
+full deterministic temporal case file is loaded directly. For semantic searches,
+selected incident IDs are hydrated back into complete case evidence before the
+LLM sees them, so resolution/work-note knowledge is not lost just because the
+matching embedding came from the problem field.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -20,14 +21,20 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from src.core.context import RequestContext
+from src.knowledge.incident_casefile import (
+    IncidentCaseFileStore,
+    extract_incident_numbers,
+    looks_like_exact_incident_lookup,
+)
 from src.knowledge.incident_rag import IncidentRAG
 from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery
 from src.knowledge.retriever import HybridRetriever
 from src.knowledge.support_graph import SupportKnowledgeGraph
 
 CONVERSATIONAL_LIMIT = 3
-PROMPT_CONTEXT_MAX_CHARS = 4500
-INCIDENT_CONTEXT_MAX_CHARS = 2600
+PROMPT_CONTEXT_MAX_CHARS = 9000
+INCIDENT_CONTEXT_MAX_CHARS = 7600
+EXACT_INCIDENT_CONTEXT_MAX_CHARS = 14000
 EVIDENCE_CACHE_TTL_SECONDS = 300
 EVIDENCE_CACHE_MAX_ENTRIES = 128
 
@@ -42,13 +49,27 @@ class SupportEvidencePackage:
     incident_sources: set[str] = field(default_factory=set)
     governed_should_answer: bool = False
     confidence_score: float = 0.0
+    exact_incident_numbers: tuple[str, ...] = ()
+    exact_incident_context: str = ""
+    exact_incident_missing: tuple[str, ...] = ()
+
+    @property
+    def exact_lookup_requested(self) -> bool:
+        return bool(self.exact_incident_numbers)
 
     @property
     def has_evidence(self) -> bool:
-        return bool(self.governed_context or self.incident_context or self.graph_context)
+        return bool(
+            self.exact_incident_context
+            or self.governed_context
+            or self.incident_context
+            or self.graph_context
+        )
 
     def to_prompt_context(self, max_chars: int = PROMPT_CONTEXT_MAX_CHARS) -> str:
         parts: list[str] = []
+        if self.exact_incident_context:
+            parts.extend([self.exact_incident_context, "---"])
         if self.incident_context:
             parts.extend([self.incident_context, "---"])
         if self.graph_context:
@@ -74,27 +95,45 @@ def _context_scope(context: RequestContext) -> tuple:
     )
 
 
-def _incident_context_from_docs(docs: list, *, max_chars: int = INCIDENT_CONTEXT_MAX_CHARS) -> str:
-    """Render already-retrieved incident docs without issuing a second vector search."""
+def _incident_context_from_casefiles(
+    docs: list,
+    casefiles: IncidentCaseFileStore,
+    *,
+    max_chars: int = INCIDENT_CONTEXT_MAX_CHARS,
+) -> str:
+    """Hydrate semantically-selected incident IDs into complete case evidence."""
     if not docs:
         return ""
-    parts = ["### Similar past incidents"]
+    parts = [
+        "### Similar past incidents — full case evidence",
+        "Vector similarity selected these incident IDs; the details below come from the deterministic incident store.",
+    ]
     for i, doc in enumerate(docs, 1):
         meta = doc.metadata or {}
+        number = str(meta.get("number") or "").strip().upper()
+        case = casefiles.get(number) if number else None
+        if case is not None:
+            score = meta.get("score")
+            relevance = float(score) if score is not None else None
+            rendered = casefiles.render_similar(
+                case,
+                relevance=relevance,
+                matched_fields=str(meta.get("matched_fields") or "").replace(",", ", "),
+            )
+            parts.extend([f"[{i}] {rendered}", ""])
+            continue
+
+        # Compatibility fallback for an old vector hit that has not yet landed
+        # in the temporal store.
         header = (
-            f"[{i}] {meta.get('number', '?')} | {meta.get('state', '')} "
+            f"[{i}] {number or '?'} | {meta.get('state', '')} "
             f"| group={meta.get('assignment_group', '')} | loc={meta.get('location', '')}"
         )
-        matched_fields = str(meta.get("matched_fields") or "").replace(",", ", ")
-        if matched_fields:
-            header += f" | matched={matched_fields}"
-        score = meta.get("score")
-        if score is not None:
-            header += f" | relevance={float(score):.2f}"
         parts.extend([header, doc.page_content.strip(), ""])
+
     text = "\n".join(parts).strip()
     if len(text) > max_chars:
-        return text[:max_chars] + "\n\n[Incident context truncated]"
+        return text[:max_chars] + "\n\n[Incident case evidence truncated]"
     return text
 
 
@@ -106,10 +145,12 @@ class SupportEvidenceService:
         retriever: HybridRetriever | None = None,
         incident_rag: IncidentRAG | None = None,
         support_graph: SupportKnowledgeGraph | None = None,
+        casefiles: IncidentCaseFileStore | None = None,
     ):
         self.retriever = retriever or HybridRetriever()
         self.incident_rag = incident_rag or IncidentRAG()
         self.support_graph = support_graph or SupportKnowledgeGraph(self.incident_rag.graph_store)
+        self.casefiles = casefiles or IncidentCaseFileStore(graph_store=self.incident_rag.graph_store)
         self._cache: dict[tuple, tuple[float, SupportEvidencePackage]] = {}
         self._cache_lock = threading.RLock()
 
@@ -135,6 +176,30 @@ class SupportEvidenceService:
                 self._cache.pop(oldest_key, None)
             self._cache[key] = (time.monotonic(), package)
 
+    def _build_exact_package(
+        self,
+        query: str,
+        numbers: list[str],
+    ) -> SupportEvidencePackage:
+        contexts: list[str] = []
+        missing: list[str] = []
+        sources: set[str] = set()
+        for number in numbers[:3]:
+            case = self.casefiles.get(number)
+            if case is None:
+                missing.append(number)
+                continue
+            contexts.append(self.casefiles.render_exact(case, max_chars=EXACT_INCIDENT_CONTEXT_MAX_CHARS))
+            sources.add(f"incident:{number}")
+
+        return SupportEvidencePackage(
+            query=query,
+            exact_incident_numbers=tuple(numbers[:3]),
+            exact_incident_context="\n\n---\n\n".join(contexts),
+            exact_incident_missing=tuple(missing),
+            incident_sources=sources,
+        )
+
     def build(
         self,
         query: str,
@@ -148,10 +213,15 @@ class SupportEvidenceService:
         if cached is not None:
             return cached
 
+        exact_numbers = extract_incident_numbers(query)
+        if exact_numbers and looks_like_exact_incident_lookup(query):
+            package = self._build_exact_package(query, exact_numbers)
+            self._put_cached(cache_key, package)
+            return package
+
         retrieval_query = RetrievalQuery(text=query, context=context, limit=limit, graph_depth=1)
 
-        # These searches are independent and usually dominate retrieval latency.
-        # Run them concurrently, then enrich only the already-returned incident hits.
+        # Governed retrieval and semantic incident-ID selection are independent.
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="frontend-evidence") as pool:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
             incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
@@ -189,7 +259,7 @@ class SupportEvidenceService:
             query=query,
             governed_candidates=governed.candidates,
             governed_context=governed.to_context_string() if governed.should_answer else "",
-            incident_context=_incident_context_from_docs(incident_docs),
+            incident_context=_incident_context_from_casefiles(incident_docs, self.casefiles),
             graph_context=graph_context,
             incident_sources=incident_sources,
             governed_should_answer=governed.should_answer,
