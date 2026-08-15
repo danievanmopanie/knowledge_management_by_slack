@@ -11,11 +11,13 @@ No LLM is used during ingestion.
 
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from src.core.config import settings
 from src.knowledge.fast_temporal_graph import FastTemporalGraphBuilder, GraphBuildResult
@@ -25,7 +27,9 @@ from src.knowledge.temporal_incidents import TemporalIncidentStore, TemporalInge
 from src.knowledge.vectorstore import VectorStore
 from src.reporting.incidents import Incident, load_incidents_from_csv
 
+logger = logging.getLogger(__name__)
 INCIDENT_COLLECTION = "incidents"
+ProgressCallback = Callable[[dict], None]
 
 
 @dataclass
@@ -85,6 +89,16 @@ class FastIncidentIngestResult:
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+def _emit(callback: ProgressCallback | None, **payload) -> None:
+    """Emit best-effort progress without allowing UI failures to break ingest."""
+    if callback is None:
+        return
+    try:
+        callback(payload)
+    except Exception:
+        logger.exception("Incident ingest progress callback failed stage=%s", payload.get("stage"))
 
 
 def _ratio(count: int, total: int) -> float:
@@ -166,9 +180,23 @@ class FastIncidentEmbedder:
         else:
             save_hash_index(hashes)
 
-    def index(self, incidents: list[Incident], *, incident_chunk_size: int = 1000) -> FastEmbedResult:
+    def index(
+        self,
+        incidents: list[Incident],
+        *,
+        incident_chunk_size: int = 1000,
+        on_progress: ProgressCallback | None = None,
+    ) -> FastEmbedResult:
         started = time.perf_counter()
         if not incidents:
+            _emit(
+                on_progress,
+                stage="embedding_plan",
+                incidents_total=0,
+                incidents_embedded=0,
+                metadata_only_incidents=0,
+                documents_total=0,
+            )
             return FastEmbedResult(0, 0, 0, 0, self.vector_store.count(), 0.0, 0.0)
 
         hashes = self._load_hashes()
@@ -182,6 +210,21 @@ class FastIncidentEmbedder:
                 semantic_changed.append(inc)
                 hashes[inc.number] = digest
 
+        total_vector_documents = sum(
+            1
+            for inc in semantic_changed
+            for group in FIELD_GROUPS
+            if _fast_field_document(inc, group)
+        )
+        _emit(
+            on_progress,
+            stage="embedding_plan",
+            incidents_total=len(incidents),
+            incidents_embedded=len(semantic_changed),
+            metadata_only_incidents=len(metadata_only),
+            documents_total=total_vector_documents,
+        )
+
         # Lifecycle-only changes refresh Chroma filters/labels without touching embeddings.
         meta_ids: list[str] = []
         meta_values: list[dict] = []
@@ -193,6 +236,12 @@ class FastIncidentEmbedder:
                 meta_values.append(_incident_metadata(inc, group))
         if meta_ids:
             self.vector_store.update_metadatas(meta_ids, meta_values)
+        _emit(
+            on_progress,
+            stage="metadata_updated",
+            metadata_only_incidents=len(metadata_only),
+            metadata_documents=len(meta_ids),
+        )
 
         vector_documents = 0
         chunk_size = max(1, int(incident_chunk_size))
@@ -223,6 +272,16 @@ class FastIncidentEmbedder:
                     batch_size=settings.incident_embedding_batch_size,
                 )
                 vector_documents += len(docs)
+            _emit(
+                on_progress,
+                stage="embedding_progress",
+                incidents_done=min(start + len(batch), len(semantic_changed)),
+                incidents_total=len(semantic_changed),
+                documents_done=vector_documents,
+                documents_total=total_vector_documents,
+                metadata_only_incidents=len(metadata_only),
+                elapsed_seconds=time.perf_counter() - started,
+            )
 
         self._save_hashes(hashes)
         elapsed = time.perf_counter() - started
@@ -256,15 +315,25 @@ class FastTemporalIncidentIngestor:
         *,
         complete_snapshot: bool = True,
         observed_at: datetime | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> FastIncidentIngestResult:
         total_started = time.perf_counter()
+        _emit(on_progress, stage="parse_started", file_name=path.name)
         parse_started = time.perf_counter()
         incidents = load_incidents_from_csv(path)
         parse_seconds = time.perf_counter() - parse_started
         if not incidents:
             raise ValueError(f"{path} does not contain recognisable ServiceNow incidents")
+        _emit(
+            on_progress,
+            stage="parse_completed",
+            rows=len(incidents),
+            unique_incidents=len({inc.number for inc in incidents if inc.number}),
+            parse_seconds=parse_seconds,
+        )
 
         observed = observed_at or datetime.now(timezone.utc)
+        _emit(on_progress, stage="comparison_started")
         temporal: TemporalIngestResult = self.temporal_store.ingest_snapshot(
             incidents,
             source_file=path.name,
@@ -272,8 +341,25 @@ class FastTemporalIncidentIngestor:
             complete_snapshot=complete_snapshot,
         )
         changed = temporal.changed_incidents
+        _emit(
+            on_progress,
+            stage="temporal_completed",
+            new=temporal.new,
+            changed=temporal.changed,
+            unchanged=temporal.unchanged,
+            missing=temporal.missing,
+            versions_written=temporal.versions_written,
+            transitions_written=temporal.transitions_written,
+            dwell_rows_written=temporal.dwell_rows_written,
+            temporal_seconds=temporal.elapsed_seconds,
+        )
 
         observed_text = observed.isoformat()
+        _emit(on_progress, stage="build_started", changed_incidents=len(changed))
+
+        def embedding_progress(payload: dict) -> None:
+            _emit(on_progress, **payload)
+
         # Graph construction and local embedding are independent after delta detection.
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="incident-ingest") as pool:
             graph_future = pool.submit(
@@ -283,11 +369,35 @@ class FastTemporalIncidentIngestor:
                 source_file=path.name,
                 save=True,
             )
-            embed_future = pool.submit(self.embedder.index, changed)
+            embed_future = pool.submit(
+                self.embedder.index,
+                changed,
+                on_progress=embedding_progress,
+            )
             graph: GraphBuildResult = graph_future.result()
+            _emit(
+                on_progress,
+                stage="graph_completed",
+                graph_nodes_added=graph.nodes_added,
+                graph_edges_added=graph.edges_added,
+                graph_temporal_edges_opened=graph.temporal_edges_opened,
+                graph_reference_edges=graph.reference_edges,
+                graph_seconds=graph.elapsed_seconds,
+            )
             embedded: FastEmbedResult = embed_future.result()
 
-        return FastIncidentIngestResult(
+        _emit(
+            on_progress,
+            stage="embedding_completed",
+            vector_incidents=embedded.incidents_embedded,
+            vector_metadata_only_incidents=embedded.metadata_only_incidents,
+            vector_documents=embedded.vector_documents,
+            vector_collection_total=embedded.collection_total,
+            embedding_seconds=embedded.elapsed_seconds,
+            embedding_documents_per_second=embedded.documents_per_second,
+        )
+
+        result = FastIncidentIngestResult(
             run_id=temporal.run_id,
             file_name=path.name,
             rows=temporal.rows,
@@ -314,3 +424,5 @@ class FastTemporalIncidentIngestor:
             total_seconds=time.perf_counter() - total_started,
             embedding_documents_per_second=embedded.documents_per_second,
         )
+        _emit(on_progress, stage="completed", metrics=result.as_dict())
+        return result
