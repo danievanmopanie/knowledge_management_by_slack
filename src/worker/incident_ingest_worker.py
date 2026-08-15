@@ -8,12 +8,19 @@ import threading
 import time
 from pathlib import Path
 
-from slack_sdk import WebClient
+from dotenv import load_dotenv
 
-from src.bot.create_knowledge_progress import build_blocks
-from src.core.config import settings
-from src.knowledge.fast_incident_ingest import FastTemporalIncidentIngestor
-from src.knowledge.incident_ingest_jobs import IncidentIngestJobStore
+# The worker is a standalone Create Knowledge runtime. Load .env before reading
+# its dedicated Slack credential so a normal ``python -m ...`` launch does not
+# silently fall back to the legacy/shared Slack bot token.
+load_dotenv()
+
+from slack_sdk import WebClient  # noqa: E402
+
+from src.bot.create_knowledge_progress import build_blocks  # noqa: E402
+from src.core.config import settings  # noqa: E402
+from src.knowledge.fast_incident_ingest import FastTemporalIncidentIngestor  # noqa: E402
+from src.knowledge.incident_ingest_jobs import IncidentIngestJobStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 3
