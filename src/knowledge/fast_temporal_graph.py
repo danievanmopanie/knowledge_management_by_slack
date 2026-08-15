@@ -1,7 +1,7 @@
 """Deterministic temporal graph construction for ServiceNow incidents.
 
-Structured ServiceNow fields are authoritative. This module intentionally does
-not call an LLM; free-text is used only for cheap reference/evidence extraction.
+Structured ServiceNow fields are authoritative.  This module intentionally does
+not call an LLM; free-text is used only for cheap ticket-reference extraction.
 """
 
 from __future__ import annotations
@@ -43,17 +43,15 @@ def _raw(inc: Incident, *names: str) -> str:
     return ""
 
 
-def _change_evidence(text: str, ticket: str) -> tuple[str, float, str]:
-    """Grade a CHG link conservatively using explicit, cheap language signals."""
-    low = text.lower()
-    t = re.escape(ticket.lower())
-    if re.search(rf"(?:caused by|root cause(?: was| is)?|because of|due to)\s+(?:change\s+)?{t}", low):
+def _change_relation(text: str, change_number: str) -> tuple[str, float, str]:
+    """Grade a CHG reference conservatively without an LLM call."""
+    lowered = text.lower()
+    chg = re.escape(change_number.lower())
+    if re.search(rf"(caused by|root cause(?: was| is)?|because of|due to)\s+{chg}", lowered):
         return "confirmed_caused", 0.90, "explicit_causation_text"
-    if any(term in low for term in ("rollback", "backed out", "failed change", "deployment failed")):
+    if re.search(rf"(rollback|backed out|failed change|deployment failed).*{chg}|{chg}.*(rollback|backed out|failed change|deployment failed)", lowered):
         return "likely_caused", 0.70, "failure_or_rollback_language"
-    if re.search(rf"(?:after|following|post)\s+(?:change\s+)?{t}", low) or any(
-        term in low for term in ("after change", "following change", "post change", "after migration")
-    ):
+    if re.search(rf"(after|following|post)\s+{chg}|{chg}.*(after|following|post)", lowered):
         return "temporally_correlated_with", 0.55, "temporal_language"
     return "mentions_change", 0.25, "text_reference"
 
@@ -109,19 +107,19 @@ class FastTemporalGraphBuilder:
                 opened_at=_iso(inc.opened_at, ""),
                 resolved_at=_iso(inc.resolved_at, ""),
                 state=inc.state or "",
-                source=source_file,
+                source_file=source_file,
                 last_observed_at=observed_at,
             )
 
             structured = [
                 (inc.state, "state", "in_state"),
-                (_raw(inc, "priority"), "priority", "has_priority"),
+                (inc.priority, "priority", "has_priority"),
                 (inc.assignment_group, "assignment_group", "assigned_to_group"),
                 (inc.assigned_to, "person", "assigned_to"),
                 (inc.location, "location", "located_at"),
                 (inc.category, "category", "categorised_as"),
                 (inc.subcategory, "subcategory", "subcategorised_as"),
-                (_raw(inc, "configuration item", "configuration_item", "cmdb_ci"), "configuration_item", "affects"),
+                (inc.configuration_item, "configuration_item", "affects"),
             ]
             for value, entity_type, relation in structured:
                 if not value:
@@ -133,7 +131,7 @@ class FastTemporalGraphBuilder:
                     relation,
                     valid_from=event_time,
                     observed_at=observed_at,
-                    source=source_file,
+                    source_file=source_file,
                 ):
                     temporal_opened += 1
 
@@ -145,7 +143,7 @@ class FastTemporalGraphBuilder:
                     relation="reported_by",
                     valid_from=opened_time,
                     observed_at=observed_at,
-                    source=source_file,
+                    source_file=source_file,
                 )
 
             text = " ".join(
@@ -163,18 +161,20 @@ class FastTemporalGraphBuilder:
                 for ticket in sorted({m.group(0).upper() for m in pattern.finditer(text)}):
                     target = self._entity(entity_type, ticket)
                     if entity_type == "change":
-                        relation, confidence, evidence = _change_evidence(text, ticket)
-                    elif entity_type == "problem":
-                        relation, confidence, evidence = "related_to_problem", 1.0, "text_reference"
+                        relation, confidence, evidence = _change_relation(text, ticket)
                     else:
-                        relation, confidence, evidence = "references_knowledge", 1.0, "text_reference"
+                        relation = {
+                            "problem": "related_to_problem",
+                            "knowledge_item": "references_knowledge",
+                        }[entity_type]
+                        confidence, evidence = 1.0, "text_reference"
                     self.store.add_relation(
                         incident_id,
                         target,
                         relation=relation,
                         valid_from=event_time,
                         observed_at=observed_at,
-                        source=source_file,
+                        source_file=source_file,
                         confidence=confidence,
                         evidence=evidence,
                     )
