@@ -32,29 +32,39 @@ Return one JSON object only. Do not include markdown.
 Rules:
 - Use only facts present in the supplied incident. Never invent missing details.
 - Keep symptoms and resolutions concise but specific enough for future retrieval.
+- issue_pattern is a short canonical problem class: technology + user-visible failure, for example "Microsoft Outlook repeated credential prompt". Exclude user names, incident numbers, sites, dates and one-off wording. Equivalent incidents should receive equivalent wording.
+- resolution_pattern is a short canonical successful fix, for example "Clear cached Office credentials". It must be empty when the incident does not contain evidence of a successful resolution.
+- root_cause_pattern is a short canonical cause class and must be empty unless the source explicitly supports a root cause.
 - Separate troubleshooting actions in the order they appear when possible.
-- Outcome must be one of successful, failed, unknown.
+- canonical_action is a concise reusable action label; action preserves the evidence-specific detail.
+- Outcome must be one of successful, failed, unknown. Do not mark an action successful merely because it was attempted.
 - Root cause must be empty when it is not explicitly supported.
 - A person/contributor must be empty unless the text or structured incident fields identify them.
 - Confidence is 0.0 to 1.0 and reflects evidence quality, not how plausible the fix sounds.
 - Technologies and environment are short canonical labels, not sentences.
+- Generic closure text such as "resolved", "user confirmed", "ticket closed" is not a technical resolution.
+- Prefer empty values over guesses.
 """
 
 
 class ExtractedAction(BaseModel):
     action: str = ""
+    canonical_action: str = ""
     outcome: Literal["successful", "failed", "unknown"] = "unknown"
     contributor: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class SupportExtraction(BaseModel):
+    issue_pattern: str = ""
     symptom: str = ""
     environment: list[str] = Field(default_factory=list)
     technologies: list[str] = Field(default_factory=list)
     actions: list[ExtractedAction] = Field(default_factory=list)
     root_cause: str = ""
+    root_cause_pattern: str = ""
     resolution: str = ""
+    resolution_pattern: str = ""
     resolver: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
@@ -153,7 +163,7 @@ def _parse_json_object(value: str) -> dict:
 
 
 class SupportKnowledgeExtractor:
-    """Extract structured support facts with a small local LLM, then seed the graph."""
+    """Extract structured support facts with a local LLM, then seed the graph."""
 
     def __init__(
         self,
@@ -173,24 +183,37 @@ class SupportKnowledgeExtractor:
                 return cached
 
         schema_example = SupportExtraction(
-            symptom="Concise user-visible symptom",
+            issue_pattern="Microsoft Outlook repeated credential prompt",
+            symptom="Outlook prompts for the user's password every time it opens after a password change",
             environment=["Windows 11"],
-            technologies=["Microsoft Outlook"],
+            technologies=["Microsoft Outlook", "Microsoft 365"],
             actions=[
                 ExtractedAction(
-                    action="Recreated Outlook profile",
+                    action="Technician recreated the Outlook profile but the prompt returned",
+                    canonical_action="Recreate Outlook profile",
                     outcome="failed",
                     contributor="Technician Name",
                     confidence=0.9,
-                )
+                ),
+                ExtractedAction(
+                    action="Removed stale Office credentials and signed in again",
+                    canonical_action="Clear cached Office credentials",
+                    outcome="successful",
+                    contributor="Technician Name",
+                    confidence=0.95,
+                ),
             ],
-            root_cause="Corrupted authentication token",
-            resolution="Cleared authentication token cache",
+            root_cause="Stale cached Office credential remained after the password changed",
+            root_cause_pattern="Stale cached authentication credential",
+            resolution="Removed the stale cached Office credential and Outlook accepted the new password",
+            resolution_pattern="Clear cached Office credentials",
             resolver="Technician Name",
             confidence=0.9,
         ).model_dump()
         prompt = (
-            "Extract this incident into the JSON shape shown below. Empty values are preferred over guesses.\n\n"
+            "Extract this incident into the JSON shape shown below. Preserve evidence detail while also "
+            "producing canonical pattern labels for cross-incident aggregation. Empty values are preferred "
+            "over guesses.\n\n"
             f"JSON shape example:\n{json.dumps(schema_example, ensure_ascii=False)}\n\n"
             f"INCIDENT EVIDENCE:\n{incident_extraction_text(incident)}"
         )
@@ -202,7 +225,13 @@ class SupportKnowledgeExtractor:
         self.cache.put(incident, extraction)
         return extraction
 
-    def apply(self, incident: Incident, extraction: SupportExtraction) -> None:
+    def apply(
+        self,
+        incident: Incident,
+        extraction: SupportExtraction,
+        *,
+        save: bool = True,
+    ) -> None:
         incident_entity = self.graph.add_incident(
             incident.number,
             short_description=incident.short_description,
@@ -210,6 +239,13 @@ class SupportKnowledgeExtractor:
             assigned_to=incident.assigned_to,
             caller=incident.caller,
         )
+
+        if extraction.issue_pattern.strip():
+            self.graph.add_issue_pattern(
+                incident_entity,
+                extraction.issue_pattern.strip(),
+                confidence=extraction.confidence,
+            )
 
         if extraction.symptom:
             self.graph.add_symptom(
@@ -243,8 +279,10 @@ class SupportKnowledgeExtractor:
                 self.graph.add_action(
                     incident_entity,
                     action.action,
+                    canonical_action=action.canonical_action,
                     outcome=action.outcome,
                     contributor=action.contributor or None,
+                    confidence=action.confidence,
                 )
 
         resolution = extraction.resolution.strip() or incident.resolution_notes.strip()
@@ -253,17 +291,24 @@ class SupportKnowledgeExtractor:
             self.graph.add_resolution(
                 incident_entity,
                 resolution,
+                resolution_pattern=extraction.resolution_pattern,
                 resolver=resolver,
                 root_cause=extraction.root_cause,
+                root_cause_pattern=extraction.root_cause_pattern,
                 confidence=extraction.confidence,
             )
-        self.graph.save()
+        if save:
+            self.graph.save()
 
     async def extract_and_apply(
-        self, incident: Incident, *, force: bool = False
+        self,
+        incident: Incident,
+        *,
+        force: bool = False,
+        save: bool = True,
     ) -> SupportExtraction:
         extraction = await self.extract(incident, force=force)
-        self.apply(incident, extraction)
+        self.apply(incident, extraction, save=save)
         return extraction
 
     async def extract_many(
