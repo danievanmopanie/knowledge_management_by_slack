@@ -19,12 +19,37 @@ from src.core.config import settings
 logger = logging.getLogger(__name__)
 
 COLUMN_ALIASES = {
-    "number": ["number", "incident", "incident_number", "ticket", "id"],
+    "number": [
+        "number",
+        "incident",
+        "incident_number",
+        "incident number",
+        "ticket",
+        "ticket number",
+        "incident id",
+        "id",
+    ],
     "short_description": ["short_description", "short description", "summary", "title"],
     "description": ["description", "details", "issue description", "problem description"],
     "work_notes": ["work_notes", "work notes", "work_note", "internal notes", "activity"],
-    "comments": ["comments", "additional_comments", "additional comments", "customer comments", "public comments", "comment"],
-    "resolution_notes": ["resolution_notes", "resolution notes", "close_notes", "close notes", "resolve_notes", "resolution", "resolution_description", "closed notes"],
+    "comments": [
+        "comments",
+        "additional_comments",
+        "additional comments",
+        "customer comments",
+        "public comments",
+        "comment",
+    ],
+    "resolution_notes": [
+        "resolution_notes",
+        "resolution notes",
+        "close_notes",
+        "close notes",
+        "resolve_notes",
+        "resolution",
+        "resolution_description",
+        "closed notes",
+    ],
     "state": ["state", "status"],
     "priority": ["priority"],
     "assignment_group": ["assignment_group", "assignment group", "group", "assigned_group"],
@@ -44,6 +69,7 @@ COLUMN_ALIASES = {
 
 _MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 _SNAPSHOT_DATE_RE = re.compile(r"(?<!\d)(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)(?!\d)")
+_INCIDENT_NUMBER_RE = re.compile(r"^INC\d{4,}$", re.I)
 
 
 @dataclass
@@ -89,10 +115,14 @@ class IncidentVersion:
 
 
 def _norm(s: str) -> str:
-    return " ".join(s.strip().lower().replace("_", " ").split())
+    value = str(s or "").lstrip("\ufeff").strip().lower()
+    value = re.sub(r"[_\-]+", " ", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return " ".join(value.split())
 
 
 def _map_headers(headers: list[str]) -> dict[str, str]:
+    """Map known ServiceNow header aliases to canonical names."""
     normalized = {_norm(h): h for h in headers}
     mapping: dict[str, str] = {}
     for canonical, aliases in COLUMN_ALIASES.items():
@@ -101,6 +131,49 @@ def _map_headers(headers: list[str]) -> dict[str, str]:
             if key in normalized:
                 mapping[canonical] = normalized[key]
                 break
+    return mapping
+
+
+def infer_incident_number_column(headers: list[str], rows: list[dict[str, Any]]) -> str | None:
+    """Infer the INC-number column from values when an export uses an unusual header.
+
+    A column is accepted only when most sampled non-blank values look like real
+    ServiceNow incident numbers (for example INC0034291). This is safer than the
+    previous fallback that silently used Short Description as the business key.
+    """
+    best: tuple[float, int, str] | None = None
+    sample = rows[:250]
+    for header in headers:
+        nonblank = 0
+        matches = 0
+        for row in sample:
+            value = str(row.get(header) or "").strip()
+            if not value:
+                continue
+            nonblank += 1
+            if _INCIDENT_NUMBER_RE.fullmatch(value):
+                matches += 1
+        if not nonblank or matches < 3:
+            continue
+        ratio = matches / nonblank
+        if ratio < 0.80:
+            continue
+        candidate = (ratio, matches, header)
+        if best is None or candidate[:2] > best[:2]:
+            best = candidate
+    return best[2] if best else None
+
+
+def map_incident_headers(
+    headers: list[str],
+    rows: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Canonical ServiceNow header mapping with value-based INC inference."""
+    mapping = _map_headers(headers)
+    if "number" not in mapping and rows:
+        inferred = infer_incident_number_column(headers, rows)
+        if inferred:
+            mapping["number"] = inferred
     return mapping
 
 
@@ -142,28 +215,49 @@ def _snapshot_time_from_path(path: Path) -> datetime | None:
 
 def _version_sort_key(version: IncidentVersion) -> tuple[datetime, datetime, str]:
     incident = version.incident
-    primary = incident.updated_at or version.snapshot_at or incident.resolved_at or incident.closed_at or incident.opened_at or _MIN_TIME
-    secondary = version.snapshot_at or incident.updated_at or incident.resolved_at or incident.closed_at or incident.opened_at or _MIN_TIME
+    primary = (
+        incident.updated_at
+        or version.snapshot_at
+        or incident.resolved_at
+        or incident.closed_at
+        or incident.opened_at
+        or _MIN_TIME
+    )
+    secondary = (
+        version.snapshot_at
+        or incident.updated_at
+        or incident.resolved_at
+        or incident.closed_at
+        or incident.opened_at
+        or _MIN_TIME
+    )
     return primary, secondary, str(version.source_path)
 
 
 def load_incidents_from_csv(path: Path) -> list[Incident]:
     incidents: list[Incident] = []
-    with path.open(newline="", encoding="utf-8", errors="ignore") as f:
+    with path.open(newline="", encoding="utf-8-sig", errors="ignore") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
             return []
-        mapping = _map_headers(list(reader.fieldnames))
-        if "number" not in mapping and "short_description" not in mapping:
-            logger.warning("CSV %s does not look like an incident export – skipping", path)
+        headers = list(reader.fieldnames)
+        rows = [dict(row) for row in reader]
+        mapping = map_incident_headers(headers, rows)
+        if "number" not in mapping:
+            logger.warning(
+                "CSV %s has no recognisable ServiceNow incident-number column – skipping",
+                path,
+            )
             return []
 
-        for row in reader:
+        for row in rows:
             def get(field: str) -> str:
                 col = mapping.get(field)
                 return (row.get(col) or "").strip() if col else ""
 
-            number = get("number") or get("short_description") or "unknown"
+            number = get("number")
+            if not number:
+                continue
             incidents.append(
                 Incident(
                     number=number,
@@ -237,7 +331,12 @@ def filter_incidents(
             continue
         if location_norm and location_norm not in (inc.location or "").lower():
             continue
-        if open_only and (inc.state or "").lower() in {"resolved", "closed", "cancelled", "canceled"}:
+        if open_only and (inc.state or "").lower() in {
+            "resolved",
+            "closed",
+            "cancelled",
+            "canceled",
+        }:
             continue
         results.append(inc)
     return results
