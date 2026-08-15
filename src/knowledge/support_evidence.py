@@ -4,9 +4,11 @@ Retrieval lanes:
 1. Exact incident lookup -> deterministic case file + enriched incident knowledge.
 2. Organisational pattern retrieval -> enriched symptom index selects cases, then
    deterministic aggregation produces repeated resolutions/actions/root causes.
-3. Raw historical incident vectors -> fallback candidate locator, hydrated back
+3. Organisation-wide pattern expansion -> dominant canonical patterns from the
+   semantic neighbourhood are expanded to all enriched incidents in that pattern.
+4. Raw historical incident vectors -> fallback candidate locator, hydrated back
    into complete case files.
-4. Governed knowledge -> articles, notes and approved documents.
+5. Governed knowledge -> articles, notes and approved documents.
 
 Embeddings locate evidence. They never become the source of truth for incident
 facts or organisational frequency claims.
@@ -29,12 +31,13 @@ from src.knowledge.incident_casefile import (
 )
 from src.knowledge.incident_rag import IncidentRAG
 from src.knowledge.organisational_knowledge import OrganisationalKnowledgeRetriever
+from src.knowledge.pattern_insights import organisation_wide_pattern_context
 from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery
 from src.knowledge.retriever import HybridRetriever
 from src.knowledge.support_graph import SupportKnowledgeGraph
 
 CONVERSATIONAL_LIMIT = 3
-PROMPT_CONTEXT_MAX_CHARS = 22000
+PROMPT_CONTEXT_MAX_CHARS = 30000
 INCIDENT_CONTEXT_MAX_CHARS = 7600
 EXACT_INCIDENT_CONTEXT_MAX_CHARS = 26000
 EVIDENCE_CACHE_TTL_SECONDS = 300
@@ -73,7 +76,7 @@ class SupportEvidencePackage:
     def to_prompt_context(self, max_chars: int = PROMPT_CONTEXT_MAX_CHARS) -> str:
         parts: list[str] = []
         # For exact lookups the distilled enrichment comes first so a very long
-        # journal can never crowd out the extracted resolution/action knowledge.
+        # journal can never crowd out extracted resolution/action knowledge.
         if self.organisational_context:
             parts.extend([self.organisational_context, "---"])
         if self.exact_incident_context:
@@ -239,10 +242,10 @@ class SupportEvidenceService:
 
         retrieval_query = RetrievalQuery(text=query, context=context, limit=limit, graph_depth=1)
 
-        # Governed retrieval, enriched organisational retrieval and raw incident
-        # selection are independent. The organisational lane is primary for
-        # repeated support knowledge; raw incidents remain useful fallback evidence.
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="frontend-evidence") as pool:
+        # These lanes are independent. Local pattern aggregation explains the
+        # closest symptom neighbourhood, while full pattern expansion provides
+        # organisation-wide counts for canonical patterns supported by >=2 hits.
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="frontend-evidence") as pool:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
             organisational_future = pool.submit(
                 self.organisational.collective_context,
@@ -250,10 +253,20 @@ class SupportEvidenceService:
                 candidate_k=settings.knowledge_pattern_candidate_k,
                 max_incidents=settings.knowledge_pattern_max_incidents,
             )
+            organisation_wide_future = pool.submit(
+                organisation_wide_pattern_context,
+                self.organisational,
+                query,
+                candidate_k=settings.knowledge_pattern_candidate_k,
+            )
             incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
             governed = governed_future.result()
-            organisational_context = organisational_future.result()
+            neighbourhood_context = organisational_future.result()
+            organisation_wide_context = organisation_wide_future.result()
             incident_docs = incident_future.result()
+
+        organisational_parts = [part for part in (neighbourhood_context, organisation_wide_context) if part]
+        organisational_context = "\n\n---\n\n".join(organisational_parts)
 
         incident_sources: set[str] = set()
         graph_lines: list[str] = []
