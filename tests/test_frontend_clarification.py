@@ -71,7 +71,7 @@ def test_clarification_is_capped_at_three_rounds(tmp_path):
     assert engine.next_question("C1", "T1", "App keeps timing out") is None
 
 
-def test_blocks_keep_free_text_escape_hatch(tmp_path):
+def test_blocks_keep_free_text_escape_hatch_and_unique_action_ids(tmp_path):
     engine = _engine(tmp_path)
     question = engine.next_question("C1", "T1", "App keeps timing out")
     blocks = engine.blocks(question, "C1", "T1")
@@ -79,3 +79,5 @@ def test_blocks_keep_free_text_escape_hatch(tmp_path):
     assert any("reply in the thread" in block.get("elements", [{}])[0].get("text", "") for block in blocks if block.get("type") == "context")
     actions = next(block for block in blocks if block.get("type") == "actions")
     assert 2 <= len(actions["elements"]) <= 5
+    action_ids = [element["action_id"] for element in actions["elements"]]
+    assert len(action_ids) == len(set(action_ids))
