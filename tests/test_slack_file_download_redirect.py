@@ -44,7 +44,7 @@ class FakeClient:
         return self.responses.pop(0)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_slack_cross_host_redirect_preserves_bot_auth(monkeypatch, tmp_path):
     first = "https://files.slack.com/files-pri/T123-F123/download/incident.csv"
     second = "https://customer-research-hq.slack.com/files-pri/T123-F123/download/incident.csv"
@@ -74,7 +74,7 @@ async def test_slack_cross_host_redirect_preserves_bot_auth(monkeypatch, tmp_pat
     ]
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_slack_redirect_to_untrusted_host_is_rejected(monkeypatch, tmp_path):
     first = "https://files.slack.com/files-pri/T123-F123/download/incident.csv"
     FakeClient.requests = []
