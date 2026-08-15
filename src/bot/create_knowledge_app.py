@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 
 # The shared Settings object and Slack file downloader use SLACK_* variables.
 # Map the dedicated app credentials before importing application modules so this
@@ -41,13 +42,18 @@ def _context(event: dict) -> RequestContext:
     )
 
 
-async def _handle(event: dict, say) -> None:
+def _clean_mention(text: str) -> str:
+    return re.sub(r"<@[A-Z0-9]+>\s*", "", text or "").strip()
+
+
+async def _handle(event: dict, say, *, strip_mention: bool = False) -> None:
     if event.get("channel") != settings.channel_create_knowledge:
         return
-    if event.get("bot_id") or event.get("subtype") in {"bot_message", "message_deleted"}:
+    if event.get("bot_id") or event.get("subtype") in {"bot_message", "message_deleted", "message_changed"}:
         return
     context = _context(event)
-    text = (event.get("text") or "").strip()
+    raw = event.get("text") or ""
+    text = _clean_mention(raw) if strip_mention else raw.strip()
     try:
         response = await agent.handle(text, context)
     except Exception:
@@ -66,7 +72,7 @@ async def handle_message(event, say):
 
 @app.event("app_mention")
 async def handle_mention(event, say):
-    await _handle(event, say)
+    await _handle(event, say, strip_mention=True)
 
 
 async def _run() -> None:
