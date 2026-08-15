@@ -6,6 +6,7 @@ import csv
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".log", ".json", ".yml", ".yaml"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | {".pdf", ".docx"} | IMAGE_EXTENSIONS
+SLACK_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+MAX_SLACK_FILE_REDIRECTS = 5
 
 
 class UploadValidationError(ValueError):
@@ -56,6 +59,13 @@ def _reject_html_masquerading_as_file(path: Path) -> None:
         )
 
 
+def _trusted_slack_download_url(url: str) -> bool:
+    """Only allow authenticated file redirects to HTTPS hosts owned by slack.com."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme.lower() == "https" and (host == "slack.com" or host.endswith(".slack.com"))
+
+
 async def download_slack_file(
     file_info: dict[str, Any],
     target_dir: Path | None = None,
@@ -63,10 +73,21 @@ async def download_slack_file(
     max_bytes: int | None = None,
     timeout_seconds: float = 60.0,
 ) -> Path:
-    """Stream a validated Slack file to the controlled staging directory."""
+    """Stream a validated Slack file to the controlled staging directory.
+
+    Slack may redirect a private file from ``files.slack.com`` to the workspace's
+    ``*.slack.com`` host. HTTP clients intentionally strip Authorization on a
+    cross-host redirect, so redirects are followed manually and the bot bearer
+    token is preserved only while the destination remains a trusted Slack HTTPS
+    host.
+    """
     url = file_info.get("url_private_download") or file_info.get("url_private")
     if not url:
         raise UploadValidationError("Slack file object has no downloadable URL")
+
+    current_url = str(url)
+    if not _trusted_slack_download_url(current_url):
+        raise UploadValidationError("Slack file URL is not on a trusted Slack host")
 
     limit = int(max_bytes if max_bytes is not None else settings.max_upload_bytes)
     safe_name, _ = validate_slack_file(file_info, max_bytes=limit)
@@ -79,15 +100,32 @@ async def download_slack_file(
     headers = {"Authorization": f"Bearer {settings.slack_bot_token}"}
     written = 0
     try:
-        async with httpx.AsyncClient(timeout=float(timeout_seconds), follow_redirects=True) as client:
-            async with client.stream("GET", str(url), headers=headers) as resp:
-                resp.raise_for_status()
-                with target_path.open("wb") as out:
-                    async for chunk in resp.aiter_bytes():
-                        written += len(chunk)
-                        if written > limit:
-                            raise UploadValidationError("File exceeds the configured upload-size limit")
-                        out.write(chunk)
+        async with httpx.AsyncClient(timeout=float(timeout_seconds), follow_redirects=False) as client:
+            for redirect_count in range(MAX_SLACK_FILE_REDIRECTS + 1):
+                async with client.stream("GET", current_url, headers=headers) as resp:
+                    if resp.status_code in SLACK_REDIRECT_STATUSES:
+                        location = resp.headers.get("location")
+                        if not location:
+                            raise UploadValidationError("Slack file redirect did not include a destination")
+                        if redirect_count >= MAX_SLACK_FILE_REDIRECTS:
+                            raise UploadValidationError("Slack file download exceeded the redirect limit")
+                        next_url = urljoin(str(resp.url), location)
+                        if not _trusted_slack_download_url(next_url):
+                            raise UploadValidationError("Slack file redirect left the trusted Slack host boundary")
+                        current_url = next_url
+                        continue
+
+                    resp.raise_for_status()
+                    with target_path.open("wb") as out:
+                        async for chunk in resp.aiter_bytes():
+                            written += len(chunk)
+                            if written > limit:
+                                raise UploadValidationError("File exceeds the configured upload-size limit")
+                            out.write(chunk)
+                    break
+            else:  # pragma: no cover - defensive; loop exits through break/raise above
+                raise UploadValidationError("Slack file download did not complete")
+
         _reject_html_masquerading_as_file(target_path)
     except Exception:
         target_path.unlink(missing_ok=True)
