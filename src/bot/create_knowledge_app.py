@@ -21,9 +21,11 @@ from slack_bolt.async_app import AsyncApp  # noqa: E402
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler  # noqa: E402
 
 from src.agents.knowledge_ingest import KnowledgeIngestAgent  # noqa: E402
+from src.bot.create_knowledge_progress import build_blocks, queued_blocks  # noqa: E402
 from src.core.config import settings  # noqa: E402
 from src.core.context import RequestContext  # noqa: E402
 from src.core.errors import safe_error_message  # noqa: E402
+from src.knowledge.incident_ingest_jobs import IncidentIngestJobStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,8 @@ BOT_TOKEN = os.getenv("CREATE_KNOWLEDGE_SLACK_BOT_TOKEN", "").strip()
 APP_TOKEN = os.getenv("CREATE_KNOWLEDGE_SLACK_APP_TOKEN", "").strip()
 app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 agent = KnowledgeIngestAgent()
+job_store = IncidentIngestJobStore()
+_JOB_ID_RE = re.compile(r"\bING-[A-Z0-9]+\b", re.I)
 
 
 def _context(event: dict) -> RequestContext:
@@ -46,6 +50,11 @@ def _clean_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text or "").strip()
 
 
+def _job_id(value: str) -> str | None:
+    match = _JOB_ID_RE.search(value or "")
+    return match.group(0).upper() if match else None
+
+
 async def _handle(event: dict, say, *, strip_mention: bool = False) -> None:
     if event.get("channel") != settings.channel_create_knowledge:
         return
@@ -59,6 +68,36 @@ async def _handle(event: dict, say, *, strip_mention: bool = False) -> None:
     except Exception:
         logger.exception("Create Knowledge request failed request_id=%s", context.request_id)
         response = safe_error_message(context.request_id)
+
+    lower = text.lower()
+    response_job_id = _job_id(response)
+
+    # Confirmation becomes the single persistent build card that the worker updates.
+    if lower.startswith("confirm ") and response_job_id:
+        job = job_store.get(response_job_id)
+        if job:
+            posted = await say(
+                text=response,
+                blocks=queued_blocks(job),
+                thread_ts=context.thread_ts,
+            )
+            message_ts = str(posted.get("ts") or "")
+            if message_ts:
+                job_store.set_progress_message(response_job_id, message_ts)
+            return
+
+    # A manual status request renders the same state model used by the live card.
+    if lower.startswith("status "):
+        requested_job_id = _job_id(text) or response_job_id
+        job = job_store.get(requested_job_id) if requested_job_id else None
+        if job:
+            await say(
+                text=response,
+                blocks=build_blocks(job, job.get("progress") or {}),
+                thread_ts=context.thread_ts,
+            )
+            return
+
     await say(text=response, thread_ts=context.thread_ts)
 
 
