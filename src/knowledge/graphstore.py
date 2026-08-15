@@ -48,11 +48,18 @@ class GraphStore:
                 "expected a 'links' or 'edges' collection"
             )
 
-    def save(self) -> None:
-        # Keep ``links`` explicit for backward compatibility with existing
-        # GX10 graph files and to avoid NetworkX-version-dependent output.
+    def save(self, *, compact: bool = False) -> None:
+        """Persist the graph once after a batch.
+
+        ``compact=True`` avoids pretty-print overhead for large incident imports.
+        Existing callers keep the human-readable representation by default.
+        """
         data = nx.node_link_data(self.graph, edges="links")
-        self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        if compact:
+            payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        else:
+            payload = json.dumps(data, indent=2)
+        self.path.write_text(payload, encoding="utf-8")
 
     def add_entity(self, entity_id: str, entity_type: str, **properties: Any) -> None:
         self.graph.add_node(entity_id, type=entity_type, **properties)
@@ -65,6 +72,48 @@ class GraphStore:
         **properties: Any,
     ) -> None:
         self.graph.add_edge(source, target, key=relation, relation=relation, **properties)
+
+    def set_temporal_relation(
+        self,
+        source: str,
+        target: str,
+        relation: str,
+        *,
+        valid_from: str,
+        observed_at: str,
+        **properties: Any,
+    ) -> bool:
+        """Close the previous current fact and open a new temporal relationship.
+
+        Returns True only when a new relationship version is created.  This is
+        intentionally deterministic and avoids any LLM work during ingestion.
+        """
+        active_same = False
+        for _, neighbor, key, data in list(self.graph.out_edges(source, data=True, keys=True)):
+            if data.get("relation") != relation or data.get("valid_to") not in (None, ""):
+                continue
+            if neighbor == target:
+                active_same = True
+                data["last_observed_at"] = observed_at
+                data.update(properties)
+            else:
+                data["valid_to"] = valid_from
+                data["closed_observed_at"] = observed_at
+        if active_same:
+            return False
+
+        edge_key = f"{relation}|{valid_from}|{target}"
+        self.graph.add_edge(
+            source,
+            target,
+            key=edge_key,
+            relation=relation,
+            valid_from=valid_from,
+            valid_to=None,
+            observed_at=observed_at,
+            **properties,
+        )
+        return True
 
     def get_related(
         self,
