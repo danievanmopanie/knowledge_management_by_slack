@@ -20,7 +20,7 @@ from src.agents.frontend_support.conversation import (
 )
 from src.agents.frontend_support.trigger_feedback import append_trigger_feedback
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
-from src.bot.frontend_actions import build_resolution_capture_blocks
+from src.bot.frontend_actions import build_incident_number_blocks, build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service, register as register_frontend_interactivity
 from src.bot.router import route_frontend_support
 from src.core.config import settings
@@ -239,7 +239,8 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
         state = service.store.get_thread(context.channel_id, root_ts)
         if not state.incident_number:
             await say(
-                text="Looks resolved. Add the ServiceNow INC number when convenient so we can capture the fix properly.",
+                text="Link the ServiceNow incident so this resolved fix can be captured properly.",
+                blocks=build_incident_number_blocks(context.channel_id, root_ts, resolved=True),
                 thread_ts=root_ts,
             )
             return True
@@ -315,8 +316,9 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
         response = safe_error_message(context.request_id)
     if response == INSUFFICIENT_EVIDENCE_RESPONSE and decision.kind == MessageKind.TROUBLESHOOTING:
         response = "I checked the available support history but don't have a reliable next step yet. Add any new symptom or result and I'll keep working with the thread."
-    if decision.prompt_for_incident and response != INSUFFICIENT_EVIDENCE_RESPONSE:
-        response += "\n\n_If this is a ServiceNow incident, add the INC number when convenient so the learning stays referenceable._"
+    should_prompt_incident = bool(
+        decision.prompt_for_incident and response != INSUFFICIENT_EVIDENCE_RESPONSE
+    )
     if progress_ts:
         await _finish_progress(
             client,
@@ -326,6 +328,12 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
         )
     else:
         await say(text=response, thread_ts=root_ts)
+    if should_prompt_incident:
+        await say(
+            text="Link the ServiceNow incident so this support thread stays referenceable.",
+            blocks=build_incident_number_blocks(context.channel_id, root_ts),
+            thread_ts=root_ts,
+        )
     return True
 
 
