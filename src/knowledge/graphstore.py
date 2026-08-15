@@ -26,12 +26,32 @@ class GraphStore:
         self._load()
 
     def _load(self) -> None:
-        if self.path.exists():
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            self.graph = nx.node_link_graph(data, directed=True, multigraph=True)
+        if not self.path.exists():
+            return
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        # NetworkX 3.6 changes node-link JSON's default edge key from
+        # ``links`` to ``edges``. Existing GX10 graph files were written with
+        # either form depending on the NetworkX version in use. Read both so a
+        # dependency upgrade never makes the persisted knowledge graph
+        # unbootable.
+        if "links" in data:
+            self.graph = nx.node_link_graph(
+                data, directed=True, multigraph=True, edges="links"
+            )
+        elif "edges" in data:
+            self.graph = nx.node_link_graph(
+                data, directed=True, multigraph=True, edges="edges"
+            )
+        else:
+            raise ValueError(
+                f"Unsupported node-link graph format in {self.path}: "
+                "expected a 'links' or 'edges' collection"
+            )
 
     def save(self) -> None:
-        data = nx.node_link_data(self.graph)
+        # Keep ``links`` explicit for backward compatibility with existing
+        # GX10 graph files and to avoid NetworkX-version-dependent output.
+        data = nx.node_link_data(self.graph, edges="links")
         self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def add_entity(self, entity_id: str, entity_type: str, **properties: Any) -> None:
