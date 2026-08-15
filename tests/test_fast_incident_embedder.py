@@ -67,3 +67,34 @@ def test_embedder_can_keep_hash_state_isolated(tmp_path):
     assert second.incidents_embedded == 0
     assert second.metadata_only_incidents == 1
     assert second.vector_documents == 0
+
+
+def test_embedder_reports_real_document_progress(tmp_path):
+    incidents = [
+        Incident(
+            number="INC10",
+            short_description="Outlook search fails",
+            description="Search returns no results",
+            work_notes="Rebuilt local search index",
+            resolution_notes="Search index rebuild restored results",
+        ),
+        Incident(
+            number="INC11",
+            short_description="Teams microphone unavailable",
+            description="Microphone is not listed in Teams",
+        ),
+    ]
+    events = []
+    embedder = ingest.FastIncidentEmbedder(
+        FakeVectorStore(),
+        hash_path=tmp_path / "incident_hashes.json",
+    )
+
+    result = embedder.index(incidents, incident_chunk_size=1, on_progress=events.append)
+
+    plan = next(event for event in events if event["stage"] == "embedding_plan")
+    progress = [event for event in events if event["stage"] == "embedding_progress"]
+    assert plan["documents_total"] == result.vector_documents
+    assert progress
+    assert progress[-1]["documents_done"] == result.vector_documents
+    assert progress[-1]["documents_total"] == result.vector_documents
