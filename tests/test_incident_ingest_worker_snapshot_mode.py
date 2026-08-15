@@ -7,6 +7,8 @@ class FakeStore:
     def __init__(self):
         self.succeeded = None
         self.failed = None
+        self.progress = None
+        self.progress_message_ts = None
 
     def claim_next(self):
         return {
@@ -16,6 +18,12 @@ class FakeStore:
             "channel_id": None,
             "thread_ts": None,
         }
+
+    def update_progress(self, job_id, progress):
+        self.progress = (job_id, dict(progress))
+
+    def set_progress_message(self, job_id, message_ts):
+        self.progress_message_ts = (job_id, message_ts)
 
     def mark_succeeded(self, job_id, metrics):
         self.succeeded = (job_id, metrics)
@@ -28,9 +36,24 @@ def test_worker_uses_partial_snapshot_for_create_knowledge_uploads(monkeypatch):
     captured = {}
 
     class FakeIngestor:
-        def ingest_csv(self, path, *, complete_snapshot=True):
+        def ingest_csv(self, path, *, complete_snapshot=True, on_progress=None):
             captured["path"] = path
             captured["complete_snapshot"] = complete_snapshot
+            captured["on_progress"] = on_progress
+            if on_progress:
+                on_progress(
+                    {
+                        "stage": "comparison_completed",
+                        "rows": 1,
+                        "unique_incidents": 1,
+                        "new": 1,
+                        "changed": 0,
+                        "unchanged": 0,
+                        "versions_written": 1,
+                        "transitions_written": 0,
+                        "dwell_rows_written": 0,
+                    }
+                )
             return SimpleNamespace(
                 as_dict=lambda: {
                     "rows": 1,
@@ -59,5 +82,7 @@ def test_worker_uses_partial_snapshot_for_create_knowledge_uploads(monkeypatch):
     store = FakeStore()
     assert worker.run_once(store) is True
     assert captured["complete_snapshot"] is False
+    assert captured["on_progress"] is not None
+    assert store.progress is not None
     assert store.failed is None
     assert store.succeeded is not None
