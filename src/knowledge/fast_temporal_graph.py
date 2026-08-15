@@ -1,7 +1,7 @@
 """Deterministic temporal graph construction for ServiceNow incidents.
 
-Structured ServiceNow fields are authoritative.  This module intentionally does
-not call an LLM; free-text is used only for cheap ticket-reference extraction.
+Structured ServiceNow fields are authoritative. This module intentionally does
+not call an LLM; free-text is used only for cheap reference/evidence extraction.
 """
 
 from __future__ import annotations
@@ -41,6 +41,21 @@ def _raw(inc: Incident, *names: str) -> str:
         if norm in wanted and str(value or "").strip():
             return str(value).strip()
     return ""
+
+
+def _change_evidence(text: str, ticket: str) -> tuple[str, float, str]:
+    """Grade a CHG link conservatively using explicit, cheap language signals."""
+    low = text.lower()
+    t = re.escape(ticket.lower())
+    if re.search(rf"(?:caused by|root cause(?: was| is)?|because of|due to)\s+(?:change\s+)?{t}", low):
+        return "confirmed_caused", 0.90, "explicit_causation_text"
+    if any(term in low for term in ("rollback", "backed out", "failed change", "deployment failed")):
+        return "likely_caused", 0.70, "failure_or_rollback_language"
+    if re.search(rf"(?:after|following|post)\s+(?:change\s+)?{t}", low) or any(
+        term in low for term in ("after change", "following change", "post change", "after migration")
+    ):
+        return "temporally_correlated_with", 0.55, "temporal_language"
+    return "mentions_change", 0.25, "text_reference"
 
 
 @dataclass
@@ -147,11 +162,12 @@ class FastTemporalGraphBuilder:
             for entity_type, pattern in _TICKET_PATTERNS.items():
                 for ticket in sorted({m.group(0).upper() for m in pattern.finditer(text)}):
                     target = self._entity(entity_type, ticket)
-                    relation = {
-                        "change": "mentions_change",
-                        "problem": "related_to_problem",
-                        "knowledge_item": "references_knowledge",
-                    }[entity_type]
+                    if entity_type == "change":
+                        relation, confidence, evidence = _change_evidence(text, ticket)
+                    elif entity_type == "problem":
+                        relation, confidence, evidence = "related_to_problem", 1.0, "text_reference"
+                    else:
+                        relation, confidence, evidence = "references_knowledge", 1.0, "text_reference"
                     self.store.add_relation(
                         incident_id,
                         target,
@@ -159,8 +175,8 @@ class FastTemporalGraphBuilder:
                         valid_from=event_time,
                         observed_at=observed_at,
                         source=source_file,
-                        confidence=0.25 if entity_type == "change" else 1.0,
-                        evidence="text_reference",
+                        confidence=confidence,
+                        evidence=evidence,
                     )
                     reference_edges += 1
 
