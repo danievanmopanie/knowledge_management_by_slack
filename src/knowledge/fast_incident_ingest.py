@@ -145,18 +145,33 @@ def profile_incident_csv(path: Path) -> IncidentCSVProfile:
 class FastIncidentEmbedder:
     """Index focused vectors while avoiding GPU work for lifecycle-only changes."""
 
-    def __init__(self, vector_store: VectorStore | None = None):
+    def __init__(
+        self,
+        vector_store: VectorStore | None = None,
+        *,
+        hash_path: Path | None = None,
+    ):
         self.vector_store = vector_store or VectorStore(
             collection_name=INCIDENT_COLLECTION,
             embedding_purpose="incident",
         )
+        self.hash_path = hash_path
+
+    def _load_hashes(self) -> dict[str, str]:
+        return load_hash_index(self.hash_path) if self.hash_path is not None else load_hash_index()
+
+    def _save_hashes(self, hashes: dict[str, str]) -> None:
+        if self.hash_path is not None:
+            save_hash_index(hashes, self.hash_path)
+        else:
+            save_hash_index(hashes)
 
     def index(self, incidents: list[Incident], *, incident_chunk_size: int = 1000) -> FastEmbedResult:
         started = time.perf_counter()
         if not incidents:
             return FastEmbedResult(0, 0, 0, 0, self.vector_store.count(), 0.0, 0.0)
 
-        hashes = load_hash_index()
+        hashes = self._load_hashes()
         semantic_changed: list[Incident] = []
         metadata_only: list[Incident] = []
         for inc in incidents:
@@ -209,7 +224,7 @@ class FastIncidentEmbedder:
                 )
                 vector_documents += len(docs)
 
-        save_hash_index(hashes)
+        self._save_hashes(hashes)
         elapsed = time.perf_counter() - started
         return FastEmbedResult(
             incidents_considered=len(incidents),
