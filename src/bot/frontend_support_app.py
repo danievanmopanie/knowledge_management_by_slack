@@ -17,6 +17,7 @@ from src.agents.frontend_support.conversation import (
     compose_thread_query,
     looks_like_support,
 )
+from src.agents.frontend_support.trigger_feedback import append_trigger_feedback
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.frontend_actions import build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service, register as register_frontend_interactivity
@@ -224,6 +225,22 @@ async def handle_mention(event, say):
             user_id=event["user"],
             text=cleaned or "help with this",
         )
+        try:
+            state = service.store.get_thread(context.channel_id, root_ts)
+            thread_events = service.store.recent_events(context.channel_id, root_ts, limit=20)
+            append_trigger_feedback(
+                channel_id=context.channel_id,
+                thread_ts=root_ts,
+                mention_ts=event.get("ts", ""),
+                user_id=event["user"],
+                mention_text=cleaned or "help with this",
+                root_text=state.root_message,
+                thread_events=thread_events,
+                root_already_looked_like_support=looks_like_support(state.root_message),
+            )
+            logger.info("Captured explicit mention for trigger feedback thread=%s", root_ts)
+        except Exception:
+            logger.exception("Failed to capture trigger feedback thread=%s", root_ts)
         query = compose_thread_query(
             service,
             channel_id=context.channel_id,
