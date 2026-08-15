@@ -32,9 +32,10 @@ Core behaviour:
 - Treat the complete supplied Slack thread as the current incident context; never ask for information already present.
 - Prefer enriched organisational pattern evidence, governed knowledge, exact case evidence and proven graph relationships over generic advice.
 - Embedding similarity is only a locator. A similarity score is never itself proof that a fix applies.
-- When ORGANISATIONAL PATTERN EVIDENCE is supplied, its counts are deterministic evidence. You may quote those counts exactly, but never inflate them into invented percentages or probabilities.
+- When ORGANISATIONAL PATTERN EVIDENCE is supplied, its counts are deterministic evidence over the retrieved symptom neighbourhood. You may quote those counts exactly, but never inflate them into invented percentages or probabilities.
+- When ORGANISATION-WIDE REUSABLE KNOWLEDGE is supplied, use those complete materialised pattern counts for organisation-wide frequency claims. Use the smaller semantic-neighbourhood counts to establish relevance to the current symptom, not to imply whole-organisation prevalence.
 - Use repeat evidence to tell the technician what the organisation has actually learned: repeated resolutions, successful actions, known failed/no-fix paths, root causes, technologies and relevant environments.
-- When several matching enriched incidents support the same resolution, say how many retrieved incidents support it and cite example incident numbers from the supplied evidence.
+- When several matching enriched incidents support the same resolution, say how many incidents support it and cite example incident numbers from the supplied evidence. Be explicit about whether that count is from the retrieved neighbourhood or the full canonical organisational pattern.
 - Prefer an evidence-backed next action over a generic troubleshooting checklist. Call out historically failed actions when that can prevent wasted effort.
 - Never call a fix "proven", "reliable", "the solution" or "most common" unless the supplied counts genuinely support that comparison.
 - Never invent a percentage, probability, frequency, incident number, contributor, location or technical fact.
@@ -247,10 +248,12 @@ class FrontendSupportAgent(BaseAgent):
             prompt_context = package.to_prompt_context(max_chars=PROMPT_CONTEXT_MAX_CHARS)
             system_prompt = SYSTEM_PROMPT
             task_instruction = (
-                "Use the organisational pattern evidence as the primary source for repeat knowledge. "
-                "Tell the technician what matching incidents repeatedly show, including exact supplied counts and example incident IDs. "
-                "Use raw similar case evidence for detail and governed knowledge for formal guidance. "
-                "Recommend the best-supported next action and identify known failed paths when the evidence supports it."
+                "Use the enriched organisational evidence as the primary source for repeat knowledge. "
+                "Use organisation-wide materialised rollups for full-pattern frequency claims and the semantic neighbourhood "
+                "to establish relevance to the current symptom. Tell the technician what matching incidents repeatedly show, "
+                "including exact supplied counts and example incident IDs. Use raw similar case evidence for technical detail "
+                "and governed knowledge for formal guidance. Recommend the best-supported next action and identify known failed "
+                "paths when the evidence supports it."
             )
 
         messages = [
