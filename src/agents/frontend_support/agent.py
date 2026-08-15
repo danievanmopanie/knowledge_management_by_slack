@@ -51,11 +51,15 @@ INSUFFICIENT_EVIDENCE_RESPONSE = (
 )
 
 GENERAL_GUIDANCE_PREFIX = "*General guidance — I didn't find a strong internal match yet:*\n"
-PRIVATE_GUIDANCE_PREFIX = "*Private coaching — general guidance, not an internally proven fix:*\n"
 
 
 def _is_private_coaching(message: str, context: RequestContext) -> bool:
     return "private_coach" in context.roles or "PRIVATE COACHING SESSION" in message
+
+
+def _allows_general_guidance(message: str, context: RequestContext) -> bool:
+    """Allow LLM fallback only in an explicitly opted-in support lane."""
+    return _is_private_coaching(message, context) or "frontend_general_guidance" in context.roles
 
 
 class FrontendSupportAgent(BaseAgent):
@@ -104,8 +108,7 @@ class FrontendSupportAgent(BaseAgent):
             "private" if private else "public",
             time.perf_counter() - started,
         )
-        prefix = PRIVATE_GUIDANCE_PREFIX if private else GENERAL_GUIDANCE_PREFIX
-        return prefix + answer.strip()
+        return GENERAL_GUIDANCE_PREFIX + answer.strip()
 
     async def handle(self, message: str, context: RequestContext) -> str:
         overall_started = time.perf_counter()
@@ -119,6 +122,8 @@ class FrontendSupportAgent(BaseAgent):
                 logger.exception("Legacy support evidence retrieval failed request_id=%s", context.request_id)
                 return safe_error_message(context.request_id)
             if not result.should_answer and not incident_context:
+                if not _allows_general_guidance(message, context):
+                    return INSUFFICIENT_EVIDENCE_RESPONSE
                 return await self._general_guidance(
                     message,
                     context,
@@ -143,6 +148,8 @@ class FrontendSupportAgent(BaseAgent):
         )
 
         if not package.has_evidence:
+            if not _allows_general_guidance(message, context):
+                return INSUFFICIENT_EVIDENCE_RESPONSE
             return await self._general_guidance(
                 message,
                 context,
@@ -180,9 +187,6 @@ class FrontendSupportAgent(BaseAgent):
         labels = evidence_labels(package.governed_candidates) if package.governed_should_answer else {}
         answer = sanitize_citations(answer, set(labels))
 
-        # Keep formal governed evidence visible when it genuinely answered the
-        # question. Do not append a raw dump of every loosely similar incident;
-        # the conversational answer should surface only evidence that matters.
         evidence_section = (
             render_evidence_section(package.governed_candidates)
             if package.governed_should_answer
