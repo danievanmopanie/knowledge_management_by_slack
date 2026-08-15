@@ -14,7 +14,20 @@ from src.agents.frontend_support.clarification import (
 )
 from src.agents.frontend_support.collaboration import FrontendCollaborationService
 from src.agents.frontend_support.conversation import compose_thread_query
-from src.bot.frontend_actions import CAPTURE_RESOLUTION, DISMISS_RESOLUTION
+from src.bot.frontend_actions import (
+    ADD_INCIDENT_NUMBER,
+    CAPTURE_RESOLUTION,
+    DISMISS_RESOLUTION,
+    build_incident_number_blocks,
+    build_resolution_capture_blocks,
+)
+from src.bot.frontend_modals import (
+    MODAL_CLARIFICATION_OTHER,
+    MODAL_INCIDENT_NUMBER,
+    clarification_other_modal,
+    incident_number_modal,
+    load_metadata,
+)
 from src.core.config import settings
 from src.core.context import RequestContext
 from src.knowledge.retrieval_models import RetrievalQuery
@@ -108,6 +121,112 @@ async def _maybe_create_knowledge_gap(*, client, channel_id: str, thread_ts: str
     return task["task_id"]
 
 
+async def _continue_after_clarification(
+    *,
+    client,
+    channel_id: str,
+    thread_ts: str,
+    key: str,
+    value: str,
+    label: str,
+    actor_id: str,
+    source_message_ts: str | None,
+) -> None:
+    """Persist one clarification answer and continue the support workflow."""
+    engine = get_clarifications()
+    engine.store.answer(channel_id, thread_ts, key, value)
+
+    if source_message_ts:
+        await client.chat_update(
+            channel=channel_id,
+            ts=source_message_ts,
+            text=f"✓ {key.replace('_', ' ').title()}: {label}",
+            blocks=[],
+        )
+
+    service = get_service()
+    synthetic_ts = f"clarify-{source_message_ts or 'modal'}-{actor_id}-{key}"
+    try:
+        service.observe(
+            channel_id=channel_id,
+            message_ts=synthetic_ts,
+            thread_ts=thread_ts,
+            user_id=actor_id,
+            text=f"Clarification — {key.replace('_', ' ')}: {value}",
+        )
+    except Exception:
+        logger.exception("Could not add clarification to thread evidence")
+
+    query = compose_thread_query(
+        service,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        latest_text=f"Clarification — {key.replace('_', ' ')}: {value}",
+    )
+    next_question = engine.next_question(channel_id, thread_ts, query)
+    if next_question is not None:
+        round_number = engine.store.ask(channel_id, thread_ts, next_question.key)
+        await client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=f"Thanks — one more detail will sharpen the match (clarification {round_number}/3): {next_question.question}",
+            blocks=engine.blocks(next_question, channel_id, thread_ts),
+        )
+        return
+
+    progress = await client.chat_postMessage(
+        channel=channel_id,
+        thread_ts=thread_ts,
+        text="Thanks — I have enough context now. Searching similar incidents and working out the best next step…",
+    )
+    progress_ts = progress.get("ts")
+
+    from src.bot.router import route_frontend_support
+
+    context = RequestContext.from_slack(
+        channel_id=channel_id,
+        user_id=actor_id,
+        thread_ts=thread_ts,
+        roles=("general_support_fallback",),
+    )
+    last_length = 0
+
+    async def stream_update(partial: str) -> None:
+        nonlocal last_length
+        if not progress_ts or not partial or len(partial) - last_length < 70:
+            return
+        try:
+            await client.chat_update(
+                channel=channel_id,
+                ts=progress_ts,
+                text=partial.rstrip() + "\n\n_Still working…_",
+                blocks=[],
+            )
+            last_length = len(partial)
+        except Exception:
+            logger.exception("Could not stream clarification follow-up")
+
+    try:
+        response = await route_frontend_support(
+            query,
+            context,
+            on_chunk=stream_update if progress_ts else None,
+        )
+    except Exception:
+        logger.exception("Frontend Support clarification follow-up failed")
+        response = "I captured that detail, but I couldn't complete the follow-up search. Reply normally and I'll try again."
+
+    if progress_ts:
+        await client.chat_update(
+            channel=channel_id,
+            ts=progress_ts,
+            text=response,
+            blocks=[],
+        )
+    else:
+        await client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=response)
+
+
 def register(app: AsyncApp) -> None:
     clarification_action_pattern = re.compile(rf"^{re.escape(CLARIFICATION_ACTION)}_\d+$")
 
@@ -122,116 +241,96 @@ def register(app: AsyncApp) -> None:
         value = payload["value"]
         label = payload.get("label") or value
         actor_id = body["user"]["id"]
-        engine = get_clarifications()
-
         message = body.get("message") or {}
         message_ts = message.get("ts")
 
         if value == "Other":
-            if message_ts:
-                await client.chat_update(
-                    channel=channel_id,
-                    ts=message_ts,
-                    text=f"Reply in your own words: {key.replace('_', ' ')}",
-                    blocks=[],
-                )
-            await client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text=f"No problem — just type the {key.replace('_', ' ')} here in the thread.",
+            await client.views_open(
+                trigger_id=body["trigger_id"],
+                view=clarification_other_modal(
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    key=key,
+                    source_message_ts=message_ts,
+                ),
             )
             return
 
-        engine.store.answer(channel_id, thread_ts, key, value)
-        if message_ts:
-            await client.chat_update(
-                channel=channel_id,
-                ts=message_ts,
-                text=f"✓ {key.replace('_', ' ').title()}: {label}",
-                blocks=[],
-            )
-
-        service = get_service()
-        synthetic_ts = f"clarify-{message.get('ts', '')}-{actor_id}-{key}"
-        try:
-            service.observe(
-                channel_id=channel_id,
-                message_ts=synthetic_ts,
-                thread_ts=thread_ts,
-                user_id=actor_id,
-                text=f"Clarification — {key.replace('_', ' ')}: {value}",
-            )
-        except Exception:
-            logger.exception("Could not add clarification to thread evidence")
-
-        query = compose_thread_query(
-            service,
+        await _continue_after_clarification(
+            client=client,
             channel_id=channel_id,
             thread_ts=thread_ts,
-            latest_text=f"Clarification — {key.replace('_', ' ')}: {value}",
+            key=key,
+            value=value,
+            label=label,
+            actor_id=actor_id,
+            source_message_ts=message_ts,
         )
-        next_question = engine.next_question(channel_id, thread_ts, query)
-        if next_question is not None:
-            round_number = engine.store.ask(channel_id, thread_ts, next_question.key)
-            await client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text=f"Thanks — one more detail will sharpen the match (clarification {round_number}/3): {next_question.question}",
-                blocks=engine.blocks(next_question, channel_id, thread_ts),
+
+    @app.view(MODAL_CLARIFICATION_OTHER)
+    async def clarification_other_submitted(ack, body, client, view):
+        values = view["state"]["values"]
+        value = ((values.get("clarification_value") or {}).get("value") or {}).get("value", "").strip()
+        if not value:
+            await ack(
+                response_action="errors",
+                errors={"clarification_value": "Please add the detail needed to continue."},
             )
             return
+        await ack()
+        metadata = load_metadata(view.get("private_metadata"))
+        await _continue_after_clarification(
+            client=client,
+            channel_id=metadata.get("channel_id") or "",
+            thread_ts=metadata.get("thread_ts") or "",
+            key=metadata.get("key") or "clarification",
+            value=value,
+            label=value,
+            actor_id=body["user"]["id"],
+            source_message_ts=metadata.get("source_message_ts"),
+        )
 
-        progress = await client.chat_postMessage(
+    @app.action(ADD_INCIDENT_NUMBER)
+    async def add_incident_number(ack, body, client):
+        await ack()
+        payload = json.loads(body["actions"][0]["value"])
+        await client.views_open(
+            trigger_id=body["trigger_id"],
+            view=incident_number_modal(
+                channel_id=payload["channel_id"],
+                thread_ts=payload["thread_ts"],
+            ),
+        )
+
+    @app.view(MODAL_INCIDENT_NUMBER)
+    async def incident_number_submitted(ack, body, client, view):
+        values = view["state"]["values"]
+        incident_number = ((values.get("incident_number") or {}).get("value") or {}).get("value", "").strip().upper()
+        if not re.fullmatch(r"INC\d{4,}", incident_number):
+            await ack(
+                response_action="errors",
+                errors={"incident_number": "Enter a ServiceNow incident number such as INC0012345."},
+            )
+            return
+        await ack()
+        metadata = load_metadata(view.get("private_metadata"))
+        channel_id = metadata.get("channel_id") or ""
+        thread_ts = metadata.get("thread_ts") or ""
+        service = get_service()
+        service.store.bind_incident(channel_id, thread_ts, incident_number)
+        await client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
-            text="Thanks — I have enough context now. Searching similar incidents and working out the best next step…",
+            text=f"✓ Linked `{incident_number}` to this support thread.",
         )
-        progress_ts = progress.get("ts")
-
-        from src.bot.router import route_frontend_support
-
-        context = RequestContext.from_slack(
-            channel_id=channel_id,
-            user_id=actor_id,
-            thread_ts=thread_ts,
-            roles=("general_support_fallback",),
-        )
-        last_length = 0
-
-        async def stream_update(partial: str) -> None:
-            nonlocal last_length
-            if not progress_ts or not partial or len(partial) - last_length < 70:
-                return
-            try:
-                await client.chat_update(
-                    channel=channel_id,
-                    ts=progress_ts,
-                    text=partial.rstrip() + "\n\n_Still working…_",
-                    blocks=[],
-                )
-                last_length = len(partial)
-            except Exception:
-                logger.exception("Could not stream clarification follow-up")
-
-        try:
-            response = await route_frontend_support(
-                query,
-                context,
-                on_chunk=stream_update if progress_ts else None,
-            )
-        except Exception:
-            logger.exception("Frontend Support clarification follow-up failed")
-            response = "I captured that detail, but I couldn't complete the follow-up search. Reply normally and I'll try again."
-
-        if progress_ts:
-            await client.chat_update(
+        state = service.store.get_thread(channel_id, thread_ts)
+        if state.status == "possible_resolution":
+            await client.chat_postMessage(
                 channel=channel_id,
-                ts=progress_ts,
-                text=response,
-                blocks=[],
+                thread_ts=thread_ts,
+                text="Now that the incident is linked, capture this resolution as reusable operational knowledge?",
+                blocks=build_resolution_capture_blocks(channel_id, thread_ts),
             )
-        else:
-            await client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=response)
 
     @app.action(CAPTURE_RESOLUTION)
     async def capture_resolution(ack, body, client):
@@ -253,6 +352,14 @@ def register(app: AsyncApp) -> None:
                 text=message.get("text", "Knowledge capture confirmed."),
                 blocks=_remove_capture_controls(message.get("blocks", [])),
             )
+        if result.startswith("Please add the ServiceNow incident number"):
+            await client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=result,
+                blocks=build_incident_number_blocks(channel_id, thread_ts, resolved=True),
+            )
+            return
         await client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=result)
 
         if captured:
