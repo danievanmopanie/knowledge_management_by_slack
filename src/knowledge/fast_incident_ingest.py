@@ -4,7 +4,7 @@ The hot path is deterministic and incremental:
 1. parse one CSV snapshot;
 2. compare against SQLite current state;
 3. persist only changed versions/transitions/dwell;
-4. in parallel, embed only new/changed incidents and update the temporal graph.
+4. in parallel, embed only semantically changed incidents and update the temporal graph.
 
 No LLM is used during ingestion.
 """
@@ -46,7 +46,9 @@ class IncidentCSVProfile:
 
 @dataclass
 class FastEmbedResult:
-    incidents: int
+    incidents_considered: int
+    incidents_embedded: int
+    metadata_only_incidents: int
     vector_documents: int
     collection_total: int
     elapsed_seconds: float
@@ -66,6 +68,8 @@ class FastIncidentIngestResult:
     versions_written: int
     transitions_written: int
     dwell_rows_written: int
+    vector_incidents: int
+    vector_metadata_only_incidents: int
     vector_documents: int
     vector_collection_total: int
     graph_nodes_added: int
@@ -87,6 +91,30 @@ def _ratio(count: int, total: int) -> float:
     return round(count / total, 4) if total else 0.0
 
 
+def _fast_field_document(inc: Incident, group: str) -> str:
+    """Use the existing focused document but remove volatile lifecycle text.
+
+    Assignment group and state remain in Chroma metadata and the temporal graph;
+    excluding them from the embedded text lets lifecycle-only changes skip GPU work.
+    """
+    text = _field_document(inc, group)
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if not lines:
+        return text
+    tail_parts = [part.strip() for part in lines[-1].split(" | ")]
+    filtered = [
+        part
+        for part in tail_parts
+        if not part.lower().startswith("assignment group:")
+        and not part.lower().startswith("state:")
+    ]
+    if filtered != tail_parts:
+        lines[-1] = " | ".join(filtered)
+    return "\n".join(lines)
+
+
 def profile_incident_csv(path: Path) -> IncidentCSVProfile:
     started = time.perf_counter()
     incidents = load_incidents_from_csv(path)
@@ -95,7 +123,7 @@ def profile_incident_csv(path: Path) -> IncidentCSVProfile:
     group_counts = {group: 0 for group in FIELD_GROUPS}
     for inc in values:
         for group in FIELD_GROUPS:
-            if _field_document(inc, group):
+            if _fast_field_document(inc, group):
                 group_counts[group] += 1
     total = len(values)
     return IncidentCSVProfile(
@@ -115,7 +143,7 @@ def profile_incident_csv(path: Path) -> IncidentCSVProfile:
 
 
 class FastIncidentEmbedder:
-    """Index focused incident vectors without running the legacy graph side effect."""
+    """Index focused vectors while avoiding GPU work for lifecycle-only changes."""
 
     def __init__(self, vector_store: VectorStore | None = None):
         self.vector_store = vector_store or VectorStore(
@@ -126,14 +154,35 @@ class FastIncidentEmbedder:
     def index(self, incidents: list[Incident], *, incident_chunk_size: int = 1000) -> FastEmbedResult:
         started = time.perf_counter()
         if not incidents:
-            return FastEmbedResult(0, 0, self.vector_store.count(), 0.0, 0.0)
+            return FastEmbedResult(0, 0, 0, 0, self.vector_store.count(), 0.0, 0.0)
 
         hashes = load_hash_index()
+        semantic_changed: list[Incident] = []
+        metadata_only: list[Incident] = []
+        for inc in incidents:
+            digest = content_hash(inc)
+            if hashes.get(inc.number) == digest:
+                metadata_only.append(inc)
+            else:
+                semantic_changed.append(inc)
+                hashes[inc.number] = digest
+
+        # Lifecycle-only changes refresh Chroma filters/labels without touching embeddings.
+        meta_ids: list[str] = []
+        meta_values: list[dict] = []
+        for inc in metadata_only:
+            for group in FIELD_GROUPS:
+                if not _fast_field_document(inc, group):
+                    continue
+                meta_ids.append(f"incident-{inc.number}-{group}")
+                meta_values.append(_incident_metadata(inc, group))
+        if meta_ids:
+            self.vector_store.update_metadatas(meta_ids, meta_values)
+
         vector_documents = 0
         chunk_size = max(1, int(incident_chunk_size))
-
-        for start in range(0, len(incidents), chunk_size):
-            batch = incidents[start : start + chunk_size]
+        for start in range(0, len(semantic_changed), chunk_size):
+            batch = semantic_changed[start : start + chunk_size]
             stale_ids: list[str] = []
             docs: list[str] = []
             metas: list[dict] = []
@@ -143,13 +192,12 @@ class FastIncidentEmbedder:
                 stale_ids.append(f"incident-{inc.number}")
                 stale_ids.extend(f"incident-{inc.number}-{group}" for group in FIELD_GROUPS)
                 for group in FIELD_GROUPS:
-                    text = _field_document(inc, group)
+                    text = _fast_field_document(inc, group)
                     if not text:
                         continue
                     docs.append(text)
                     metas.append(_incident_metadata(inc, group))
                     ids.append(f"incident-{inc.number}-{group}")
-                hashes[inc.number] = content_hash(inc)
 
             self.vector_store.delete_documents(stale_ids)
             if docs:
@@ -164,7 +212,9 @@ class FastIncidentEmbedder:
         save_hash_index(hashes)
         elapsed = time.perf_counter() - started
         return FastEmbedResult(
-            incidents=len(incidents),
+            incidents_considered=len(incidents),
+            incidents_embedded=len(semantic_changed),
+            metadata_only_incidents=len(metadata_only),
             vector_documents=vector_documents,
             collection_total=self.vector_store.count(),
             elapsed_seconds=elapsed,
@@ -173,7 +223,7 @@ class FastIncidentEmbedder:
 
 
 class FastTemporalIncidentIngestor:
-    """One-call benchmarkable ingest pipeline for a full ServiceNow snapshot."""
+    """One-call benchmarkable ingest pipeline for a ServiceNow snapshot."""
 
     def __init__(
         self,
@@ -209,8 +259,7 @@ class FastTemporalIncidentIngestor:
         changed = temporal.changed_incidents
 
         observed_text = observed.isoformat()
-        # Graph building is CPU/memory work while embeddings are mostly local
-        # model/Chroma I/O, so run them concurrently to reduce wall-clock time.
+        # Graph construction and local embedding are independent after delta detection.
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="incident-ingest") as pool:
             graph_future = pool.submit(
                 self.graph_builder.build,
@@ -235,6 +284,8 @@ class FastTemporalIncidentIngestor:
             versions_written=temporal.versions_written,
             transitions_written=temporal.transitions_written,
             dwell_rows_written=temporal.dwell_rows_written,
+            vector_incidents=embedded.incidents_embedded,
+            vector_metadata_only_incidents=embedded.metadata_only_incidents,
             vector_documents=embedded.vector_documents,
             vector_collection_total=embedded.collection_total,
             graph_nodes_added=graph.nodes_added,
