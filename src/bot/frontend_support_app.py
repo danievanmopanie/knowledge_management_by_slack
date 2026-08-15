@@ -36,6 +36,8 @@ app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 register_frontend_interactivity(app)
 clarifications = ClarificationEngine()
 
+BUSY_TEXT = "Working on this — checking the thread and relevant support history…"
+
 
 def _normalise_message_event(event: dict) -> dict | None:
     """Return the effective human message for normal and edited Slack events."""
@@ -83,6 +85,42 @@ async def _route_with_timing(query: str, context: RequestContext, *, lane: str) 
         )
 
 
+async def _start_progress(client, *, channel_id: str, thread_ts: str) -> str | None:
+    """Post an immediate acknowledgement so technicians know work has started."""
+    try:
+        result = await client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=BUSY_TEXT,
+        )
+        return result.get("ts")
+    except Exception:
+        logger.exception("Could not post Frontend Support progress indicator")
+        return None
+
+
+async def _finish_progress(
+    client,
+    *,
+    channel_id: str,
+    message_ts: str | None,
+    text: str,
+    blocks: list[dict] | None = None,
+) -> None:
+    """Replace the acknowledgement with clarification UI or the final answer."""
+    if not message_ts:
+        return
+    try:
+        await client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            text=text,
+            blocks=blocks or [],
+        )
+    except Exception:
+        logger.exception("Could not update Frontend Support progress message")
+
+
 async def _private(event: dict, say, context: RequestContext, text: str) -> bool:
     if event.get("channel_type") != "im" or not text or not event.get("user"):
         return False
@@ -107,7 +145,7 @@ async def _private(event: dict, say, context: RequestContext, text: str) -> bool
     return True
 
 
-async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
+async def _public(event: dict, say, client, context: RequestContext, text: str) -> bool:
     if context.channel_id != settings.channel_frontend_support or not text or not event.get("user"):
         return False
     message_ts = event.get("ts", "")
@@ -170,6 +208,12 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
     if not should_invoke:
         return True
 
+    progress_ts = await _start_progress(
+        client,
+        channel_id=context.channel_id,
+        thread_ts=root_ts,
+    )
+
     query = compose_thread_query(
         service,
         channel_id=context.channel_id,
@@ -180,11 +224,24 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
     question = clarifications.next_question(context.channel_id, root_ts, query)
     if question is not None:
         round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
-        await say(
-            text=f"I need one detail before I search the incident history (clarification {round_number}/3): {question.question}",
-            blocks=clarifications.blocks(question, context.channel_id, root_ts),
-            thread_ts=root_ts,
+        clarification_text = (
+            f"I need one detail before I search the incident history "
+            f"(clarification {round_number}/3): {question.question}"
         )
+        if progress_ts:
+            await _finish_progress(
+                client,
+                channel_id=context.channel_id,
+                message_ts=progress_ts,
+                text=clarification_text,
+                blocks=clarifications.blocks(question, context.channel_id, root_ts),
+            )
+        else:
+            await say(
+                text=clarification_text,
+                blocks=clarifications.blocks(question, context.channel_id, root_ts),
+                thread_ts=root_ts,
+            )
         return True
 
     agent_context = RequestContext.from_slack(
@@ -197,17 +254,25 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
         response = await _route_with_timing(query, agent_context, lane="public")
     except Exception:
         logger.exception("Frontend Support proactive response failed")
-        return True
+        response = safe_error_message(context.request_id)
     if response == INSUFFICIENT_EVIDENCE_RESPONSE and decision.kind == MessageKind.TROUBLESHOOTING:
-        return True
+        response = "I checked the available support history but don't have a reliable next step yet. Add any new symptom or result and I'll keep working with the thread."
     if decision.prompt_for_incident and response != INSUFFICIENT_EVIDENCE_RESPONSE:
         response += "\n\n_If this is a ServiceNow incident, add the INC number when convenient so the learning stays referenceable._"
-    await say(text=response, thread_ts=root_ts)
+    if progress_ts:
+        await _finish_progress(
+            client,
+            channel_id=context.channel_id,
+            message_ts=progress_ts,
+            text=response,
+        )
+    else:
+        await say(text=response, thread_ts=root_ts)
     return True
 
 
 @app.event("message")
-async def handle_message(event, say):
+async def handle_message(event, say, client):
     effective_event = _normalise_message_event(event)
     if effective_event is None:
         return
@@ -221,11 +286,11 @@ async def handle_message(event, say):
         return
     if await _private(effective_event, say, context, text):
         return
-    await _public(effective_event, say, context, text)
+    await _public(effective_event, say, client, context, text)
 
 
 @app.event("app_mention")
-async def handle_mention(event, say):
+async def handle_mention(event, say, client):
     """Resolve an explicit help request against its complete support thread."""
     context = _context(event)
     cleaned = clean_mention_text(event.get("text", ""))
@@ -265,14 +330,35 @@ async def handle_mention(event, say):
     else:
         query = cleaned or event.get("text", "")
 
+    progress_ts = None
+    if root_ts and context.channel_id:
+        progress_ts = await _start_progress(
+            client,
+            channel_id=context.channel_id,
+            thread_ts=root_ts,
+        )
+
     question = clarifications.next_question(context.channel_id, root_ts, query) if root_ts else None
     if question is not None:
         round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
-        await say(
-            text=f"I need one detail before I search the incident history (clarification {round_number}/3): {question.question}",
-            blocks=clarifications.blocks(question, context.channel_id, root_ts),
-            thread_ts=root_ts,
+        clarification_text = (
+            f"I need one detail before I search the incident history "
+            f"(clarification {round_number}/3): {question.question}"
         )
+        if progress_ts:
+            await _finish_progress(
+                client,
+                channel_id=context.channel_id,
+                message_ts=progress_ts,
+                text=clarification_text,
+                blocks=clarifications.blocks(question, context.channel_id, root_ts),
+            )
+        else:
+            await say(
+                text=clarification_text,
+                blocks=clarifications.blocks(question, context.channel_id, root_ts),
+                thread_ts=root_ts,
+            )
         return
 
     mention_context = RequestContext.from_slack(
@@ -286,7 +372,15 @@ async def handle_mention(event, say):
     except Exception:
         logger.exception("Frontend Support mention failed")
         response = safe_error_message(context.request_id)
-    await say(text=response, thread_ts=root_ts or context.thread_ts)
+    if progress_ts:
+        await _finish_progress(
+            client,
+            channel_id=context.channel_id,
+            message_ts=progress_ts,
+            text=response,
+        )
+    else:
+        await say(text=response, thread_ts=root_ts or context.thread_ts)
 
 
 async def _run_socket_mode() -> None:
