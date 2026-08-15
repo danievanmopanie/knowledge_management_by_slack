@@ -44,6 +44,19 @@ class FakeClient:
         return self.responses.pop(0)
 
 
+def test_origin_team_is_added_from_private_file_url():
+    url = "https://files.slack.com/files-pri/T0BCG5G3GFR-F0BQ178LTE3/download/incident.csv"
+    result = file_loader._with_origin_team(url, {"id": "F0BQ178LTE3"})
+    assert "origin_team=T0BCG5G3GFR" in result
+
+
+def test_origin_team_prefers_file_metadata():
+    url = "https://files.slack.com/files-pri/TOLD-F123/download/incident.csv"
+    result = file_loader._with_origin_team(url, {"source_team": "TNEW"})
+    assert "origin_team=TNEW" in result
+    assert "origin_team=TOLD" not in result
+
+
 @pytest.mark.anyio
 async def test_slack_cross_host_redirect_preserves_bot_auth(monkeypatch, tmp_path):
     first = "https://files.slack.com/files-pri/T123-F123/download/incident.csv"
@@ -68,6 +81,7 @@ async def test_slack_cross_host_redirect_preserves_bot_auth(monkeypatch, tmp_pat
 
     assert path.exists()
     assert path.read_bytes().startswith(b"number,short_description")
+    assert "origin_team=T123" in FakeClient.requests[0][1]
     assert [request[2]["Authorization"] for request in FakeClient.requests] == [
         "Bearer xoxb-test",
         "Bearer xoxb-test",
