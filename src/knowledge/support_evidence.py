@@ -36,7 +36,7 @@ from src.knowledge.support_graph import SupportKnowledgeGraph
 CONVERSATIONAL_LIMIT = 3
 PROMPT_CONTEXT_MAX_CHARS = 22000
 INCIDENT_CONTEXT_MAX_CHARS = 7600
-EXACT_INCIDENT_CONTEXT_MAX_CHARS = 14000
+EXACT_INCIDENT_CONTEXT_MAX_CHARS = 26000
 EVIDENCE_CACHE_TTL_SECONDS = 300
 EVIDENCE_CACHE_MAX_ENTRIES = 128
 
@@ -72,10 +72,12 @@ class SupportEvidencePackage:
 
     def to_prompt_context(self, max_chars: int = PROMPT_CONTEXT_MAX_CHARS) -> str:
         parts: list[str] = []
-        if self.exact_incident_context:
-            parts.extend([self.exact_incident_context, "---"])
+        # For exact lookups the distilled enrichment comes first so a very long
+        # journal can never crowd out the extracted resolution/action knowledge.
         if self.organisational_context:
             parts.extend([self.organisational_context, "---"])
+        if self.exact_incident_context:
+            parts.extend([self.exact_incident_context, "---"])
         if self.incident_context:
             parts.extend([self.incident_context, "---"])
         if self.graph_context:
@@ -154,7 +156,9 @@ class SupportEvidenceService:
     ):
         self.retriever = retriever or HybridRetriever()
         self.incident_rag = incident_rag or IncidentRAG()
-        self.support_graph = support_graph or SupportKnowledgeGraph(self.incident_rag.graph_store)
+        # Rich support graph is intentionally separate from the fast temporal
+        # graph. Exact raw case files still use the temporal graph below.
+        self.support_graph = support_graph or SupportKnowledgeGraph()
         self.casefiles = casefiles or IncidentCaseFileStore(graph_store=self.incident_rag.graph_store)
         self.organisational = organisational or OrganisationalKnowledgeRetriever()
         self._cache: dict[tuple, tuple[float, SupportEvidencePackage]] = {}
@@ -276,7 +280,7 @@ class SupportEvidenceService:
 
         graph_context = ""
         if graph_lines:
-            graph_context = "### Structured support graph\n" + "\n".join(graph_lines[:24])
+            graph_context = "### Enriched support graph\n" + "\n".join(graph_lines[:24])
 
         package = SupportEvidencePackage(
             query=query,
