@@ -78,14 +78,30 @@ class VectorStore:
             )
         return ids
 
-    def update_metadatas(self, ids: list[str], metadatas: list[dict[str, Any]]) -> None:
-        """Refresh metadata without recomputing embeddings.
+    def update_metadatas(
+        self,
+        ids: list[str],
+        metadatas: list[dict[str, Any]],
+        *,
+        batch_size: int = 1000,
+    ) -> None:
+        """Refresh metadata without recomputing embeddings, in bounded batches.
 
         Missing IDs are ignored by Chroma, which is useful during schema migrations
         where a historical incident may not have every focused field document.
+        Batching also keeps large historical replays below Chroma's maximum batch
+        limits.
         """
-        if ids:
-            self._collection.update(ids=ids, metadatas=metadatas)
+        if not ids:
+            return
+        batch_size = max(1, int(batch_size))
+        total = len(ids)
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            self._collection.update(
+                ids=ids[start:end],
+                metadatas=metadatas[start:end],
+            )
 
     def delete_documents(self, ids: list[str]) -> None:
         if ids:
