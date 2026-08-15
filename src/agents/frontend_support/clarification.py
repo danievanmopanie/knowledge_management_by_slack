@@ -128,8 +128,6 @@ class ClarificationEngine:
         answers = state["answers"]
         lowered = thread_text.lower()
 
-        # Generic app failures are poor retrieval queries until the application
-        # identity is known. Do not ask if the thread already names a known app.
         generic_app = bool(re.search(r"\b(app|application)\b", lowered))
         names_app = any(re.search(rf"\b{re.escape(app)}\b", lowered) for app in self.KNOWN_APPS)
         if generic_app and not names_app and "application" not in answers:
@@ -145,8 +143,6 @@ class ClarificationEngine:
                 reason="The application name materially changes incident retrieval and troubleshooting.",
             )
 
-        # Once an application is known, a timeout still benefits strongly from
-        # knowing the failure stage. Ask only when the thread doesn't already say.
         if ("timeout" in lowered or "timing out" in lowered or "times out" in lowered) and "failure_stage" not in answers:
             stage_terms = ("opening", "launch", "sign in", "login", "during use", "call", "meeting", "after")
             if not any(term in lowered for term in stage_terms):
@@ -167,7 +163,7 @@ class ClarificationEngine:
 
     def blocks(self, question: ClarificationQuestion, channel_id: str, thread_ts: str) -> list[dict]:
         buttons = []
-        for option in question.options:
+        for index, option in enumerate(question.options):
             payload = json.dumps(
                 {
                     "channel_id": channel_id,
@@ -181,7 +177,7 @@ class ClarificationEngine:
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": option.label},
-                    "action_id": CLARIFICATION_ACTION,
+                    "action_id": f"{CLARIFICATION_ACTION}_{index}",
                     "value": payload,
                 }
             )
