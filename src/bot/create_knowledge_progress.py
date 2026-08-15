@@ -1,4 +1,4 @@
-"""Block Kit renderer for Create Knowledge incident-build progress."""
+"""Block Kit renderer for Create Knowledge incident evidence-intake progress."""
 
 from __future__ import annotations
 
@@ -43,21 +43,21 @@ def _embedding_line(progress: dict) -> str:
     if stage in {"embedding_completed", "completed"} or "vector_documents" in progress:
         vectors = int(progress.get("vector_documents") or done)
         avoided = int(progress.get("vector_metadata_only_incidents") or metadata_only)
-        suffix = f" — {_n(vectors)} vector documents"
+        suffix = f" — {_n(vectors)} raw evidence vector documents"
         if avoided:
             suffix += f"; {_n(avoided)} lifecycle-only incidents avoided embedding"
-        return f"✅ *Searchable embeddings*{suffix}"
+        return f"✅ *Raw evidence search index*{suffix}"
 
     if stage in {"embedding_plan", "metadata_updated", "embedding_progress", "graph_completed"}:
         if total == 0:
-            return "✅ *Searchable embeddings* — no semantic re-embedding required"
+            return "✅ *Raw evidence search index* — no semantic re-embedding required"
         pct = int(round((done / total) * 100)) if total else 0
         return (
-            f"🔄 *Searchable embeddings* `{_bar(done, total)}` {pct}% "
+            f"🔄 *Raw evidence search index* `{_bar(done, total)}` {pct}% "
             f"({_n(done)} / {_n(total)} documents)"
         )
 
-    return "⬜ *Searchable embeddings* — waiting"
+    return "⬜ *Raw evidence search index* — waiting"
 
 
 def _process_lines(progress: dict) -> list[str]:
@@ -80,7 +80,7 @@ def _process_lines(progress: dict) -> list[str]:
 
     if has_temporal:
         lines.append(
-            "✅ *Compare with existing knowledge* — "
+            "✅ *Compare with existing evidence* — "
             f"{_n(progress.get('new'))} new · {_n(progress.get('changed'))} changed · "
             f"{_n(progress.get('unchanged'))} unchanged"
         )
@@ -93,16 +93,16 @@ def _process_lines(progress: dict) -> list[str]:
     elif stage == "comparison_started":
         lines.extend(
             [
-                "🔄 *Compare with existing knowledge* — detecting new and changed incidents",
+                "🔄 *Compare with existing evidence* — detecting new and changed incidents",
                 "⬜ *Build temporal history*",
             ]
         )
     else:
-        lines.extend(["⬜ *Compare with existing knowledge*", "⬜ *Build temporal history*"])
+        lines.extend(["⬜ *Compare with existing evidence*", "⬜ *Build temporal history*"])
 
     if has_graph:
         lines.append(
-            "✅ *Build knowledge graph* — "
+            "✅ *Build structural graph* — "
             f"+{_n(progress.get('graph_nodes_added'))} nodes · "
             f"+{_n(progress.get('graph_edges_added'))} relationships"
         )
@@ -112,18 +112,18 @@ def _process_lines(progress: dict) -> list[str]:
         "metadata_updated",
         "embedding_progress",
     }:
-        lines.append("🔄 *Build knowledge graph* — structured relationships")
+        lines.append("🔄 *Build structural graph* — deterministic ServiceNow relationships")
     else:
-        lines.append("⬜ *Build knowledge graph*")
+        lines.append("⬜ *Build structural graph*")
 
     lines.append(_embedding_line(progress))
 
     if completed:
-        lines.append("✅ *Validate and publish* — knowledge is searchable")
+        lines.append("✅ *Validate evidence intake* — raw evidence is available for enrichment and retrieval")
     elif failed:
-        lines.append("❌ *Validate and publish* — build failed")
+        lines.append("❌ *Validate evidence intake* — intake failed")
     else:
-        lines.append("⬜ *Validate and publish*")
+        lines.append("⬜ *Validate evidence intake*")
     return lines
 
 
@@ -143,7 +143,7 @@ def build_blocks(job: dict, progress: dict | None = None) -> list[dict]:
     if stage == "failed":
         return failed_blocks(job, str(progress.get("error") or job.get("error_message") or "Unknown error"))
 
-    title = "Queued" if stage == "queued" else "Building incident knowledge"
+    title = "Queued" if stage == "queued" else "Building incident evidence"
     blocks: list[dict] = [
         {
             "type": "header",
@@ -154,7 +154,10 @@ def build_blocks(job: dict, progress: dict | None = None) -> list[dict]:
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*{file_name}*  •  `{job_id}`  •  Fast temporal build — no LLM extraction",
+                    "text": (
+                        f"*{file_name}*  •  `{job_id}`  •  Fast evidence intake; "
+                        "rich knowledge enrichment follows asynchronously"
+                    ),
                 }
             ],
         },
@@ -163,7 +166,7 @@ def build_blocks(job: dict, progress: dict | None = None) -> list[dict]:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*Build process*\n" + "\n".join(_process_lines(progress)),
+                "text": "*Evidence intake process*\n" + "\n".join(_process_lines(progress)),
             },
         },
     ]
@@ -189,9 +192,13 @@ def completed_blocks(job: dict, metrics: dict) -> list[dict]:
 
     result_lines = [
         f"• *Incidents:* {_n(metrics.get('new'))} new · {_n(metrics.get('changed'))} changed · {_n(metrics.get('unchanged'))} unchanged",
-        f"• *Temporal knowledge:* {_n(metrics.get('versions_written'))} versions · {_n(metrics.get('transitions_written'))} transitions · {_n(metrics.get('dwell_rows_written'))} assignment dwell records",
-        f"• *Graph knowledge:* +{_n(metrics.get('graph_nodes_added'))} nodes · +{_n(metrics.get('graph_edges_added'))} relationships",
-        f"• *Search knowledge:* {_n(metrics.get('vector_documents'))} vector documents processed · {_n(metrics.get('vector_collection_total'))} total in incident index",
+        f"• *Temporal evidence:* {_n(metrics.get('versions_written'))} versions · {_n(metrics.get('transitions_written'))} transitions · {_n(metrics.get('dwell_rows_written'))} assignment dwell records",
+        f"• *Structural graph:* +{_n(metrics.get('graph_nodes_added'))} nodes · +{_n(metrics.get('graph_edges_added'))} relationships",
+        f"• *Raw search evidence:* {_n(metrics.get('vector_documents'))} vector documents processed · {_n(metrics.get('vector_collection_total'))} total in incident index",
+        (
+            f"• *Rich enrichment:* {_n(changed_total)} new/changed incidents are eligible for asynchronous "
+            "symptom · action/outcome · resolution · root-cause · pattern extraction"
+        ),
     ]
     if metadata_only:
         result_lines.append(
@@ -199,30 +206,13 @@ def completed_blocks(job: dict, metrics: dict) -> list[dict]:
         )
     if vector_incidents:
         result_lines.append(
-            f"• *Semantic changes embedded:* {_n(vector_incidents)} incidents at {float(metrics.get('embedding_documents_per_second') or 0):.1f} docs/sec"
+            f"• *Semantic evidence embedded:* {_n(vector_incidents)} incidents at {float(metrics.get('embedding_documents_per_second') or 0):.1f} docs/sec"
         )
 
     return [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "✅ Knowledge build complete", "emoji": True},
-        },
-        {
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"*{file_name}*  •  `{job_id}`"}],
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Build process*\n" + "\n".join(_process_lines({**metrics, "stage": "completed"})),
-            },
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "*Knowledge created*\n" + "\n".join(result_lines)},
+            "text": {"type": "plain_text", "text": "✅ Incident evidence intake complete", "emoji": True},
         },
         {
             "type": "context",
@@ -230,9 +220,34 @@ def completed_blocks(job: dict, metrics: dict) -> list[dict]:
                 {
                     "type": "mrkdwn",
                     "text": (
-                        f"Completed in *{_seconds(metrics.get('total_seconds'))}*  •  "
-                        f"graph {_seconds(metrics.get('graph_seconds'))}  •  "
-                        f"embedding {_seconds(metrics.get('embedding_seconds'))}"
+                        f"*{file_name}*  •  `{job_id}`  •  Raw evidence is searchable; "
+                        "rich knowledge enrichment continues asynchronously"
+                    ),
+                }
+            ],
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Evidence intake process*\n" + "\n".join(_process_lines({**metrics, "stage": "completed"})),
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Evidence created*\n" + "\n".join(result_lines)},
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"Evidence intake completed in *{_seconds(metrics.get('total_seconds'))}*  •  "
+                        f"structural graph {_seconds(metrics.get('graph_seconds'))}  •  "
+                        f"raw embedding {_seconds(metrics.get('embedding_seconds'))}"
                     ),
                 }
             ],
@@ -246,7 +261,7 @@ def failed_blocks(job: dict, error: str) -> list[dict]:
     return [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "❌ Knowledge build failed", "emoji": True},
+            "text": {"type": "plain_text", "text": "❌ Incident evidence intake failed", "emoji": True},
         },
         {
             "type": "context",
@@ -256,7 +271,7 @@ def failed_blocks(job: dict, error: str) -> list[dict]:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"The incident knowledge build stopped before publishing.\n```{error[:1200]}```",
+                "text": f"The incident evidence intake stopped before publishing.\n```{error[:1200]}```",
             },
         },
     ]
