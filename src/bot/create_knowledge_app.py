@@ -17,13 +17,13 @@ if _create_bot:
 if _create_app:
     os.environ["SLACK_APP_TOKEN"] = _create_app
 
-from slack_bolt.async_app import AsyncApp
-from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.async_app import AsyncApp  # noqa: E402
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler  # noqa: E402
 
-from src.agents.knowledge_ingest import KnowledgeIngestAgent
-from src.core.config import settings
-from src.core.context import RequestContext
-from src.core.errors import safe_error_message
+from src.agents.knowledge_ingest import KnowledgeIngestAgent  # noqa: E402
+from src.core.config import settings  # noqa: E402
+from src.core.context import RequestContext  # noqa: E402
+from src.core.errors import safe_error_message  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
