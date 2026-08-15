@@ -1,4 +1,4 @@
-"""Typed support knowledge graph for incidents, people, symptoms, actions and resolutions."""
+"""Typed support knowledge graph for incidents, patterns, actions and resolutions."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from src.knowledge.graphstore import GraphStore
 class SupportEntityType(StrEnum):
     INCIDENT = "incident"
     PERSON = "person"
+    ISSUE_PATTERN = "issue_pattern"
     SYMPTOM = "symptom"
     ACTION = "action"
     RESOLUTION = "resolution"
@@ -23,6 +24,7 @@ class SupportEntityType(StrEnum):
 
 
 class SupportRelation(StrEnum):
+    EXEMPLIFIES = "exemplifies"
     HAS_SYMPTOM = "has_symptom"
     AFFECTS = "affects"
     OCCURRED_IN = "occurred_in"
@@ -110,13 +112,38 @@ class SupportKnowledgeGraph:
         self.upsert(incident)
         if assigned_to:
             person = GraphEntity(SupportEntityType.PERSON, assigned_to, assigned_to)
-            self.relate(incident, person, SupportRelation.RESOLVED_BY if state.lower() in {"resolved", "closed"} else SupportRelation.CONTRIBUTED)
+            relation = (
+                SupportRelation.RESOLVED_BY
+                if state.lower() in {"resolved", "closed"}
+                else SupportRelation.CONTRIBUTED
+            )
+            self.relate(incident, person, relation)
         if caller:
             reporter = GraphEntity(SupportEntityType.PERSON, caller, caller)
             self.relate(incident, reporter, SupportRelation.REPORTED_BY)
         return incident
 
-    def add_symptom(self, incident: GraphEntity, symptom: str, *, confidence: float | None = None) -> GraphEntity:
+    def add_issue_pattern(
+        self,
+        incident: GraphEntity,
+        pattern: str,
+        *,
+        confidence: float | None = None,
+    ) -> GraphEntity:
+        entity = GraphEntity(SupportEntityType.ISSUE_PATTERN, pattern, pattern)
+        props: dict[str, Any] = {}
+        if confidence is not None:
+            props["confidence"] = confidence
+        self.relate(incident, entity, SupportRelation.EXEMPLIFIES, **props)
+        return entity
+
+    def add_symptom(
+        self,
+        incident: GraphEntity,
+        symptom: str,
+        *,
+        confidence: float | None = None,
+    ) -> GraphEntity:
         entity = GraphEntity(SupportEntityType.SYMPTOM, symptom, symptom)
         props: dict[str, Any] = {}
         if confidence is not None:
@@ -129,13 +156,25 @@ class SupportKnowledgeGraph:
         incident: GraphEntity,
         action: str,
         *,
+        canonical_action: str = "",
         outcome: str = "unknown",
         contributor: str | None = None,
+        confidence: float | None = None,
     ) -> GraphEntity:
-        entity = GraphEntity(SupportEntityType.ACTION, action, action)
-        self.relate(incident, entity, SupportRelation.TRIED, outcome=outcome)
+        key = canonical_action.strip() or action
+        properties: dict[str, Any] = {
+            "evidence_text": action,
+            "canonical_action": canonical_action.strip(),
+        }
+        if confidence is not None:
+            properties["confidence"] = confidence
+        entity = GraphEntity(SupportEntityType.ACTION, key, key, properties)
+        edge_props: dict[str, Any] = {"outcome": outcome, "evidence_text": action}
+        if confidence is not None:
+            edge_props["confidence"] = confidence
+        self.relate(incident, entity, SupportRelation.TRIED, **edge_props)
         if outcome.lower() in {"failed", "unsuccessful", "no_change"}:
-            self.relate(incident, entity, SupportRelation.FAILED_ACTION)
+            self.relate(incident, entity, SupportRelation.FAILED_ACTION, **edge_props)
         if contributor:
             person = GraphEntity(SupportEntityType.PERSON, contributor, contributor)
             self.relate(person, entity, SupportRelation.CONTRIBUTED)
@@ -146,15 +185,29 @@ class SupportKnowledgeGraph:
         incident: GraphEntity,
         resolution: str,
         *,
+        resolution_pattern: str = "",
         resolver: str | None = None,
         root_cause: str = "",
+        root_cause_pattern: str = "",
         confidence: float | None = None,
     ) -> GraphEntity:
-        props: dict[str, Any] = {"root_cause": root_cause}
+        key = resolution_pattern.strip() or f"{incident.key}:{resolution}"
+        props: dict[str, Any] = {
+            "evidence_text": resolution,
+            "resolution_pattern": resolution_pattern.strip(),
+            "root_cause": root_cause,
+            "root_cause_pattern": root_cause_pattern.strip(),
+        }
         if confidence is not None:
             props["confidence"] = confidence
-        entity = GraphEntity(SupportEntityType.RESOLUTION, f"{incident.key}:{resolution}", resolution, props)
-        self.relate(incident, entity, SupportRelation.SUCCESSFUL_FIX)
+        entity = GraphEntity(SupportEntityType.RESOLUTION, key, resolution_pattern.strip() or resolution, props)
+        self.relate(
+            incident,
+            entity,
+            SupportRelation.SUCCESSFUL_FIX,
+            evidence_text=resolution,
+            confidence=confidence if confidence is not None else 0.0,
+        )
         if resolver:
             person = GraphEntity(SupportEntityType.PERSON, resolver, resolver)
             self.relate(person, incident, SupportRelation.RESOLVED)
