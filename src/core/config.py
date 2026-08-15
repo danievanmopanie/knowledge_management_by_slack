@@ -23,11 +23,17 @@ class Settings(BaseSettings):
     llm_api_key: str = "ollama"
     llm_model: str = "qwen3:30b-a3b"
 
-    # Lightweight support extraction model – batch graph construction
-    support_extraction_model: str = "qwen3:4b"
+    # Support knowledge extraction. Quality matters more than raw ingest speed:
+    # this runs asynchronously after the deterministic evidence intake.
+    support_extraction_model: str = "qwen3:30b-a3b"
     support_extraction_temperature: float = 0.0
     support_extraction_concurrency: int = 2
     support_extraction_max_chars: int = 12000
+    knowledge_enrichment_batch_size: int = 12
+    knowledge_enrichment_poll_seconds: float = 5.0
+    knowledge_min_similarity: float = 0.42
+    knowledge_pattern_candidate_k: int = 40
+    knowledge_pattern_max_incidents: int = 24
 
     # Local voice-note transcription for field technicians
     voice_notes_enabled: bool = True
@@ -41,7 +47,7 @@ class Settings(BaseSettings):
     embedding_document_prefix: str = ""
     embedding_query_prefix: str = ""
 
-    # Embeddings – incidents
+    # Embeddings – incidents and enriched support knowledge
     incident_embedding_model: str = "bge-m3"
     incident_embedding_document_prefix: str = ""
     incident_embedding_query_prefix: str = ""
