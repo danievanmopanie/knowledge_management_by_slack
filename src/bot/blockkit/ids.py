@@ -1,9 +1,8 @@
 """Central registry of Block Kit action_id / callback_id strings.
 
 Keeping these as named constants (instead of scattering literal strings across
-`interactivity.py`, `home.py`, `modals.py`, and `actions.py`) avoids typo
-mismatches between the button/modal that produces an id and the handler that
-listens for it.
+interactivity modules and block builders) avoids typo mismatches between the
+control that produces an id and the handler that listens for it.
 """
 
 from __future__ import annotations
@@ -32,3 +31,7 @@ CONFIRM_RECEIPT = "inventory_confirm_receipt"
 CANCEL_RECEIPT = "inventory_cancel_receipt"
 CONFIRM_COUNT = "inventory_confirm_count"
 CANCEL_COUNT = "inventory_cancel_count"
+
+# Create Knowledge staged-upload decisions.
+CREATE_KNOWLEDGE_CONFIRM_STAGE = "create_knowledge_confirm_stage"
+CREATE_KNOWLEDGE_CANCEL_STAGE = "create_knowledge_cancel_stage"
