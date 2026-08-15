@@ -91,6 +91,11 @@ class VectorStore:
         if ids:
             self._collection.delete(ids=ids)
 
+    def list_ids(self) -> list[str]:
+        """Return collection IDs without loading documents or embeddings."""
+        result = self._collection.get(include=[])
+        return [str(value) for value in (result.get("ids") or [])]
+
     def similarity_search(
         self,
         query: str,
