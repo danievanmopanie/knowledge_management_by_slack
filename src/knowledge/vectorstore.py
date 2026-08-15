@@ -78,6 +78,15 @@ class VectorStore:
             )
         return ids
 
+    def update_metadatas(self, ids: list[str], metadatas: list[dict[str, Any]]) -> None:
+        """Refresh metadata without recomputing embeddings.
+
+        Missing IDs are ignored by Chroma, which is useful during schema migrations
+        where a historical incident may not have every focused field document.
+        """
+        if ids:
+            self._collection.update(ids=ids, metadatas=metadatas)
+
     def delete_documents(self, ids: list[str]) -> None:
         if ids:
             self._collection.delete(ids=ids)
