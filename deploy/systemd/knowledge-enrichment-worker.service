@@ -1,0 +1,17 @@
+[Unit]
+Description=Slack Knowledge Management - Incident Knowledge Enrichment Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=danieungerer
+WorkingDirectory=/home/danieungerer/knowledge_management_by_slack
+EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env
+ExecStart=/home/danieungerer/knowledge_management_by_slack/.venv/bin/python -m src.worker.knowledge_enrichment_worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
