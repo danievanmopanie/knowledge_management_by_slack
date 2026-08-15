@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -12,7 +13,7 @@ from src.core.context import RequestContext
 from src.core.errors import safe_error_message
 from src.knowledge.citations import evidence_labels, render_evidence_section, sanitize_citations
 from src.knowledge.retrieval_models import RetrievalQuery
-from src.knowledge.support_evidence import SupportEvidenceService
+from src.knowledge.support_evidence import CONVERSATIONAL_LIMIT, SupportEvidenceService
 from src.llm.client import get_llm
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ INSUFFICIENT_EVIDENCE_RESPONSE = (
 )
 
 GENERAL_GUIDANCE_PREFIX = "*General guidance — I didn't find a strong internal match yet:*\n"
+StreamCallback = Callable[[str], Awaitable[None]]
 
 
 def _is_private_coaching(message: str, context: RequestContext) -> bool:
@@ -73,12 +75,35 @@ class FrontendSupportAgent(BaseAgent):
         self.incident_rag = self.evidence.incident_rag
         self.llm = get_llm()
 
+    async def _invoke_llm(
+        self,
+        messages: list,
+        *,
+        on_chunk: StreamCallback | None = None,
+    ) -> str:
+        """Invoke normally or stream accumulated text to a throttled Slack callback."""
+        if on_chunk is None:
+            response = await self.llm.ainvoke(messages)
+            return response.content if hasattr(response, "content") else str(response)
+
+        parts: list[str] = []
+        async for chunk in self.llm.astream(messages):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if not content:
+                continue
+            if isinstance(content, list):
+                content = "".join(str(item) for item in content)
+            parts.append(str(content))
+            await on_chunk("".join(parts))
+        return "".join(parts)
+
     async def _general_guidance(
         self,
         message: str,
         context: RequestContext,
         *,
         private: bool,
+        on_chunk: StreamCallback | None = None,
     ) -> str:
         """Help when internal evidence is absent without fabricating organisational truth."""
         lane = "private coaching" if private else "public support"
@@ -97,8 +122,14 @@ class FrontendSupportAgent(BaseAgent):
         ]
         started = time.perf_counter()
         try:
-            response = await self.llm.ainvoke(messages)
-            answer = response.content if hasattr(response, "content") else str(response)
+            async def prefixed_chunk(text: str) -> None:
+                if on_chunk is not None:
+                    await on_chunk(GENERAL_GUIDANCE_PREFIX + text)
+
+            answer = await self._invoke_llm(
+                messages,
+                on_chunk=prefixed_chunk if on_chunk is not None else None,
+            )
         except Exception:
             logger.exception("General guidance failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
@@ -110,14 +141,29 @@ class FrontendSupportAgent(BaseAgent):
         )
         return GENERAL_GUIDANCE_PREFIX + answer.strip()
 
-    async def handle(self, message: str, context: RequestContext) -> str:
+    async def handle(
+        self,
+        message: str,
+        context: RequestContext,
+        *,
+        on_chunk: StreamCallback | None = None,
+    ) -> str:
         overall_started = time.perf_counter()
         if not hasattr(self, "evidence"):
             try:
                 result = self.retriever.search(
-                    RetrievalQuery(text=message, context=context, limit=5, graph_depth=1)
+                    RetrievalQuery(
+                        text=message,
+                        context=context,
+                        limit=CONVERSATIONAL_LIMIT,
+                        graph_depth=1,
+                    )
                 )
-                incident_context = self.incident_rag.build_context(message, k=5)
+                incident_context = self.incident_rag.build_context(
+                    message,
+                    k=CONVERSATIONAL_LIMIT,
+                    max_chars=2600,
+                )
             except Exception:
                 logger.exception("Legacy support evidence retrieval failed request_id=%s", context.request_id)
                 return safe_error_message(context.request_id)
@@ -128,6 +174,7 @@ class FrontendSupportAgent(BaseAgent):
                     message,
                     context,
                     private=_is_private_coaching(message, context),
+                    on_chunk=on_chunk,
                 )
             self.evidence = SupportEvidenceService(
                 retriever=self.retriever,
@@ -136,7 +183,7 @@ class FrontendSupportAgent(BaseAgent):
 
         retrieval_started = time.perf_counter()
         try:
-            package = self.evidence.build(message, context, limit=5)
+            package = self.evidence.build(message, context, limit=CONVERSATIONAL_LIMIT)
         except Exception:
             logger.exception("Support evidence retrieval failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
@@ -154,9 +201,10 @@ class FrontendSupportAgent(BaseAgent):
                 message,
                 context,
                 private=_is_private_coaching(message, context),
+                on_chunk=on_chunk,
             )
 
-        prompt_context = package.to_prompt_context()
+        prompt_context = package.to_prompt_context(max_chars=4500)
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(
@@ -172,8 +220,7 @@ class FrontendSupportAgent(BaseAgent):
 
         generation_started = time.perf_counter()
         try:
-            response = await self.llm.ainvoke(messages)
-            answer = response.content if hasattr(response, "content") else str(response)
+            answer = await self._invoke_llm(messages, on_chunk=on_chunk)
         except Exception:
             logger.exception("LLM generation failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
