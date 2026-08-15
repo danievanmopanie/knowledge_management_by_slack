@@ -53,4 +53,5 @@ def test_temporal_graph_closes_old_assignment_and_keeps_history(tmp_path):
         if target == "change:chg123456"
     ]
     assert change_edges
-    assert change_edges[0]["confidence"] == 0.25
+    assert change_edges[0]["relation"] == "temporally_correlated_with"
+    assert change_edges[0]["confidence"] == 0.55
