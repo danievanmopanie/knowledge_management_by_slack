@@ -43,6 +43,20 @@ def _context(event: dict) -> RequestContext:
     )
 
 
+def _support_context(context: RequestContext, *, thread_ts: str | None = None) -> RequestContext:
+    """Mark the dedicated Slack support lane as allowed to use safe general guidance."""
+    return RequestContext.from_slack(
+        channel_id=context.channel_id,
+        user_id=context.user_id,
+        thread_ts=thread_ts or context.thread_ts,
+        files=list(context.files),
+        request_id=context.request_id,
+        roles=tuple(dict.fromkeys((*context.roles, "frontend_general_guidance"))),
+        groups=context.groups,
+        site=context.site,
+    )
+
+
 async def _text(event: dict) -> str:
     typed = (event.get("text") or "").strip()
     transcript = await transcribe_first_voice_note(event.get("files", []))
@@ -132,21 +146,13 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
         )
         return True
 
-    # The cheap collaboration classifier intentionally stays conservative. A
-    # broad technical safety net catches natural device/peripheral phrasing
-    # such as "Bluetooth headset isn't connecting" without requiring users to
-    # write ticket-like prompts.
     should_invoke = decision.invoke_agent or (
         not decision.assistant_suppressed and looks_like_support(text)
     )
     if not should_invoke:
         return True
 
-    agent_context = RequestContext.from_slack(
-        channel_id=context.channel_id,
-        user_id=context.user_id,
-        thread_ts=root_ts,
-    )
+    agent_context = _support_context(context, thread_ts=root_ts)
     query = compose_thread_query(
         service,
         channel_id=context.channel_id,
@@ -170,8 +176,6 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
 async def handle_message(event, say):
     if event.get("subtype") in ("bot_message", "message_changed", "message_deleted"):
         return
-    # app_mention is delivered separately. Skipping mention messages here
-    # prevents two independent answers to the same technician turn.
     if "<@" in (event.get("text") or ""):
         return
     context = _context(event)
@@ -193,9 +197,6 @@ async def handle_mention(event, say):
     root_ts = event.get("thread_ts") or event.get("ts", "")
     service = get_service()
 
-    # Record the explicit request as another attributed thread contribution.
-    # INSERT OR IGNORE in the store makes this safe if Slack also delivered a
-    # corresponding ordinary-message event.
     if context.channel_id == settings.channel_frontend_support and event.get("user") and root_ts:
         service.observe(
             channel_id=context.channel_id,
@@ -210,11 +211,13 @@ async def handle_mention(event, say):
             thread_ts=root_ts,
             latest_text=cleaned or "help with this",
         )
+        route_context = _support_context(context, thread_ts=root_ts)
     else:
         query = cleaned or event.get("text", "")
+        route_context = context
 
     try:
-        response = await _route_with_timing(query, context, lane="mention")
+        response = await _route_with_timing(query, route_context, lane="mention")
     except Exception:
         logger.exception("Frontend Support mention failed")
         response = safe_error_message(context.request_id)
