@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from src.bot.blockkit.decisions import decision_actions
+
 CAPTURE_RESOLUTION = "frontend_capture_resolution"
 DISMISS_RESOLUTION = "frontend_dismiss_resolution"
 
@@ -18,23 +20,12 @@ def build_resolution_capture_blocks(channel_id: str, thread_ts: str) -> list[dic
                 "text": "It looks like this issue is resolved. *Capture this as reusable knowledge?*",
             },
         },
-        {
-            "type": "actions",
-            "block_id": "frontend_resolution_capture",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Capture knowledge"},
-                    "style": "primary",
-                    "action_id": CAPTURE_RESOLUTION,
-                    "value": value,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Not now"},
-                    "action_id": DISMISS_RESOLUTION,
-                    "value": value,
-                },
-            ],
-        },
+        decision_actions(
+            block_id="frontend_resolution_capture",
+            value=value,
+            primary_action_id=CAPTURE_RESOLUTION,
+            primary_label="Capture knowledge",
+            secondary_action_id=DISMISS_RESOLUTION,
+            secondary_label="Not now",
+        ),
     ]
