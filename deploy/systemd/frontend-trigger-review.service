@@ -1,0 +1,11 @@
+[Unit]
+Description=Queue Builder review of missed Frontend Support triggers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=danieungerer
+WorkingDirectory=/home/danieungerer/knowledge_management_by_slack
+EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env
+ExecStart=/home/danieungerer/knowledge_management_by_slack/.venv/bin/python scripts/review_frontend_trigger_misses.py
