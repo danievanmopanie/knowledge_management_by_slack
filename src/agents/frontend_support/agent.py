@@ -50,7 +50,8 @@ INSUFFICIENT_EVIDENCE_RESPONSE = (
     "I can still help troubleshoot it from what we know in the thread — add any error text or steps already tried if they aren't here yet."
 )
 
-GENERAL_GUIDANCE_PREFIX = "*General troubleshooting guidance — not an internally proven fix:*\n"
+GENERAL_GUIDANCE_PREFIX = "*General guidance — I didn't find a strong internal match yet:*\n"
+PRIVATE_GUIDANCE_PREFIX = "*Private coaching — general guidance, not an internally proven fix:*\n"
 
 
 def _is_private_coaching(message: str, context: RequestContext) -> bool:
@@ -68,18 +69,24 @@ class FrontendSupportAgent(BaseAgent):
         self.incident_rag = self.evidence.incident_rag
         self.llm = get_llm()
 
-    async def _private_general_guidance(
-        self, message: str, context: RequestContext
+    async def _general_guidance(
+        self,
+        message: str,
+        context: RequestContext,
+        *,
+        private: bool,
     ) -> str:
-        """Allow general model guidance in the private coaching lane without presenting it as internal truth."""
+        """Help when internal evidence is absent without fabricating organisational truth."""
+        lane = "private coaching" if private else "public support"
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(
                 content=(
-                    "No reliable internal incident or governed-knowledge evidence matched this private coaching request.\n"
-                    "Provide useful general technical explanation or troubleshooting guidance if you can. "
-                    "Do not invent internal incidents, organisational evidence, or known-success claims. "
-                    "Keep the guidance reversible and low-risk where possible, and ask for missing diagnostic detail when needed.\n\n"
+                    f"No reliable internal incident or governed-knowledge evidence matched this {lane} request.\n"
+                    "Still help the technician using general technical knowledge. "
+                    "Base the answer on the complete supplied conversation, do not ask for details already present, "
+                    "do not invent internal incidents or known-success claims, and prefer reversible low-risk diagnostics. "
+                    "Give one or two useful next steps rather than a generic checklist.\n\n"
                     f"{message}"
                 )
             ),
@@ -89,14 +96,16 @@ class FrontendSupportAgent(BaseAgent):
             response = await self.llm.ainvoke(messages)
             answer = response.content if hasattr(response, "content") else str(response)
         except Exception:
-            logger.exception("Private general guidance failed request_id=%s", context.request_id)
+            logger.exception("General guidance failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
         logger.info(
-            "Frontend Support timing request_id=%s stage=private_llm seconds=%.3f",
+            "Frontend Support timing request_id=%s stage=%s_general_llm seconds=%.3f",
             context.request_id,
+            "private" if private else "public",
             time.perf_counter() - started,
         )
-        return GENERAL_GUIDANCE_PREFIX + answer.strip()
+        prefix = PRIVATE_GUIDANCE_PREFIX if private else GENERAL_GUIDANCE_PREFIX
+        return prefix + answer.strip()
 
     async def handle(self, message: str, context: RequestContext) -> str:
         overall_started = time.perf_counter()
@@ -110,9 +119,11 @@ class FrontendSupportAgent(BaseAgent):
                 logger.exception("Legacy support evidence retrieval failed request_id=%s", context.request_id)
                 return safe_error_message(context.request_id)
             if not result.should_answer and not incident_context:
-                if _is_private_coaching(message, context):
-                    return await self._private_general_guidance(message, context)
-                return INSUFFICIENT_EVIDENCE_RESPONSE
+                return await self._general_guidance(
+                    message,
+                    context,
+                    private=_is_private_coaching(message, context),
+                )
             self.evidence = SupportEvidenceService(
                 retriever=self.retriever,
                 incident_rag=self.incident_rag,
@@ -132,9 +143,11 @@ class FrontendSupportAgent(BaseAgent):
         )
 
         if not package.has_evidence:
-            if _is_private_coaching(message, context):
-                return await self._private_general_guidance(message, context)
-            return INSUFFICIENT_EVIDENCE_RESPONSE
+            return await self._general_guidance(
+                message,
+                context,
+                private=_is_private_coaching(message, context),
+            )
 
         prompt_context = package.to_prompt_context()
         messages = [
