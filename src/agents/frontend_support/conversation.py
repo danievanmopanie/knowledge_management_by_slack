@@ -77,6 +77,7 @@ SUPPORT_TERMS = (
 )
 
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>\s*", re.I)
+INCIDENT_RE = re.compile(r"\bINC\d{4,}\b", re.I)
 
 
 class ThreadQueryBuilder(Protocol):
@@ -89,13 +90,18 @@ def clean_mention_text(text: str) -> str:
 
 
 def looks_like_support(text: str) -> bool:
-    """Return True for common natural-language field-support signals.
+    """Return True for natural-language field-support signals or incident lookups.
 
     This deliberately favors recall over precision inside #frontend-support:
     false positives are less costly than forcing technicians to learn trigger
-    words or @mention the bot for obvious support problems.
+    words or @mention the bot for obvious support problems. A named ServiceNow
+    INC reference is itself a high-signal support request and should wake the
+    agent even when the surrounding sentence contains no failure vocabulary.
     """
-    lowered = (text or "").lower()
+    raw = text or ""
+    if INCIDENT_RE.search(raw):
+        return True
+    lowered = raw.lower()
     return any(term in lowered for term in SUPPORT_TERMS)
 
 
