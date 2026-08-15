@@ -1,0 +1,16 @@
+[Unit]
+Description=Create Knowledge fast incident ingest worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=danieungerer
+WorkingDirectory=/home/danieungerer/knowledge_management_by_slack
+EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env
+ExecStart=/home/danieungerer/knowledge_management_by_slack/.venv/bin/python -m src.worker.incident_ingest_worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
