@@ -305,7 +305,11 @@ class SupportKnowledgeExtractor:
                     confidence=action.confidence,
                 )
 
-        resolution = extraction.resolution.strip() or incident.resolution_notes.strip()
+        # Do not promote raw/generic closure text into SUCCESSFUL_FIX. The
+        # extractor must have identified actual technical resolution knowledge.
+        resolution = extraction.resolution.strip()
+        if not resolution and extraction.resolution_pattern.strip():
+            resolution = extraction.resolution_pattern.strip()
         if resolution:
             resolver = extraction.resolver.strip() or incident.assigned_to.strip() or None
             self.graph.add_resolution(
