@@ -124,8 +124,6 @@ def register(app: AsyncApp) -> None:
         message = body.get("message") or {}
         message_ts = message.get("ts")
 
-        # "Other" deliberately keeps the question pending so the technician can
-        # answer naturally in free text rather than being forced into a form.
         if value == "Other":
             if message_ts:
                 await client.chat_update(
@@ -180,8 +178,6 @@ def register(app: AsyncApp) -> None:
             )
             return
 
-        # Enough context now: show visible progress before the slower retrieval +
-        # local LLM path, then replace the same message with the answer.
         progress = await client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
@@ -197,8 +193,29 @@ def register(app: AsyncApp) -> None:
             thread_ts=thread_ts,
             roles=("general_support_fallback",),
         )
+        last_length = 0
+
+        async def stream_update(partial: str) -> None:
+            nonlocal last_length
+            if not progress_ts or not partial or len(partial) - last_length < 70:
+                return
+            try:
+                await client.chat_update(
+                    channel=channel_id,
+                    ts=progress_ts,
+                    text=partial.rstrip() + "\n\n_Still working…_",
+                    blocks=[],
+                )
+                last_length = len(partial)
+            except Exception:
+                logger.exception("Could not stream clarification follow-up")
+
         try:
-            response = await route_frontend_support(query, context)
+            response = await route_frontend_support(
+                query,
+                context,
+                on_chunk=stream_update if progress_ts else None,
+            )
         except Exception:
             logger.exception("Frontend Support clarification follow-up failed")
             response = "I captured that detail, but I couldn't complete the follow-up search. Reply normally and I'll try again."
