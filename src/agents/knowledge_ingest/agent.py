@@ -65,7 +65,18 @@ class KnowledgeIngestAgent(BaseAgent):
         for file_info in context.files:
             name = file_info.get("name") or file_info.get("id") or "unknown"
             try:
-                local_path = await download_slack_file(file_info)
+                is_csv = str(name).lower().endswith(".csv")
+                local_path = await download_slack_file(
+                    file_info,
+                    max_bytes=(
+                        settings.create_knowledge_incident_upload_bytes
+                        if is_csv
+                        else settings.max_upload_bytes
+                    ),
+                    timeout_seconds=(
+                        settings.create_knowledge_download_timeout_seconds if is_csv else 60.0
+                    ),
+                )
                 is_incident = _looks_like_incident_csv(local_path)
                 extracted_chars = 0
                 profile = None
