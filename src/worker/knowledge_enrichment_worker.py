@@ -26,6 +26,7 @@ from src.knowledge.organisational_knowledge import (  # noqa: E402
 from src.knowledge.support_extraction import (  # noqa: E402
     SupportExtraction,
     SupportKnowledgeExtractor,
+    extraction_model_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,20 +72,21 @@ async def run_once(
     store = store or OrganisationalKnowledgeStore()
     extractor = extractor or SupportKnowledgeExtractor()
     index = index or OrganisationalKnowledgeIndex()
+    model_key = extraction_model_key()
     limit = batch_size or settings.knowledge_enrichment_batch_size
-    candidates = store.pending(limit=max(1, int(limit)))
+    candidates = store.pending(limit=max(1, int(limit)), model=model_key)
     result = EnrichmentBatchResult(selected=len(candidates))
     if not candidates:
-        result.remaining = store.pending_count()
+        result.remaining = store.pending_count(model=model_key)
         result.elapsed_seconds = time.perf_counter() - started
         return result
 
     logger.info(
         "Knowledge enrichment batch: selected=%d model='%s' concurrency=%d pending_before=%d",
         len(candidates),
-        settings.support_extraction_model,
+        model_key,
         settings.support_extraction_concurrency,
-        store.pending_count(),
+        store.pending_count(model=model_key),
     )
 
     extracted = await _extract_batch(candidates, extractor)
@@ -98,7 +100,7 @@ async def run_once(
             # concurrent. GraphStore is an in-memory NetworkX object persisted once
             # at the end of the batch.
             extractor.apply(candidate.incident, extraction, save=False)
-            item = store.upsert(candidate, extraction)
+            item = store.upsert(candidate, extraction, model=model_key)
             enriched_items.append(item)
             result.enriched += 1
             logger.info(
@@ -118,7 +120,7 @@ async def run_once(
         result.indexed_documents = int(index_result.get("documents") or 0)
         result.patterns = store.rebuild_patterns()
 
-    result.remaining = store.pending_count()
+    result.remaining = store.pending_count(model=model_key)
     result.elapsed_seconds = time.perf_counter() - started
     logger.info(
         "Knowledge enrichment complete: selected=%d enriched=%d failed=%d indexed_docs=%d "
@@ -140,7 +142,7 @@ async def run_forever() -> None:
     index = OrganisationalKnowledgeIndex()
     logger.info(
         "Starting Knowledge Enrichment worker model='%s' batch=%d concurrency=%d",
-        settings.support_extraction_model,
+        extraction_model_key(),
         settings.knowledge_enrichment_batch_size,
         settings.support_extraction_concurrency,
     )
