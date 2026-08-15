@@ -5,9 +5,9 @@ from src.knowledge.synthetic_day2 import generate_day2_snapshot
 from src.reporting.incidents import load_incidents_from_csv
 
 
-def _write_source(path):
+def _write_source(path, number_header="Number"):
     headers = [
-        "Number",
+        number_header,
         "Short description",
         "Description",
         "Work notes",
@@ -20,7 +20,7 @@ def _write_source(path):
     for i in range(1, 11):
         rows.append(
             {
-                "Number": f"INC{i:04d}",
+                number_header: f"INC{i:04d}",
                 "Short description": f"Problem {i}",
                 "Description": f"Description {i}",
                 "Work notes": f"Work {i}",
@@ -74,3 +74,25 @@ def test_day2_generator_separates_lifecycle_and_semantic_changes(tmp_path):
     for number in result.resolution_changed:
         assert "[Synthetic Day 2]" in day2[number].resolution_notes
         assert content_hash(day2[number]) != content_hash(day1[number])
+
+
+def test_day2_generator_infers_incident_number_column_from_inc_values(tmp_path):
+    source = tmp_path / "day1_weird_header.csv"
+    output = tmp_path / "day2_weird_header.csv"
+    _write_source(source, number_header="Record reference exported by ServiceNow")
+
+    parsed = load_incidents_from_csv(source)
+    assert len(parsed) == 11
+    assert parsed[0].number == "INC0001"
+    assert parsed[0].number != parsed[0].short_description
+
+    result = generate_day2_snapshot(
+        source,
+        output,
+        lifecycle_count=2,
+        work_notes_count=2,
+        resolution_count=2,
+        seed=7,
+    )
+    assert result.unique_incidents == 10
+    assert result.changed_unique_incidents == 6
