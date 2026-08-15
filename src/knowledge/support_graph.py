@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from src.core.config import settings
 from src.knowledge.graphstore import GraphStore
 
 
@@ -60,10 +61,16 @@ class GraphEntity:
 
 
 class SupportKnowledgeGraph:
-    """Domain adapter over GraphStore for collaborative support knowledge."""
+    """Domain adapter over a graph dedicated to enriched support knowledge.
+
+    The fast temporal ingest graph intentionally uses ``data/vectorstore/graph.json``.
+    Rich LLM enrichment uses ``data/vectorstore/support_graph/graph.json`` so two
+    background processes cannot overwrite each other's whole-file NetworkX state.
+    SQLite remains the authoritative source for enriched facts and rollups.
+    """
 
     def __init__(self, store: GraphStore | None = None):
-        self.store = store or GraphStore()
+        self.store = store or GraphStore(path=settings.vectorstore_path / "support_graph")
 
     def upsert(self, entity: GraphEntity) -> str:
         props = dict(entity.properties or {})
@@ -200,7 +207,12 @@ class SupportKnowledgeGraph:
         }
         if confidence is not None:
             props["confidence"] = confidence
-        entity = GraphEntity(SupportEntityType.RESOLUTION, key, resolution_pattern.strip() or resolution, props)
+        entity = GraphEntity(
+            SupportEntityType.RESOLUTION,
+            key,
+            resolution_pattern.strip() or resolution,
+            props,
+        )
         self.relate(
             incident,
             entity,
