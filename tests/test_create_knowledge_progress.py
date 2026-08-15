@@ -22,18 +22,20 @@ def _job():
     }
 
 
-def test_queued_card_shows_full_build_process():
+def test_queued_card_shows_full_evidence_intake_process_and_enrichment_boundary():
     blocks = queued_blocks(_job())
     text = _text(blocks)
 
     assert "Queued" in text
+    assert "Fast evidence intake" in text
+    assert "rich knowledge enrichment follows asynchronously" in text
     assert "Upload profiled and confirmed" in text
     assert "Parse ServiceNow snapshot" in text
-    assert "Compare with existing knowledge" in text
+    assert "Compare with existing evidence" in text
     assert "Build temporal history" in text
-    assert "Build knowledge graph" in text
-    assert "Searchable embeddings" in text
-    assert "Validate and publish" in text
+    assert "Build structural graph" in text
+    assert "Raw evidence search index" in text
+    assert "Validate evidence intake" in text
 
 
 def test_running_card_shows_real_embedding_progress():
@@ -62,7 +64,7 @@ def test_running_card_shows_real_embedding_progress():
     assert "5,000 / 10,000 documents" in text
 
 
-def test_completed_card_explains_knowledge_created():
+def test_completed_card_distinguishes_raw_evidence_from_rich_enrichment():
     metrics = {
         "new": 4000,
         "changed": 3000,
@@ -83,9 +85,12 @@ def test_completed_card_explains_knowledge_created():
     }
     text = _text(build_blocks(_job(), {"stage": "completed", "metrics": metrics}))
 
-    assert "Knowledge build complete" in text
-    assert "Knowledge created" in text
+    assert "Incident evidence intake complete" in text
+    assert "Evidence created" in text
     assert "1,200 transitions" in text
     assert "+18,000 relationships" in text
     assert "5,200 vector documents processed" in text
     assert "900 lifecycle-only incidents" in text
+    assert "7,000 new/changed incidents are eligible" in text
+    assert "symptom · action/outcome · resolution · root-cause · pattern extraction" in text
+    assert "rich knowledge enrichment continues asynchronously" in text
