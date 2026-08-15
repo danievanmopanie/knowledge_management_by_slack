@@ -29,6 +29,7 @@ class SupportRelation(StrEnum):
     HAS_SYMPTOM = "has_symptom"
     AFFECTS = "affects"
     OCCURRED_IN = "occurred_in"
+    ASSIGNED_TO = "assigned_to"
     TRIED = "tried"
     CONTRIBUTED = "contributed"
     RESOLVED = "resolved"
@@ -118,13 +119,10 @@ class SupportKnowledgeGraph:
         )
         self.upsert(incident)
         if assigned_to:
+            # Assignment is an authoritative ServiceNow fact. It does not prove
+            # the assignee performed the final successful resolution.
             person = GraphEntity(SupportEntityType.PERSON, assigned_to, assigned_to)
-            relation = (
-                SupportRelation.RESOLVED_BY
-                if state.lower() in {"resolved", "closed"}
-                else SupportRelation.CONTRIBUTED
-            )
-            self.relate(incident, person, relation)
+            self.relate(incident, person, SupportRelation.ASSIGNED_TO)
         if caller:
             reporter = GraphEntity(SupportEntityType.PERSON, caller, caller)
             self.relate(incident, reporter, SupportRelation.REPORTED_BY)
