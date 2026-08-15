@@ -15,7 +15,10 @@ from src.knowledge.organisational_knowledge import (
     OrganisationalKnowledgeStore,
     _incident_from_record,
 )
-from src.knowledge.support_extraction import SupportKnowledgeExtractor
+from src.knowledge.support_extraction import (
+    SupportKnowledgeExtractor,
+    extraction_model_key,
+)
 from src.worker.knowledge_enrichment_worker import run_once
 
 
@@ -45,14 +48,22 @@ def _candidate_for_number(
 
 
 def _status(store: OrganisationalKnowledgeStore) -> None:
+    model_key = extraction_model_key()
     with store._connect() as conn:
         enriched = int(conn.execute("SELECT COUNT(*) FROM support_incident_knowledge").fetchone()[0])
+        current_schema_enriched = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM support_incident_knowledge WHERE model=?",
+                (model_key,),
+            ).fetchone()[0]
+        )
         actions = int(conn.execute("SELECT COUNT(*) FROM support_knowledge_actions").fetchone()[0])
         patterns = int(conn.execute("SELECT COUNT(*) FROM support_patterns").fetchone()[0])
         total = int(conn.execute("SELECT COUNT(*) FROM incident_current").fetchone()[0])
     print(f"current incidents: {total:,}")
-    print(f"enriched incidents: {enriched:,}")
-    print(f"pending enrichment: {store.pending_count():,}")
+    print(f"enriched incidents (any schema): {enriched:,}")
+    print(f"enriched incidents (current schema): {current_schema_enriched:,}")
+    print(f"pending enrichment: {store.pending_count(model=model_key):,}")
     print(f"structured actions: {actions:,}")
     print(f"materialised patterns: {patterns:,}")
     try:
@@ -61,6 +72,7 @@ def _status(store: OrganisationalKnowledgeStore) -> None:
     except Exception as exc:
         print(f"enriched knowledge vectors: unavailable ({exc})")
     print(f"extraction model: {settings.support_extraction_model}")
+    print(f"enrichment schema key: {model_key}")
 
 
 async def _enrich_incident(number: str) -> int:
@@ -70,11 +82,12 @@ async def _enrich_incident(number: str) -> int:
         print(f"{number.upper()} is not present in incident_current")
         return 2
 
+    model_key = extraction_model_key()
     extractor = SupportKnowledgeExtractor()
-    print(f"Extracting rich knowledge for {candidate.incident.number} with {settings.support_extraction_model}...")
+    print(f"Extracting rich knowledge for {candidate.incident.number} with {model_key}...")
     extraction = await extractor.extract(candidate.incident, force=True)
     extractor.apply(candidate.incident, extraction, save=False)
-    item = store.upsert(candidate, extraction)
+    item = store.upsert(candidate, extraction, model=model_key)
     extractor.graph.save()
     index_result = OrganisationalKnowledgeIndex().upsert_many([item])
     patterns = store.rebuild_patterns()
