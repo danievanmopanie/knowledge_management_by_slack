@@ -47,6 +47,8 @@ class KnowledgeIngestAgent(BaseAgent):
         text = (message or "").strip()
         lower = text.lower()
 
+        # Text commands are intentionally retained as fallback paths for power
+        # users/automation. Slack's primary human UX is Block Kit controls.
         if lower.startswith("confirm "):
             return self._confirm(text.split(maxsplit=1)[1].strip(), context)
         if lower.startswith("cancel "):
@@ -56,9 +58,9 @@ class KnowledgeIngestAgent(BaseAgent):
 
         if not context.files:
             return (
-                "Upload a supported file to stage it. Nothing becomes searchable until you confirm it.\n"
+                "Upload a supported file to stage it. Nothing becomes searchable until you approve it.\n"
                 "For ServiceNow Incident CSVs I will profile the snapshot first, then queue a fast temporal/vector ingest.\n"
-                "Use `confirm <stage-id>`, `cancel <stage-id>`, or `status <ING-job-id>`."
+                "Slack buttons are the primary controls; typed confirm/cancel/status commands remain available as a fallback."
             )
 
         lines = ["*Upload staged — not yet searchable*"]
@@ -122,12 +124,14 @@ class KnowledgeIngestAgent(BaseAgent):
                         f"• text coverage: description {_pct(profile.description_coverage)}, work notes {_pct(profile.work_notes_coverage)}, "
                         f"comments {_pct(profile.comments_coverage)}, resolution {_pct(profile.resolution_coverage)}\n"
                         f"• profile parse time: {profile.parse_seconds:.2f}s\n"
-                        f"Confirm with `confirm {stage_id}`. The incident file will use the fast temporal pipeline only — it will not be duplicated as a generic knowledge document."
+                        "Use the *Build knowledge* button below to proceed. "
+                        f"Fallback: `confirm {stage_id}`. The incident file will use the fast temporal pipeline only — it will not be duplicated as a generic knowledge document."
                     )
                 else:
                     lines.append(
                         f"• *{name}* → `{stage_id}` ({extracted_chars:,} extracted characters)\n"
-                        f"  Confirm with `confirm {stage_id}` or cancel with `cancel {stage_id}`."
+                        "  Use the buttons below to approve or cancel. "
+                        f"Fallback: `confirm {stage_id}` / `cancel {stage_id}`."
                     )
             except Exception:
                 logger.exception("Upload staging failed request_id=%s file=%s", context.request_id, name)
