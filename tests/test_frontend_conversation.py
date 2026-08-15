@@ -30,6 +30,11 @@ def test_bsod_is_recognised_as_high_signal_support_language():
     assert looks_like_support("Laptop is stuck on a blue screen") is True
 
 
+def test_timeout_phrase_reaches_clarification_layer_without_mention():
+    assert looks_like_support("App keeps timing out") is True
+    assert looks_like_support("Application times out after a few minutes") is True
+
+
 def test_mentions_are_removed_without_losing_request():
     assert clean_mention_text("<@U012ABC> - help with this.") == "help with this."
 
