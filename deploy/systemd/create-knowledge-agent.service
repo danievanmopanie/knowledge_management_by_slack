@@ -1,0 +1,16 @@
+[Unit]
+Description=Standalone Create Knowledge Slack Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=danieungerer
+WorkingDirectory=/home/danieungerer/knowledge_management_by_slack
+EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env
+ExecStart=/home/danieungerer/knowledge_management_by_slack/.venv/bin/python -m src.bot.create_knowledge_app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
