@@ -56,7 +56,76 @@ At most three focused documents per incident:
 
 Volatile state/assignment facts live in metadata and the temporal graph, not the embedded text. This means a reassignment can be captured without spending GPU time on a new embedding.
 
-## CLI benchmark
+## GX10 isolated 1,000-incident benchmark
+
+The isolated mode uses its own temporary:
+
+- Chroma vector directory
+- SQLite temporal database
+- NetworkX graph JSON
+- incident semantic-hash file
+
+It therefore does **not** read or modify the configured/live incident knowledge state.
+
+Generate the deterministic synthetic Day-2 snapshot:
+
+```bash
+python scripts/generate_synthetic_day2_incidents.py
+```
+
+By default this reads:
+
+```text
+~/Downloads/closed_incidents_sample_1000.csv
+```
+
+and creates:
+
+```text
+~/Downloads/closed_incidents_sample_1000_day2.csv
+~/Downloads/closed_incidents_sample_1000_day2.manifest.json
+```
+
+The default Day-2 plan changes exactly 100 unique incident numbers:
+
+- 40 lifecycle-only changes (Assignment Group / Assigned To / State, depending on available columns)
+- 30 Work Notes changes
+- 30 Resolution Notes changes
+
+The generator uses a fixed seed (`20260815`) and records the exact selected incident numbers in the manifest. Every duplicate CSV row for a selected incident is changed consistently.
+
+Run the full clean experiment:
+
+```bash
+python scripts/run_gx10_1000_incident_benchmark.py --isolated --with-day2
+```
+
+This performs, in the same temporary isolated state:
+
+1. Day-1 initial load — clean vector/graph build.
+2. Day-1 identical repeat — unchanged fast path.
+3. Synthetic Day-2 incremental load — mixed temporal and semantic changes.
+
+Expected Day-2 shape:
+
+```text
+changed                         100
+unchanged                       ~797
+vector_metadata_only_incidents   ~40
+vector_incidents                 ~60
+```
+
+The exact vector-document count depends on which focused field groups exist for the 60 semantically changed incidents.
+
+To preserve the isolated state for inspection instead of deleting it at process exit:
+
+```bash
+python scripts/run_gx10_1000_incident_benchmark.py \
+  --isolated-dir ./data/benchmark_1000 \
+  --with-day2
+```
+
+## Generic CLI benchmark
 
 Profile only:
 
@@ -75,10 +144,6 @@ For a sample/subset that must **not** mark omitted incidents as missing:
 ```bash
 python scripts/benchmark_temporal_incident_ingest.py /path/to/incidents_1000_sample.csv --partial-snapshot
 ```
-
-Benchmark the same file twice. The second run should show almost everything as unchanged and perform essentially no embedding work.
-
-Then modify a small subset of incidents and run again to measure incremental throughput.
 
 ## Slack flow
 
