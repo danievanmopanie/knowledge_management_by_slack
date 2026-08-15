@@ -12,10 +12,10 @@ import csv
 import json
 import random
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from pathlib import Path
 
-from src.reporting.incidents import _map_headers, load_incidents_from_csv
+from src.reporting.incidents import load_incidents_from_csv, map_incident_headers
 
 DEFAULT_SEED = 20260815
 DEFAULT_LIFECYCLE_COUNT = 40
@@ -84,19 +84,22 @@ def generate_day2_snapshot(
     if not source.exists():
         raise FileNotFoundError(source)
 
-    with source.open(newline="", encoding="utf-8", errors="ignore") as handle:
+    with source.open(newline="", encoding="utf-8-sig", errors="ignore") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
             raise ValueError("Source CSV has no headers")
         headers = list(reader.fieldnames)
         rows = [dict(row) for row in reader]
 
-    mapping = _map_headers(headers)
+    mapping = map_incident_headers(headers, rows)
     number_col = mapping.get("number")
     work_notes_col = mapping.get("work_notes")
     resolution_col = mapping.get("resolution_notes")
     if not number_col:
-        raise ValueError("Source CSV does not contain a recognisable incident number column")
+        raise ValueError(
+            "Source CSV does not contain a recognisable incident number column "
+            "and no column contains ServiceNow INCxxxx values"
+        )
     if work_notes_count and not work_notes_col:
         raise ValueError("Source CSV does not contain a recognisable Work Notes column")
     if resolution_count and not resolution_col:
@@ -121,7 +124,8 @@ def generate_day2_snapshot(
     total_changes = lifecycle_count + work_notes_count + resolution_count
     if total_changes > len(unique_numbers):
         raise ValueError(
-            f"Requested {total_changes} changed incidents but source has only {len(unique_numbers)} unique incidents"
+            f"Requested {total_changes} changed incidents but source has only "
+            f"{len(unique_numbers)} unique incidents"
         )
 
     rng = random.Random(seed)
@@ -144,7 +148,9 @@ def generate_day2_snapshot(
         if number in lifecycle:
             current = str(row.get(lifecycle_col) or "").strip()
             if lifecycle_key == "state":
-                row[lifecycle_col] = "On Hold" if current.lower() == "in progress" else "In Progress"
+                row[lifecycle_col] = (
+                    "On Hold" if current.lower() == "in progress" else "In Progress"
+                )
             elif lifecycle_key == "assigned_to":
                 row[lifecycle_col] = "Synthetic Day2 Technician"
             else:
@@ -152,12 +158,14 @@ def generate_day2_snapshot(
         elif number in work_notes:
             row[work_notes_col] = _append_marker(
                 str(row.get(work_notes_col) or ""),
-                "[Synthetic Day 2] Additional troubleshooting performed; symptom reproduced and evidence captured.",
+                "[Synthetic Day 2] Additional troubleshooting performed; "
+                "symptom reproduced and evidence captured.",
             )
         elif number in resolution:
             row[resolution_col] = _append_marker(
                 str(row.get(resolution_col) or ""),
-                "[Synthetic Day 2] Resolution evidence updated after validation of the successful fix.",
+                "[Synthetic Day 2] Resolution evidence updated after validation "
+                "of the successful fix.",
             )
 
     output.parent.mkdir(parents=True, exist_ok=True)
