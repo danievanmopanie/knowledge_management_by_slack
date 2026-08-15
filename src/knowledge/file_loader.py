@@ -22,7 +22,11 @@ class UploadValidationError(ValueError):
     """Raised when an uploaded file fails intake policy."""
 
 
-def validate_slack_file(file_info: dict[str, Any]) -> tuple[str, str]:
+def validate_slack_file(
+    file_info: dict[str, Any],
+    *,
+    max_bytes: int | None = None,
+) -> tuple[str, str]:
     """Validate upload metadata and return safe filename + extension."""
     name = str(file_info.get("name") or "").strip()
     if not name:
@@ -30,8 +34,9 @@ def validate_slack_file(file_info: dict[str, Any]) -> tuple[str, str]:
     suffix = Path(name).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise UploadValidationError(f"Unsupported file type: {suffix or '(none)'}")
+    limit = int(max_bytes if max_bytes is not None else settings.max_upload_bytes)
     size = file_info.get("size")
-    if size is not None and int(size) > settings.max_upload_bytes:
+    if size is not None and int(size) > limit:
         raise UploadValidationError("File exceeds the configured upload-size limit")
 
     file_id = str(file_info.get("id") or "file")
@@ -51,13 +56,20 @@ def _reject_html_masquerading_as_file(path: Path) -> None:
         )
 
 
-async def download_slack_file(file_info: dict[str, Any], target_dir: Path | None = None) -> Path:
+async def download_slack_file(
+    file_info: dict[str, Any],
+    target_dir: Path | None = None,
+    *,
+    max_bytes: int | None = None,
+    timeout_seconds: float = 60.0,
+) -> Path:
     """Stream a validated Slack file to the controlled staging directory."""
     url = file_info.get("url_private_download") or file_info.get("url_private")
     if not url:
         raise UploadValidationError("Slack file object has no downloadable URL")
 
-    safe_name, _ = validate_slack_file(file_info)
+    limit = int(max_bytes if max_bytes is not None else settings.max_upload_bytes)
+    safe_name, _ = validate_slack_file(file_info, max_bytes=limit)
     directory = Path(target_dir or settings.staging_path)
     directory.mkdir(parents=True, exist_ok=True)
     target_path = (directory / safe_name).resolve()
@@ -67,13 +79,13 @@ async def download_slack_file(file_info: dict[str, Any], target_dir: Path | None
     headers = {"Authorization": f"Bearer {settings.slack_bot_token}"}
     written = 0
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=float(timeout_seconds), follow_redirects=True) as client:
             async with client.stream("GET", str(url), headers=headers) as resp:
                 resp.raise_for_status()
                 with target_path.open("wb") as out:
                     async for chunk in resp.aiter_bytes():
                         written += len(chunk)
-                        if written > settings.max_upload_bytes:
+                        if written > limit:
                             raise UploadValidationError("File exceeds the configured upload-size limit")
                         out.write(chunk)
         _reject_html_masquerading_as_file(target_path)
