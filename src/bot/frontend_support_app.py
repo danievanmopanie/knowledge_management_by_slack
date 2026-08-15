@@ -37,6 +37,8 @@ register_frontend_interactivity(app)
 clarifications = ClarificationEngine()
 
 BUSY_TEXT = "Working on this — checking the thread and relevant support history…"
+STREAM_UPDATE_INTERVAL_SECONDS = 0.9
+STREAM_MIN_NEW_CHARS = 70
 
 
 def _normalise_message_event(event: dict) -> dict | None:
@@ -72,10 +74,16 @@ async def _text(event: dict) -> str:
     return transcript or typed
 
 
-async def _route_with_timing(query: str, context: RequestContext, *, lane: str) -> str:
+async def _route_with_timing(
+    query: str,
+    context: RequestContext,
+    *,
+    lane: str,
+    on_chunk=None,
+) -> str:
     started = time.perf_counter()
     try:
-        return await route_frontend_support(query, context)
+        return await route_frontend_support(query, context, on_chunk=on_chunk)
     finally:
         logger.info(
             "Frontend Support latency request_id=%s lane=%s total_seconds=%.3f",
@@ -119,6 +127,46 @@ async def _finish_progress(
         )
     except Exception:
         logger.exception("Could not update Frontend Support progress message")
+
+
+def _stream_callback(client, *, channel_id: str, message_ts: str | None):
+    """Return a throttled callback that streams accumulated LLM text into one Slack message."""
+    if not message_ts:
+        return None
+    last_update = 0.0
+    last_length = 0
+    lock = asyncio.Lock()
+
+    async def update(partial: str) -> None:
+        nonlocal last_update, last_length
+        if not partial:
+            return
+        now = time.monotonic()
+        enough_text = len(partial) - last_length >= STREAM_MIN_NEW_CHARS
+        enough_time = now - last_update >= STREAM_UPDATE_INTERVAL_SECONDS
+        first_meaningful = last_length == 0 and len(partial) >= 30
+        if not first_meaningful and not (enough_text and enough_time):
+            return
+        async with lock:
+            now = time.monotonic()
+            if last_length and (
+                len(partial) - last_length < STREAM_MIN_NEW_CHARS
+                or now - last_update < STREAM_UPDATE_INTERVAL_SECONDS
+            ):
+                return
+            try:
+                await client.chat_update(
+                    channel=channel_id,
+                    ts=message_ts,
+                    text=partial.rstrip() + "\n\n_Still working…_",
+                    blocks=[],
+                )
+                last_update = now
+                last_length = len(partial)
+            except Exception:
+                logger.exception("Could not stream Frontend Support partial response")
+
+    return update
 
 
 async def _private(event: dict, say, context: RequestContext, text: str) -> bool:
@@ -250,8 +298,18 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
         thread_ts=root_ts,
         roles=("general_support_fallback",),
     )
+    stream = _stream_callback(
+        client,
+        channel_id=context.channel_id,
+        message_ts=progress_ts,
+    )
     try:
-        response = await _route_with_timing(query, agent_context, lane="public")
+        response = await _route_with_timing(
+            query,
+            agent_context,
+            lane="public",
+            on_chunk=stream,
+        )
     except Exception:
         logger.exception("Frontend Support proactive response failed")
         response = safe_error_message(context.request_id)
@@ -367,8 +425,18 @@ async def handle_mention(event, say, client):
         thread_ts=root_ts or context.thread_ts,
         roles=("general_support_fallback",),
     )
+    stream = _stream_callback(
+        client,
+        channel_id=context.channel_id,
+        message_ts=progress_ts,
+    )
     try:
-        response = await _route_with_timing(query, mention_context, lane="mention")
+        response = await _route_with_timing(
+            query,
+            mention_context,
+            lane="mention",
+            on_chunk=stream,
+        )
     except Exception:
         logger.exception("Frontend Support mention failed")
         response = safe_error_message(context.request_id)
