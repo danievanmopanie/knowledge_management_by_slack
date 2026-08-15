@@ -62,6 +62,8 @@ class Settings(BaseSettings):
 
     # Upload / ingest policy
     max_upload_bytes: int = 25 * 1024 * 1024
+    create_knowledge_incident_upload_bytes: int = 100 * 1024 * 1024
+    create_knowledge_download_timeout_seconds: float = 180.0
     staging_retention_hours: int = 24
 
     # Backup policy
