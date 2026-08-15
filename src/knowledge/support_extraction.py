@@ -1,4 +1,4 @@
-"""Small-model extraction of structured support knowledge from incident free text."""
+"""LLM extraction of structured, reusable support knowledge from incident evidence."""
 
 from __future__ import annotations
 
@@ -25,6 +25,13 @@ from src.llm.client import get_support_extraction_llm
 from src.reporting.incidents import Incident
 
 logger = logging.getLogger(__name__)
+EXTRACTION_SCHEMA_VERSION = "v2"
+
+
+def extraction_model_key() -> str:
+    """Cache/persistence key changes when the extraction ontology or prompt changes."""
+    return f"{settings.support_extraction_model}|{EXTRACTION_SCHEMA_VERSION}"
+
 
 SYSTEM_PROMPT = """You extract reusable IT support knowledge from ServiceNow incident text.
 Return one JSON object only. Do not include markdown.
@@ -70,7 +77,7 @@ class SupportExtraction(BaseModel):
 
 
 class SupportExtractionStore:
-    """Content-hash cache so unchanged daily incident snapshots are not re-extracted."""
+    """Content-hash cache so unchanged snapshots are not re-extracted."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or settings.platform_db_path
@@ -96,7 +103,7 @@ class SupportExtractionStore:
                 SELECT extraction_json FROM support_incident_extractions
                 WHERE incident_number=? AND content_hash=? AND model=?
                 """,
-                (incident.number, digest, settings.support_extraction_model),
+                (incident.number, digest, extraction_model_key()),
             ).fetchone()
         if not row:
             return None
@@ -116,14 +123,26 @@ class SupportExtractionStore:
                 (
                     incident.number,
                     content_hash(incident),
-                    settings.support_extraction_model,
+                    extraction_model_key(),
                     extraction.model_dump_json(),
                 ),
             )
 
 
+def _journal_clip(value: str, limit: int) -> str:
+    """Keep both the beginning and end of long journals; closure clues often sit at the end."""
+    text = re.sub(r"\s+", " ", value or "").strip()
+    if len(text) <= limit:
+        return text
+    marker = " … [middle truncated] … "
+    available = max(0, limit - len(marker))
+    head = available // 2
+    tail = available - head
+    return text[:head].rstrip() + marker + text[-tail:].lstrip()
+
+
 def incident_extraction_text(incident: Incident) -> str:
-    """Build evidence-preserving text for extraction without huge journal payloads."""
+    """Build balanced evidence so resolution notes cannot be crowded out by journals."""
     parts = [
         f"Incident: {incident.number}",
         f"State: {incident.state}",
@@ -131,11 +150,12 @@ def incident_extraction_text(incident: Incident) -> str:
         f"Subcategory: {incident.subcategory}",
         f"Location: {incident.location}",
         f"Assigned to: {incident.assigned_to}",
-        f"Short description: {incident.short_description}",
-        f"Description: {incident.description}",
-        f"Work notes: {incident.work_notes}",
-        f"Comments: {incident.comments}",
-        f"Resolution notes: {incident.resolution_notes}",
+        f"Short description: {_journal_clip(incident.short_description, 1000)}",
+        f"Description: {_journal_clip(incident.description, 2400)}",
+        # Resolution is deliberately before potentially huge journals.
+        f"Resolution notes: {_journal_clip(incident.resolution_notes, 3000)}",
+        f"Work notes: {_journal_clip(incident.work_notes, 4200)}",
+        f"Comments: {_journal_clip(incident.comments, 1400)}",
     ]
     text = "\n".join(part for part in parts if not part.endswith(": "))
     return text[: settings.support_extraction_max_chars]
@@ -163,7 +183,7 @@ def _parse_json_object(value: str) -> dict:
 
 
 class SupportKnowledgeExtractor:
-    """Extract structured support facts with a local LLM, then seed the graph."""
+    """Extract structured support facts with a local LLM, then seed the rich graph."""
 
     def __init__(
         self,
@@ -326,7 +346,7 @@ class SupportKnowledgeExtractor:
         logger.info(
             "Starting support extraction: total=%d model='%s' concurrency=%d force=%s",
             total,
-            settings.support_extraction_model,
+            extraction_model_key(),
             worker_count,
             force,
         )
