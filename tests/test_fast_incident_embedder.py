@@ -46,3 +46,24 @@ def test_lifecycle_only_change_updates_metadata_without_embedding(monkeypatch):
     assert vector.deleted == []
     assert vector.metadata_updates
     assert saved["INC1"] == existing["INC1"]
+
+
+def test_embedder_can_keep_hash_state_isolated(tmp_path):
+    inc = Incident(
+        number="INC2",
+        short_description="Teams call drops",
+        description="Call disconnects after several minutes",
+    )
+    hash_path = tmp_path / "benchmark" / "incident_hashes.json"
+    vector = FakeVectorStore()
+    embedder = ingest.FastIncidentEmbedder(vector, hash_path=hash_path)
+
+    first = embedder.index([inc])
+    second = embedder.index([inc])
+
+    assert hash_path.exists()
+    assert first.incidents_embedded == 1
+    assert first.vector_documents > 0
+    assert second.incidents_embedded == 0
+    assert second.metadata_only_incidents == 1
+    assert second.vector_documents == 0
