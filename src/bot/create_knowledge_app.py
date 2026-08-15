@@ -7,6 +7,13 @@ import logging
 import os
 import re
 
+from dotenv import load_dotenv
+
+# This standalone runtime reads dedicated Slack credentials directly from the
+# process environment. Load .env before those reads so local CLI/systemd runs
+# behave consistently with the shared Pydantic Settings object.
+load_dotenv()
+
 # The shared Settings object and Slack file downloader use SLACK_* variables.
 # Map the dedicated app credentials before importing application modules so this
 # process is fully isolated from Frontend Support and the legacy multi-agent app.
