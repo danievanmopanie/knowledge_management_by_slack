@@ -28,8 +28,9 @@ from slack_bolt.async_app import AsyncApp  # noqa: E402
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler  # noqa: E402
 
 from src.agents.knowledge_ingest import KnowledgeIngestAgent  # noqa: E402
+from src.bot.blockkit import ids  # noqa: E402
 from src.bot.create_knowledge_progress import build_blocks, queued_blocks  # noqa: E402
-from src.bot.create_knowledge_staged import staged_incident_blocks  # noqa: E402
+from src.bot.create_knowledge_staged import staged_incident_blocks, staged_upload_blocks  # noqa: E402
 from src.core.config import settings  # noqa: E402
 from src.core.context import RequestContext  # noqa: E402
 from src.core.errors import safe_error_message  # noqa: E402
@@ -54,6 +55,18 @@ def _context(event: dict) -> RequestContext:
     )
 
 
+def _action_context(body: dict) -> RequestContext:
+    message = body.get("message") or {}
+    container = body.get("container") or {}
+    channel_id = (body.get("channel") or {}).get("id") or container.get("channel_id") or ""
+    message_ts = message.get("ts") or container.get("message_ts")
+    return RequestContext.from_slack(
+        channel_id=channel_id,
+        user_id=(body.get("user") or {}).get("id"),
+        thread_ts=message.get("thread_ts") or message_ts,
+    )
+
+
 def _clean_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text or "").strip()
 
@@ -61,6 +74,20 @@ def _clean_mention(text: str) -> str:
 def _job_id(value: str) -> str | None:
     match = _JOB_ID_RE.search(value or "")
     return match.group(0).upper() if match else None
+
+
+def _finished_stage_blocks(response: str, *, cancelled: bool = False) -> list[dict]:
+    return [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "🚫 Knowledge upload cancelled" if cancelled else "✅ Knowledge published",
+                "emoji": True,
+            },
+        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": response[:3000]}},
+    ]
 
 
 async def _handle(event: dict, say, *, strip_mention: bool = False) -> None:
@@ -80,16 +107,14 @@ async def _handle(event: dict, say, *, strip_mention: bool = False) -> None:
     lower = text.lower()
     response_job_id = _job_id(response)
 
-    # Before confirmation, show both the CSV profile and the build pipeline the user is approving.
-    if context.files and "ServiceNow Incident export detected" in response:
-        await say(
-            text=response,
-            blocks=staged_incident_blocks(response),
-            thread_ts=context.thread_ts,
-        )
+    # Staged uploads are button-first. Typed confirm/cancel commands remain a fallback.
+    if context.files and "*Upload staged — not yet searchable*" in response:
+        incident = "ServiceNow Incident export detected" in response
+        blocks = staged_incident_blocks(response) if incident else staged_upload_blocks(response)
+        await say(text=response, blocks=blocks, thread_ts=context.thread_ts)
         return
 
-    # Confirmation becomes the single persistent build card that the worker updates.
+    # Typed confirmation fallback: post a persistent build card for the worker to update.
     if lower.startswith("confirm ") and response_job_id:
         job = job_store.get(response_job_id)
         if job:
@@ -116,6 +141,71 @@ async def _handle(event: dict, say, *, strip_mention: bool = False) -> None:
             return
 
     await say(text=response, thread_ts=context.thread_ts)
+
+
+async def _stage_decision(ack, body, client, *, command: str) -> None:
+    """Route a Block Kit decision through the same agent contract as typed commands."""
+    await ack()
+    action = (body.get("actions") or [{}])[0]
+    stage_id = str(action.get("value") or "").strip()
+    context = _action_context(body)
+    message = body.get("message") or {}
+    message_ts = str(message.get("ts") or (body.get("container") or {}).get("message_ts") or "")
+
+    try:
+        response = await agent.handle(f"{command} {stage_id}", context)
+    except Exception:
+        logger.exception("Create Knowledge button action failed request_id=%s", context.request_id)
+        response = safe_error_message(context.request_id)
+
+    if not context.channel_id or not message_ts:
+        logger.warning("Create Knowledge action missing Slack message context stage_id=%s", stage_id)
+        return
+
+    if command == "confirm":
+        response_job_id = _job_id(response)
+        if response_job_id:
+            job = job_store.get(response_job_id)
+            if job:
+                await client.chat_update(
+                    channel=context.channel_id,
+                    ts=message_ts,
+                    text=response,
+                    blocks=queued_blocks(job),
+                )
+                job_store.set_progress_message(response_job_id, message_ts)
+                return
+        if response.startswith("Confirmed `"):
+            await client.chat_update(
+                channel=context.channel_id,
+                ts=message_ts,
+                text=response,
+                blocks=_finished_stage_blocks(response),
+            )
+            return
+    elif command == "cancel" and response.startswith("Cancelled `"):
+        await client.chat_update(
+            channel=context.channel_id,
+            ts=message_ts,
+            text=response,
+            blocks=_finished_stage_blocks(response, cancelled=True),
+        )
+        return
+
+    # Denials/errors should not destroy the actionable card for the authorized uploader.
+    user_id = (body.get("user") or {}).get("id")
+    if user_id:
+        await client.chat_postEphemeral(channel=context.channel_id, user=user_id, text=response)
+
+
+@app.action(ids.CREATE_KNOWLEDGE_CONFIRM_STAGE)
+async def confirm_stage_button(ack, body, client):
+    await _stage_decision(ack, body, client, command="confirm")
+
+
+@app.action(ids.CREATE_KNOWLEDGE_CANCEL_STAGE)
+async def cancel_stage_button(ack, body, client):
+    await _stage_decision(ack, body, client, command="cancel")
 
 
 @app.event("message")
