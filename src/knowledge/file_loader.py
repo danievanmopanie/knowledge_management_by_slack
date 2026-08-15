@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import csv
 import logging
+import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -19,6 +20,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | {".pdf", ".docx"} | IMAGE_EXTENSIONS
 SLACK_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 MAX_SLACK_FILE_REDIRECTS = 5
+_SLACK_TEAM_IN_FILE_PATH_RE = re.compile(r"/files-pri/(T[A-Z0-9]+)-F[A-Z0-9]+/", re.I)
 
 
 class UploadValidationError(ValueError):
@@ -66,6 +68,28 @@ def _trusted_slack_download_url(url: str) -> bool:
     return parsed.scheme.lower() == "https" and (host == "slack.com" or host.endswith(".slack.com"))
 
 
+def _slack_origin_team(file_info: dict[str, Any], url: str) -> str | None:
+    """Resolve the Slack workspace/team hint required by some private downloads."""
+    for key in ("source_team", "team", "team_id", "user_team"):
+        value = str(file_info.get(key) or "").strip().upper()
+        if re.fullmatch(r"T[A-Z0-9]+", value):
+            return value
+
+    match = _SLACK_TEAM_IN_FILE_PATH_RE.search(urlparse(url).path)
+    return match.group(1).upper() if match else None
+
+
+def _with_origin_team(url: str, file_info: dict[str, Any]) -> str:
+    """Add Slack's origin_team query hint without disturbing existing parameters."""
+    team_id = _slack_origin_team(file_info, url)
+    if not team_id:
+        return url
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.setdefault("origin_team", team_id)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
 async def download_slack_file(
     file_info: dict[str, Any],
     target_dir: Path | None = None,
@@ -75,17 +99,18 @@ async def download_slack_file(
 ) -> Path:
     """Stream a validated Slack file to the controlled staging directory.
 
-    Slack may redirect a private file from ``files.slack.com`` to the workspace's
-    ``*.slack.com`` host. HTTP clients intentionally strip Authorization on a
-    cross-host redirect, so redirects are followed manually and the bot bearer
-    token is preserved only while the destination remains a trusted Slack HTTPS
-    host.
+    Some Slack workspaces require the private download URL to carry an
+    ``origin_team`` query parameter. We derive that workspace ID from the file
+    object (or, as a safe fallback, the ``files-pri/T...-F...`` URL path) before
+    making the request. Any remaining redirects are followed manually so the bot
+    bearer token is preserved only while the destination remains a trusted Slack
+    HTTPS host.
     """
     url = file_info.get("url_private_download") or file_info.get("url_private")
     if not url:
         raise UploadValidationError("Slack file object has no downloadable URL")
 
-    current_url = str(url)
+    current_url = _with_origin_team(str(url), file_info)
     if not _trusted_slack_download_url(current_url):
         raise UploadValidationError("Slack file URL is not on a trusted Slack host")
 
