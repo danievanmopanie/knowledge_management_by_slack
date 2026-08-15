@@ -1,6 +1,8 @@
 """Content-hash deduplication for daily ServiceNow incident CSV uploads.
 
-Avoids re-embedding rows that have not changed since the last index.
+Avoids re-embedding rows when the semantic incident content has not changed.
+Volatile lifecycle facts such as state and assignment live in metadata/temporal
+graphs and therefore do not need a new vector.
 """
 
 from __future__ import annotations
@@ -16,23 +18,17 @@ from src.reporting.incidents import Incident
 
 logger = logging.getLogger(__name__)
 
-# Increment when the embedding/index representation changes. Including this in
-# the hash forces one controlled rebuild after an indexing schema migration,
-# then normal unchanged-row skipping resumes.
-INCIDENT_EMBEDDING_SCHEMA_VERSION = 3
+# Schema 4 removes volatile state/assignment facts from the embedding text/hash.
+INCIDENT_EMBEDDING_SCHEMA_VERSION = 4
 
-# Fields that drive the embedding / meaning of an incident.
-# If any of these change, we re-embed. Purely operational churn is ignored
-# only when the listed fields are identical.
+# Fields that genuinely change semantic retrieval meaning. Operational lifecycle
+# churn is maintained separately in Chroma metadata + the temporal graph.
 HASH_FIELDS = (
     "short_description",
     "description",
     "work_notes",
     "comments",
     "resolution_notes",
-    "state",
-    "assignment_group",
-    "assigned_to",
     "category",
     "subcategory",
     "location",
@@ -44,14 +40,13 @@ def _default_hash_path() -> Path:
 
 
 def content_hash(inc: Incident) -> str:
-    """Stable SHA-256 of the fields and index schema that matter for embedding."""
+    """Stable SHA-256 of semantic fields and embedding schema."""
     parts: list[str] = [
         f"embedding_schema={INCIDENT_EMBEDDING_SCHEMA_VERSION}",
         f"number={inc.number}",
     ]
     for name in HASH_FIELDS:
         value = getattr(inc, name, "") or ""
-        # Normalise whitespace so trivial export differences do not force re-embed
         normalised = " ".join(str(value).split())
         parts.append(f"{name}={normalised}")
     payload = "\n".join(parts).encode("utf-8")
@@ -75,19 +70,14 @@ def load_hash_index(path: Path | None = None) -> dict[str, str]:
 def save_hash_index(index: dict[str, str], path: Path | None = None) -> None:
     path = path or _default_hash_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(index, separators=(",", ":"), sort_keys=True), encoding="utf-8")
 
 
 def filter_changed_incidents(
     incidents: Iterable[Incident],
     existing: dict[str, str] | None = None,
 ) -> tuple[list[Incident], list[Incident], dict[str, str]]:
-    """
-    Split incidents into changed (need embed) vs unchanged (skip).
-
-    Returns:
-      changed, unchanged, updated_index
-    """
+    """Split incidents into semantic-vector changed vs unchanged."""
     index = dict(existing if existing is not None else load_hash_index())
     changed: list[Incident] = []
     unchanged: list[Incident] = []
@@ -102,7 +92,7 @@ def filter_changed_incidents(
             index[inc.number] = h
 
     logger.info(
-        "Incident dedupe: %s changed, %s unchanged (skip re-embed)",
+        "Incident semantic dedupe: %s need vectors, %s metadata-only/unchanged",
         len(changed),
         len(unchanged),
     )
