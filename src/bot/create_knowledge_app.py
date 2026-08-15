@@ -22,6 +22,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler 
 
 from src.agents.knowledge_ingest import KnowledgeIngestAgent  # noqa: E402
 from src.bot.create_knowledge_progress import build_blocks, queued_blocks  # noqa: E402
+from src.bot.create_knowledge_staged import staged_incident_blocks  # noqa: E402
 from src.core.config import settings  # noqa: E402
 from src.core.context import RequestContext  # noqa: E402
 from src.core.errors import safe_error_message  # noqa: E402
@@ -71,6 +72,15 @@ async def _handle(event: dict, say, *, strip_mention: bool = False) -> None:
 
     lower = text.lower()
     response_job_id = _job_id(response)
+
+    # Before confirmation, show both the CSV profile and the build pipeline the user is approving.
+    if context.files and "ServiceNow Incident export detected" in response:
+        await say(
+            text=response,
+            blocks=staged_incident_blocks(response),
+            thread_ts=context.thread_ts,
+        )
+        return
 
     # Confirmation becomes the single persistent build card that the worker updates.
     if lower.startswith("confirm ") and response_job_id:
