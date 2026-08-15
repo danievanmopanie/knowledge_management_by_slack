@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from slack_bolt.async_app import AsyncApp
 
@@ -108,7 +109,9 @@ async def _maybe_create_knowledge_gap(*, client, channel_id: str, thread_ts: str
 
 
 def register(app: AsyncApp) -> None:
-    @app.action(CLARIFICATION_ACTION)
+    clarification_action_pattern = re.compile(rf"^{re.escape(CLARIFICATION_ACTION)}_\d+$")
+
+    @app.action(clarification_action_pattern)
     async def clarification_selected(ack, body, client):
         await ack()
         action = body["actions"][0]
