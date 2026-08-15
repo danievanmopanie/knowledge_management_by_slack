@@ -30,6 +30,8 @@ from src.knowledge.support_extraction import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+TERMINAL_STATES = {"resolved", "closed", "cancelled", "canceled"}
+CANDIDATE_POOL_MULTIPLIER = 8
 
 
 @dataclass
@@ -41,6 +43,47 @@ class EnrichmentBatchResult:
     patterns: int = 0
     remaining: int = 0
     elapsed_seconds: float = 0.0
+
+
+def _knowledge_value(candidate: EnrichmentCandidate) -> tuple[int, int, int, int, str]:
+    """Rank pending records so useful resolved knowledge is built first.
+
+    This is scheduling only; it does not decide whether an extracted fact is true.
+    Thin incidents remain pending and will still be processed after richer cases.
+    """
+    inc = candidate.incident
+    resolution_len = len((inc.resolution_notes or "").strip())
+    work_len = len((inc.work_notes or "").strip())
+    description_len = len((inc.description or "").strip())
+    terminal = int((inc.state or "").strip().lower() in TERMINAL_STATES)
+    return (
+        terminal,
+        int(resolution_len >= 40),
+        int(work_len >= 120),
+        int(description_len >= 80),
+        inc.number or "",
+    )
+
+
+def _select_candidates(
+    store: OrganisationalKnowledgeStore,
+    *,
+    limit: int,
+    model_key: str,
+) -> list[EnrichmentCandidate]:
+    pool_limit = max(limit, limit * CANDIDATE_POOL_MULTIPLIER)
+    pool = store.pending(limit=pool_limit, model=model_key)
+    # Descending booleans/quality dimensions, deterministic incident number tie-break.
+    return sorted(
+        pool,
+        key=lambda candidate: (
+            -_knowledge_value(candidate)[0],
+            -_knowledge_value(candidate)[1],
+            -_knowledge_value(candidate)[2],
+            -_knowledge_value(candidate)[3],
+            _knowledge_value(candidate)[4],
+        ),
+    )[:limit]
 
 
 async def _extract_batch(
@@ -73,8 +116,8 @@ async def run_once(
     extractor = extractor or SupportKnowledgeExtractor()
     index = index or OrganisationalKnowledgeIndex()
     model_key = extraction_model_key()
-    limit = batch_size or settings.knowledge_enrichment_batch_size
-    candidates = store.pending(limit=max(1, int(limit)), model=model_key)
+    limit = max(1, int(batch_size or settings.knowledge_enrichment_batch_size))
+    candidates = _select_candidates(store, limit=limit, model_key=model_key)
     result = EnrichmentBatchResult(selected=len(candidates))
     if not candidates:
         result.remaining = store.pending_count(model=model_key)
