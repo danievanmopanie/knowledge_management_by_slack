@@ -9,6 +9,7 @@ from typing import Protocol
 # collaboration classifier does not recognise a technical problem. The
 # collaboration service remains the source of truth for thread state.
 SUPPORT_TERMS = (
+    # Common device/peripheral language.
     "bluetooth",
     "headset",
     "headphones",
@@ -22,6 +23,32 @@ SUPPORT_TERMS = (
     "webcam",
     "microphone",
     "speaker",
+    # High-signal endpoint failure language technicians often use tersely.
+    "bsod",
+    "blue screen",
+    "blue-screen",
+    "stop code",
+    "crashed",
+    "crash",
+    "frozen",
+    "freeze",
+    "hung",
+    "black screen",
+    "blank screen",
+    "no display",
+    "won't boot",
+    "not booting",
+    "boot loop",
+    "reboot loop",
+    "keeps restarting",
+    "won't start",
+    "not starting",
+    "won't open",
+    "not opening",
+    "won't launch",
+    "not launching",
+    "not responding",
+    # Connectivity and generic failure language.
     "connect",
     "connecting",
     "connection",
@@ -30,6 +57,7 @@ SUPPORT_TERMS = (
     "pair",
     "pairing",
     "paired",
+    "offline",
     "not working",
     "won't",
     "isn't",
@@ -57,7 +85,12 @@ def clean_mention_text(text: str) -> str:
 
 
 def looks_like_support(text: str) -> bool:
-    """Return True for common natural-language field-support signals."""
+    """Return True for common natural-language field-support signals.
+
+    This deliberately favors recall over precision inside #frontend-support:
+    false positives are less costly than forcing technicians to learn trigger
+    words or @mention the bot for obvious support problems.
+    """
     lowered = (text or "").lower()
     return any(term in lowered for term in SUPPORT_TERMS)
 
