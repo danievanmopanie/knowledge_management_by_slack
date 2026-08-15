@@ -1,15 +1,15 @@
-"""Three-layer evidence assembly for the collaborative frontend-support agent.
+"""Evidence assembly for collaborative Frontend Support.
 
-Layers:
-1. Governed knowledge retrieval (articles, notes, uploaded documents)
-2. Historical incident vector retrieval used only to *locate* relevant incidents
-3. Typed support graph context (people, symptoms, actions, resolutions)
+Retrieval lanes:
+1. Exact incident lookup -> deterministic case file + enriched incident knowledge.
+2. Organisational pattern retrieval -> enriched symptom index selects cases, then
+   deterministic aggregation produces repeated resolutions/actions/root causes.
+3. Raw historical incident vectors -> fallback candidate locator, hydrated back
+   into complete case files.
+4. Governed knowledge -> articles, notes and approved documents.
 
-When an exact incident lookup is requested, vector similarity is bypassed and the
-full deterministic temporal case file is loaded directly. For semantic searches,
-selected incident IDs are hydrated back into complete case evidence before the
-LLM sees them, so resolution/work-note knowledge is not lost just because the
-matching embedding came from the problem field.
+Embeddings locate evidence. They never become the source of truth for incident
+facts or organisational frequency claims.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from src.core.config import settings
 from src.core.context import RequestContext
 from src.knowledge.incident_casefile import (
     IncidentCaseFileStore,
@@ -27,12 +28,13 @@ from src.knowledge.incident_casefile import (
     looks_like_exact_incident_lookup,
 )
 from src.knowledge.incident_rag import IncidentRAG
+from src.knowledge.organisational_knowledge import OrganisationalKnowledgeRetriever
 from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery
 from src.knowledge.retriever import HybridRetriever
 from src.knowledge.support_graph import SupportKnowledgeGraph
 
 CONVERSATIONAL_LIMIT = 3
-PROMPT_CONTEXT_MAX_CHARS = 9000
+PROMPT_CONTEXT_MAX_CHARS = 22000
 INCIDENT_CONTEXT_MAX_CHARS = 7600
 EXACT_INCIDENT_CONTEXT_MAX_CHARS = 14000
 EVIDENCE_CACHE_TTL_SECONDS = 300
@@ -44,6 +46,7 @@ class SupportEvidencePackage:
     query: str
     governed_candidates: list[RetrievalCandidate] = field(default_factory=list)
     governed_context: str = ""
+    organisational_context: str = ""
     incident_context: str = ""
     graph_context: str = ""
     incident_sources: set[str] = field(default_factory=set)
@@ -61,6 +64,7 @@ class SupportEvidencePackage:
     def has_evidence(self) -> bool:
         return bool(
             self.exact_incident_context
+            or self.organisational_context
             or self.governed_context
             or self.incident_context
             or self.graph_context
@@ -70,6 +74,8 @@ class SupportEvidencePackage:
         parts: list[str] = []
         if self.exact_incident_context:
             parts.extend([self.exact_incident_context, "---"])
+        if self.organisational_context:
+            parts.extend([self.organisational_context, "---"])
         if self.incident_context:
             parts.extend([self.incident_context, "---"])
         if self.graph_context:
@@ -101,12 +107,12 @@ def _incident_context_from_casefiles(
     *,
     max_chars: int = INCIDENT_CONTEXT_MAX_CHARS,
 ) -> str:
-    """Hydrate semantically-selected incident IDs into complete case evidence."""
+    """Hydrate semantically-selected raw incident IDs into complete case evidence."""
     if not docs:
         return ""
     parts = [
-        "### Similar past incidents — full case evidence",
-        "Vector similarity selected these incident IDs; the details below come from the deterministic incident store.",
+        "### Raw historical case evidence",
+        "Raw vector similarity selected these incident IDs; details come from the deterministic incident store.",
     ]
     for i, doc in enumerate(docs, 1):
         meta = doc.metadata or {}
@@ -123,8 +129,6 @@ def _incident_context_from_casefiles(
             parts.extend([f"[{i}] {rendered}", ""])
             continue
 
-        # Compatibility fallback for an old vector hit that has not yet landed
-        # in the temporal store.
         header = (
             f"[{i}] {number or '?'} | {meta.get('state', '')} "
             f"| group={meta.get('assignment_group', '')} | loc={meta.get('location', '')}"
@@ -133,12 +137,12 @@ def _incident_context_from_casefiles(
 
     text = "\n".join(parts).strip()
     if len(text) > max_chars:
-        return text[:max_chars] + "\n\n[Incident case evidence truncated]"
+        return text[:max_chars] + "\n\n[Raw incident case evidence truncated]"
     return text
 
 
 class SupportEvidenceService:
-    """Build one compact evidence package for a frontend-support turn."""
+    """Build one evidence package for a Frontend Support turn."""
 
     def __init__(
         self,
@@ -146,11 +150,13 @@ class SupportEvidenceService:
         incident_rag: IncidentRAG | None = None,
         support_graph: SupportKnowledgeGraph | None = None,
         casefiles: IncidentCaseFileStore | None = None,
+        organisational: OrganisationalKnowledgeRetriever | None = None,
     ):
         self.retriever = retriever or HybridRetriever()
         self.incident_rag = incident_rag or IncidentRAG()
         self.support_graph = support_graph or SupportKnowledgeGraph(self.incident_rag.graph_store)
         self.casefiles = casefiles or IncidentCaseFileStore(graph_store=self.incident_rag.graph_store)
+        self.organisational = organisational or OrganisationalKnowledgeRetriever()
         self._cache: dict[tuple, tuple[float, SupportEvidencePackage]] = {}
         self._cache_lock = threading.RLock()
 
@@ -181,21 +187,29 @@ class SupportEvidenceService:
         query: str,
         numbers: list[str],
     ) -> SupportEvidencePackage:
-        contexts: list[str] = []
+        raw_contexts: list[str] = []
+        enriched_contexts: list[str] = []
         missing: list[str] = []
         sources: set[str] = set()
         for number in numbers[:3]:
             case = self.casefiles.get(number)
-            if case is None:
+            enriched = self.organisational.exact_context(number)
+            if case is None and not enriched:
                 missing.append(number)
                 continue
-            contexts.append(self.casefiles.render_exact(case, max_chars=EXACT_INCIDENT_CONTEXT_MAX_CHARS))
+            if case is not None:
+                raw_contexts.append(
+                    self.casefiles.render_exact(case, max_chars=EXACT_INCIDENT_CONTEXT_MAX_CHARS)
+                )
+            if enriched:
+                enriched_contexts.append(enriched)
             sources.add(f"incident:{number}")
 
         return SupportEvidencePackage(
             query=query,
             exact_incident_numbers=tuple(numbers[:3]),
-            exact_incident_context="\n\n---\n\n".join(contexts),
+            exact_incident_context="\n\n---\n\n".join(raw_contexts),
+            organisational_context="\n\n---\n\n".join(enriched_contexts),
             exact_incident_missing=tuple(missing),
             incident_sources=sources,
         )
@@ -221,11 +235,20 @@ class SupportEvidenceService:
 
         retrieval_query = RetrievalQuery(text=query, context=context, limit=limit, graph_depth=1)
 
-        # Governed retrieval and semantic incident-ID selection are independent.
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="frontend-evidence") as pool:
+        # Governed retrieval, enriched organisational retrieval and raw incident
+        # selection are independent. The organisational lane is primary for
+        # repeated support knowledge; raw incidents remain useful fallback evidence.
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="frontend-evidence") as pool:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
+            organisational_future = pool.submit(
+                self.organisational.collective_context,
+                query,
+                candidate_k=settings.knowledge_pattern_candidate_k,
+                max_incidents=settings.knowledge_pattern_max_incidents,
+            )
             incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
             governed = governed_future.result()
+            organisational_context = organisational_future.result()
             incident_docs = incident_future.result()
 
         incident_sources: set[str] = set()
@@ -253,12 +276,13 @@ class SupportEvidenceService:
 
         graph_context = ""
         if graph_lines:
-            graph_context = "### Collective support graph\n" + "\n".join(graph_lines[:18])
+            graph_context = "### Structured support graph\n" + "\n".join(graph_lines[:24])
 
         package = SupportEvidencePackage(
             query=query,
             governed_candidates=governed.candidates,
             governed_context=governed.to_context_string() if governed.should_answer else "",
+            organisational_context=organisational_context,
             incident_context=_incident_context_from_casefiles(incident_docs, self.casefiles),
             graph_context=graph_context,
             incident_sources=incident_sources,
