@@ -152,6 +152,12 @@ async def handle_mention(event, say):
     await say(text=response, thread_ts=context.thread_ts)
 
 
+async def _run_socket_mode() -> None:
+    """Construct the Socket Mode client only after an asyncio loop is running."""
+    handler = AsyncSocketModeHandler(app, APP_TOKEN)
+    await handler.start_async()
+
+
 def start() -> None:
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -167,7 +173,7 @@ def start() -> None:
     if missing:
         raise RuntimeError("Frontend Support configuration missing: " + ", ".join(missing))
     logger.info("Starting standalone Frontend Support agent for %s", settings.channel_frontend_support)
-    asyncio.run(AsyncSocketModeHandler(app, APP_TOKEN).start_async())
+    asyncio.run(_run_socket_mode())
 
 
 if __name__ == "__main__":
