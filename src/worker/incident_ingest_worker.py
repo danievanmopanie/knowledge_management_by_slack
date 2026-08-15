@@ -58,10 +58,15 @@ def run_once(store: IncidentIngestJobStore | None = None) -> bool:
     _post(
         client,
         job,
-        f"*Incident import {job_id} started* — building temporal deltas, graph relationships and focused vectors. No LLM extraction is used in this fast path.",
+        f"*Incident import {job_id} started* — building temporal deltas, graph relationships and focused vectors. "
+        "This upload is treated as a partial/historical snapshot, so incidents absent from the file are not marked missing. "
+        "No LLM extraction is used in this fast path.",
     )
     try:
-        result = FastTemporalIncidentIngestor().ingest_csv(Path(job["file_path"]))
+        result = FastTemporalIncidentIngestor().ingest_csv(
+            Path(job["file_path"]),
+            complete_snapshot=False,
+        )
         metrics = result.as_dict()
         store.mark_succeeded(job_id, metrics)
         _post(client, job, _result_text(job_id, metrics))
