@@ -49,6 +49,10 @@ SUPPORT_TERMS = (
     "not launching",
     "not responding",
     # Connectivity and generic failure language.
+    "timeout",
+    "timed out",
+    "timing out",
+    "times out",
     "connect",
     "connecting",
     "connection",
@@ -102,11 +106,7 @@ def compose_thread_query(
     thread_ts: str,
     latest_text: str = "",
 ) -> str:
-    """Resolve terse/anaphoric requests against the stored collaborative thread.
-
-    A message such as "help with this" is meaningless in isolation. The agent
-    must reason over the root issue and all stored technician contributions.
-    """
+    """Resolve terse/anaphoric requests against the stored collaborative thread."""
     try:
         query = service.build_agent_query(channel_id, thread_ts)
     except KeyError:
