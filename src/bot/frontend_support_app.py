@@ -11,6 +11,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from src.agents.frontend_support.agent import INSUFFICIENT_EVIDENCE_RESPONSE
+from src.agents.frontend_support.clarification import ClarificationEngine
 from src.agents.frontend_support.collaboration import MessageKind
 from src.agents.frontend_support.conversation import (
     clean_mention_text,
@@ -33,15 +34,11 @@ APP_TOKEN = os.getenv("FRONTEND_SUPPORT_SLACK_APP_TOKEN", "").strip()
 
 app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 register_frontend_interactivity(app)
+clarifications = ClarificationEngine()
 
 
 def _normalise_message_event(event: dict) -> dict | None:
-    """Return the effective human message for normal and edited Slack events.
-
-    Slack wraps edits in a ``message_changed`` envelope. Treat the edited
-    message as a fresh observation so a technician can clarify a terse support
-    post without needing to @mention the bot afterwards.
-    """
+    """Return the effective human message for normal and edited Slack events."""
     subtype = event.get("subtype")
     if subtype == "message_deleted" or subtype == "bot_message":
         return None
@@ -119,6 +116,12 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
         return True
 
     service = get_service()
+    clarification_answer = None
+    if event.get("thread_ts"):
+        clarification_answer = clarifications.store.consume_free_text(
+            context.channel_id, root_ts, text
+        )
+
     decision = service.observe(
         channel_id=context.channel_id,
         message_ts=message_ts,
@@ -128,11 +131,12 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
     )
 
     logger.info(
-        "Frontend Support decision request_id=%s kind=%s invoke=%s support_fallback=%s thread=%s",
+        "Frontend Support decision request_id=%s kind=%s invoke=%s support_fallback=%s clarification=%s thread=%s",
         context.request_id,
         decision.kind,
         decision.invoke_agent,
         looks_like_support(text),
+        bool(clarification_answer),
         root_ts,
     )
 
@@ -160,10 +164,27 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
         )
         return True
 
-    should_invoke = decision.invoke_agent or (
+    should_invoke = decision.invoke_agent or bool(clarification_answer) or (
         not decision.assistant_suppressed and looks_like_support(text)
     )
     if not should_invoke:
+        return True
+
+    query = compose_thread_query(
+        service,
+        channel_id=context.channel_id,
+        thread_ts=root_ts,
+        latest_text=decision.agent_query or text,
+    )
+
+    question = clarifications.next_question(context.channel_id, root_ts, query)
+    if question is not None:
+        round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
+        await say(
+            text=f"I need one detail before I search the incident history (clarification {round_number}/3): {question.question}",
+            blocks=clarifications.blocks(question, context.channel_id, root_ts),
+            thread_ts=root_ts,
+        )
         return True
 
     agent_context = RequestContext.from_slack(
@@ -171,12 +192,6 @@ async def _public(event: dict, say, context: RequestContext, text: str) -> bool:
         user_id=context.user_id,
         thread_ts=root_ts,
         roles=("general_support_fallback",),
-    )
-    query = compose_thread_query(
-        service,
-        channel_id=context.channel_id,
-        thread_ts=root_ts,
-        latest_text=decision.agent_query or text,
     )
     try:
         response = await _route_with_timing(query, agent_context, lane="public")
@@ -250,6 +265,16 @@ async def handle_mention(event, say):
     else:
         query = cleaned or event.get("text", "")
 
+    question = clarifications.next_question(context.channel_id, root_ts, query) if root_ts else None
+    if question is not None:
+        round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
+        await say(
+            text=f"I need one detail before I search the incident history (clarification {round_number}/3): {question.question}",
+            blocks=clarifications.blocks(question, context.channel_id, root_ts),
+            thread_ts=root_ts,
+        )
+        return
+
     mention_context = RequestContext.from_slack(
         channel_id=context.channel_id,
         user_id=context.user_id,
@@ -265,7 +290,6 @@ async def handle_mention(event, say):
 
 
 async def _run_socket_mode() -> None:
-    """Construct the Socket Mode client only after an asyncio loop is running."""
     handler = AsyncSocketModeHandler(app, APP_TOKEN)
     await handler.start_async()
 
