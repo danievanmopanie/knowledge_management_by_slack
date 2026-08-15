@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     support_extraction_max_chars: int = 12000
     knowledge_enrichment_batch_size: int = 12
     knowledge_enrichment_poll_seconds: float = 5.0
+    knowledge_min_extraction_confidence: float = 0.60
     knowledge_min_similarity: float = 0.42
     knowledge_pattern_candidate_k: int = 40
     knowledge_pattern_max_incidents: int = 24
