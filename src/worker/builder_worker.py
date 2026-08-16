@@ -13,10 +13,12 @@ from src.core.config import settings
 from src.integrations.github_client import (
     GitHubClientError,
     create_pull_request,
+    get_pull_request,
     pull_request_is_open,
 )
 from src.reporting.publisher import publish_report_to_channel
 from src.worker.aider_runner import AiderResult, run_aider
+from src.worker.terminal_harness import run_terminal_harness
 from src.worker.validation import ValidationResult, run_validation
 from src.worker.workspace import (
     WorkspaceError,
@@ -53,54 +55,149 @@ def _open_continuation(task: dict[str, Any]) -> tuple[str | None, str | None]:
         if pull_request_is_open(pr_url):
             return branch, pr_url
     except GitHubClientError:
-        # Continuation is an ergonomic enhancement, never a reason to block a
-        # new Builder turn. If GitHub cannot prove the PR is open, start fresh.
         logger.exception("Could not verify continuation PR for task %s", task["task_id"])
     return None, None
+
+
+def _resolve_target(
+    task: dict[str, Any],
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """Resolve explicit external PR handoff first, then implicit thread continuation."""
+    if task.get("handoff_pr_number"):
+        pr = get_pull_request(task["handoff_pr_number"])
+        return pr["head_ref"], pr["html_url"], pr
+    branch, pr_url = _open_continuation(task)
+    return branch, pr_url, None
+
+
+def _goal_with_pr_context(goal: str, pr: dict[str, Any] | None) -> str:
+    if not pr:
+        return goal
+    body = str(pr.get("body") or "").strip()
+    if len(body) > 8000:
+        body = body[:8000] + "\n[PR body truncated]"
+    return (
+        f"{goal}\n\n"
+        "Existing GitHub pull request handoff:\n"
+        f"PR: #{pr['number']}\n"
+        f"URL: {pr['html_url']}\n"
+        f"Title: {pr['title']}\n"
+        f"Head branch: {pr['head_ref']}\n"
+        f"Base branch: {pr['base_ref']}\n"
+        f"PR body:\n{body or '(empty)'}\n\n"
+        "You are already checked out on this PR's head branch on the GX10. "
+        "Inspect the actual branch and execute meaningful local checks. Repair this same branch "
+        "when evidence shows a problem; do not create a replacement PR."
+    )
+
+
+def _execute_primary_harness(*, goal: str, worktree: Worktree) -> str:
+    """Run the real terminal tool loop, falling back to legacy Aider only if disabled."""
+    if settings.builder_terminal_enabled:
+        result = run_terminal_harness(goal=goal, worktree_path=worktree.path)
+        if not result.success:
+            raise RuntimeError(result.error or "Builder terminal harness failed.")
+        logger.info(
+            "Builder terminal harness completed task=%s tool_calls=%s",
+            worktree.task_id,
+            result.tool_calls,
+        )
+        return result.answer
+
+    initial = run_aider(goal=goal, worktree_path=worktree.path)
+    _require_aider_success(initial, phase="initial turn")
+    return _aider_answer(initial)
 
 
 def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
     task_id = task["task_id"]
     logger.info("Claimed builder turn %s", task_id)
     worktree: Worktree | None = None
-    continuation_branch, continuation_pr_url = _open_continuation(task)
+    target_branch: str | None = None
+    target_pr_url: str | None = None
+    handoff_pr: dict[str, Any] | None = None
     try:
-        worktree = prepare_worktree(task_id, continuation_branch=continuation_branch)
+        target_branch, target_pr_url, handoff_pr = _resolve_target(task)
+        explicit_handoff = handoff_pr is not None
+        worktree = prepare_worktree(task_id, continuation_branch=target_branch)
         store.mark_running(task_id, branch_name=worktree.branch_name)
         _publish_status(
             store,
             task,
             status="running",
             summary=(
-                "I’m continuing the open pull request from this Slack thread on the device."
-                if continuation_pr_url
-                else "I’m inspecting the repository and working through your request on the device."
+                f"I’ve checked out PR #{handoff_pr['number']} on the GX10 and I’m executing it locally."
+                if explicit_handoff
+                else (
+                    "I’m continuing the open pull request from this Slack thread on the GX10."
+                    if target_pr_url
+                    else "I’m inspecting the repository and executing your request on the GX10."
+                )
             ),
             branch_name=worktree.branch_name,
-            pr_url=continuation_pr_url,
+            pr_url=target_pr_url,
         )
 
-        initial = run_aider(goal=task["goal"], worktree_path=worktree.path)
-        _require_aider_success(initial, phase="initial turn")
+        goal = _goal_with_pr_context(task["goal"], handoff_pr)
+        answer = _execute_primary_harness(goal=goal, worktree=worktree)
+        changed = has_repository_changes(worktree)
 
-        # Natural harness behaviour: questions and inspections do not manufacture
-        # a PR. If Aider made no repository change, return its answer as normal
-        # conversation and finish the turn. Preserve an existing PR association
-        # so later replies in the same Slack thread can keep using that session.
-        if not has_repository_changes(worktree):
-            answer = _aider_answer(initial)
+        # Explicit PR handoff is a proof request, not merely a conversational
+        # inspection. Always run the deterministic repository gate on the GX10,
+        # even when the PR needed no edits during the model-driven tool loop.
+        if explicit_handoff:
+            validation, repair_attempts = _validate_and_repair(store, task, worktree)
+            if not validation.success and settings.builder_require_tests_pass:
+                raise RuntimeError(_validation_failure_message(validation, repair_attempts))
+
+            changed = has_repository_changes(worktree)
+            if changed:
+                latest_request = _latest_request(task["goal"])
+                commit_pending_changes(
+                    worktree,
+                    message=f"Builder Agent: {latest_request[:72]}",
+                )
+                push_branch(worktree)
+
+            store.mark_succeeded(task_id, pr_url=target_pr_url, result_text=answer)
+            _publish_status(
+                store,
+                task,
+                status="completed",
+                summary=(
+                    "The handed-off PR is green on the GX10 and any repairs were pushed back "
+                    "to the same pull request."
+                    if changed
+                    else "The handed-off PR is green on the GX10; no repair commit was required."
+                ),
+                branch_name=worktree.branch_name,
+                validation="✅ passed" if validation.success else "not required",
+                repair_attempt=str(repair_attempts),
+                pr_url=target_pr_url,
+            )
+            if answer:
+                publish_report_to_channel(
+                    answer,
+                    channel_id=task["channel_id"],
+                    thread_ts=task.get("thread_ts"),
+                )
+            return
+
+        # Natural harness behaviour for ordinary conversation: questions and
+        # runtime inspections do not manufacture a PR when no files changed.
+        if not changed:
             store.mark_succeeded(
                 task_id,
-                pr_url=continuation_pr_url,
+                pr_url=target_pr_url,
                 result_text=answer,
             )
             _publish_status(
                 store,
                 task,
                 status="answered",
-                summary="I inspected the repository and didn’t need to change files for this turn.",
+                summary="I inspected/executed on the GX10 and didn’t need to change files for this turn.",
                 branch_name=worktree.branch_name,
-                pr_url=continuation_pr_url,
+                pr_url=target_pr_url,
             )
             publish_report_to_channel(
                 answer,
@@ -113,16 +210,13 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
         if not validation.success and settings.builder_require_tests_pass:
             raise RuntimeError(_validation_failure_message(validation, repair_attempts))
 
-        # Aider normally commits automatically. This catches any legitimate
-        # edits left dirty after a repair so the published branch matches what
-        # was actually validated.
         latest_request = _latest_request(task["goal"])
         commit_pending_changes(worktree, message=f"Builder Agent: {latest_request[:72]}")
         push_branch(worktree)
         validation_label = "passed" if validation.success else "not required"
 
-        if continuation_pr_url:
-            pr_url = continuation_pr_url
+        if target_pr_url:
+            pr_url = target_pr_url
             completion_summary = (
                 "Your follow-up is locally green and has been pushed to the existing pull request."
             )
@@ -147,7 +241,7 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
                 "The repository change is locally green and has been published for review."
             )
 
-        store.mark_succeeded(task_id, pr_url=pr_url)
+        store.mark_succeeded(task_id, pr_url=pr_url, result_text=answer)
         _publish_status(
             store,
             task,
@@ -158,6 +252,12 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             repair_attempt=str(repair_attempts),
             pr_url=pr_url,
         )
+        if answer:
+            publish_report_to_channel(
+                answer,
+                channel_id=task["channel_id"],
+                thread_ts=task.get("thread_ts"),
+            )
 
     except (WorkspaceError, GitHubClientError, RuntimeError) as exc:
         logger.exception("Builder turn %s failed", task_id)
@@ -167,8 +267,8 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             task,
             status="failed",
             summary=f"I stopped without publishing the change. {str(exc)[:1200]}",
-            branch_name=worktree.branch_name if worktree else None,
-            pr_url=continuation_pr_url,
+            branch_name=worktree.branch_name if worktree else target_branch,
+            pr_url=target_pr_url,
         )
     except Exception as exc:
         logger.exception("Builder turn %s failed unexpectedly", task_id)
@@ -178,8 +278,8 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             task,
             status="failed",
             summary=f"I stopped unexpectedly without publishing. {str(exc)[:1200]}",
-            branch_name=worktree.branch_name if worktree else None,
-            pr_url=continuation_pr_url,
+            branch_name=worktree.branch_name if worktree else target_branch,
+            pr_url=target_pr_url,
         )
     finally:
         if worktree is not None:
@@ -205,6 +305,7 @@ def _validate_and_repair(
             branch_name=worktree.branch_name,
             validation="❌ failed",
             repair_attempt=f"{repair_attempts}/{settings.builder_max_repair_attempts}",
+            pr_url=task.get("continuation_pr_url"),
         )
         repair_goal = _repair_prompt(task["goal"], validation, repair_attempts)
         repair = run_aider(goal=repair_goal, worktree_path=worktree.path)
@@ -220,6 +321,7 @@ def _validate_and_repair(
             branch_name=worktree.branch_name,
             validation="✅ passed",
             repair_attempt=str(repair_attempts),
+            pr_url=task.get("continuation_pr_url"),
         )
     return validation, repair_attempts
 
