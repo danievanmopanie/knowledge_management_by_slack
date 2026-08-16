@@ -95,7 +95,22 @@ class Settings(BaseSettings):
     builder_agent_allowed_user_ids: str = ""
     builder_repo_path: Path = Path("./data/builder/repo")
     builder_workdir: Path = Path("./data/builder/worktrees")
-    builder_aider_model: str = "ollama_chat/qwen3-coder:30b"
+
+    # Keep Builder inference independent from the rest of the Slack agents so
+    # Atlas can be introduced as a canary without moving support/extraction.
+    builder_aider_model: str = "openai/atlas"
+    builder_llm_base_url: str = "http://127.0.0.1:8888/v1"
+    builder_llm_api_key: str = "atlas-local"
+    builder_model_checkpoint: str = "AEON-7/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-BF16"
+
+    # Local code validation gate. {python} resolves to the worker's interpreter.
+    # A PR is never pushed when this command fails when require_tests_pass=True.
+    builder_test_command: str = "{python} -m pytest -q"
+    builder_test_timeout_seconds: int = 1200
+    builder_max_repair_attempts: int = 2
+    builder_require_tests_pass: bool = True
+    builder_validation_output_chars: int = 8000
+
     builder_task_timeout_seconds: int = 1800
     builder_poll_interval_seconds: int = 15
     builder_git_remote: str = "origin"
