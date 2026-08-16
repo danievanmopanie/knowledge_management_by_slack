@@ -73,6 +73,7 @@ def test_exact_lookup_does_not_invoke_response_llm():
         exact_incident_numbers=("INC0092846",),
         exact_incident_context="raw exact context",
         organisational_context="enriched exact context",
+        trusted_pattern_response="",
         has_evidence=True,
     )
 
