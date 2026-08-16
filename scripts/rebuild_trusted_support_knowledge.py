@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from src.core.config import settings
 from src.knowledge.knowledge_trust import rebuild_trusted_index, rebuild_trusted_patterns
 from src.knowledge.organisational_knowledge import (
     OrganisationalKnowledgeIndex,
@@ -24,7 +25,7 @@ def main() -> int:
                 SELECT COUNT(*) FROM support_incident_knowledge
                 WHERE model=? AND confidence>=?
                 """,
-                (model_key, __import__("src.core.config", fromlist=["settings"]).settings.knowledge_min_extraction_confidence),
+                (model_key, settings.knowledge_min_extraction_confidence),
             ).fetchone()[0]
         )
 
