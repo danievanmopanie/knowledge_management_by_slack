@@ -1,14 +1,23 @@
 """Tests for bulk-onboarding an existing formal knowledge base and confirm-all staging."""
 
 import asyncio
+import importlib.util
 from pathlib import Path
 
-from scripts import bulk_import_knowledge
 from src.agents.knowledge_ingest import agent as knowledge_ingest_agent
 from src.agents.knowledge_ingest.agent import KnowledgeIngestAgent
 from src.core.audit import AuditStore
 from src.core.context import RequestContext
 from src.knowledge.staging import StagingStore
+
+# `scripts/` is a standalone CLI directory, not an installed package, so it is
+# only importable as `scripts.bulk_import_knowledge` when the repo root happens
+# to be on sys.path (e.g. `python -m pytest`). Load it directly by file path
+# instead, so this test passes under plain `pytest` too, matching CI.
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bulk_import_knowledge.py"
+_spec = importlib.util.spec_from_file_location("bulk_import_knowledge", _SCRIPT_PATH)
+bulk_import_knowledge = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(bulk_import_knowledge)
 
 
 def _stage_local_file(
