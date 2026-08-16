@@ -9,6 +9,14 @@ from src.worker.validation import ValidationResult
 from src.worker.workspace import Worktree
 
 
+class FakeStore:
+    def get(self, task_id):
+        return {"task_id": task_id, "progress_message_ts": None}
+
+    def set_progress_message_ts(self, task_id, message_ts):
+        return None
+
+
 def _validation(success: bool, output: str = "") -> ValidationResult:
     return ValidationResult(
         success=success,
@@ -26,7 +34,7 @@ def _aider_success() -> AiderResult:
 def test_validation_failure_is_sent_back_for_repair(monkeypatch, tmp_path: Path):
     results = iter([_validation(False, "FAILED test_widget"), _validation(True, "passed")])
     repair_goals: list[str] = []
-    notifications: list[str] = []
+    statuses: list[dict] = []
 
     monkeypatch.setattr(settings, "builder_max_repair_attempts", 2)
     monkeypatch.setattr(
@@ -40,22 +48,22 @@ def test_validation_failure_is_sent_back_for_repair(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr("src.worker.builder_worker.run_aider", fake_aider)
     monkeypatch.setattr(
-        "src.worker.builder_worker._notify",
-        lambda task, text: notifications.append(text),
+        "src.worker.builder_worker._publish_status",
+        lambda store, task, **kwargs: statuses.append(kwargs),
     )
 
     task = {"task_id": "bld_test", "goal": "add widget", "channel_id": "C1"}
     worktree = Worktree(task_id="bld_test", branch_name="builder/bld_test", path=tmp_path)
 
-    result, attempts = _validate_and_repair(task, worktree)
+    result, attempts = _validate_and_repair(FakeStore(), task, worktree)
 
     assert result.success is True
     assert attempts == 1
     assert len(repair_goals) == 1
     assert "FAILED test_widget" in repair_goals[0]
     assert "Do not remove, skip, weaken, or xfail tests" in repair_goals[0]
-    assert any("repair attempt 1/2" in message for message in notifications)
-    assert any("validation passed" in message.lower() for message in notifications)
+    assert statuses[0]["status"] == "repairing"
+    assert statuses[-1]["status"] == "validated"
 
 
 def test_repair_loop_stops_at_configured_limit(monkeypatch, tmp_path: Path):
@@ -72,12 +80,12 @@ def test_repair_loop_stops_at_configured_limit(monkeypatch, tmp_path: Path):
         "src.worker.builder_worker.run_aider",
         lambda *, goal, worktree_path: _aider_success(),
     )
-    monkeypatch.setattr("src.worker.builder_worker._notify", lambda task, text: None)
+    monkeypatch.setattr("src.worker.builder_worker._publish_status", lambda store, task, **kwargs: None)
 
     task = {"task_id": "bld_test", "goal": "add widget", "channel_id": "C1"}
     worktree = Worktree(task_id="bld_test", branch_name="builder/bld_test", path=tmp_path)
 
-    result, attempts = _validate_and_repair(task, worktree)
+    result, attempts = _validate_and_repair(FakeStore(), task, worktree)
 
     assert result.success is False
     assert attempts == 2
