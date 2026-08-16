@@ -219,6 +219,17 @@ class SupportEvidenceService:
             incident_sources=sources,
         )
 
+    def _collect_organisational(self, query: str):
+        kwargs = {
+            "candidate_k": settings.knowledge_pattern_candidate_k,
+            "max_incidents": settings.knowledge_pattern_max_incidents,
+        }
+        bundle = getattr(self.organisational, "collective_bundle", None)
+        if callable(bundle):
+            return bundle(query, **kwargs)
+        context = self.organisational.collective_context(query, **kwargs)
+        return context, ""
+
     def build(
         self,
         query: str,
@@ -242,12 +253,7 @@ class SupportEvidenceService:
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="frontend-evidence") as pool:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
-            organisational_future = pool.submit(
-                self.organisational.collective_bundle,
-                query,
-                candidate_k=settings.knowledge_pattern_candidate_k,
-                max_incidents=settings.knowledge_pattern_max_incidents,
-            )
+            organisational_future = pool.submit(self._collect_organisational, query)
             incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
             governed = governed_future.result()
             organisational_context, trusted_pattern_response = organisational_future.result()
