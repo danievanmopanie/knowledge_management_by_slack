@@ -86,12 +86,7 @@ def _clip(value, limit: int) -> str:
 
 
 def _render_exact_incident_brief(case, enriched, pattern: dict | None = None) -> str:
-    """Render one named incident without asking a response LLM to infer missing facts.
-
-    Exact case explanations are evidence reporting, not open-ended synthesis. The
-    enriched extraction provides the reusable interpretation while the temporal
-    case file remains the source of truth for the raw ServiceNow record.
-    """
+    """Render one named incident without asking a response LLM to infer missing facts."""
     record = dict(getattr(case, "current", {}) or {})
     number = _space(getattr(enriched, "incident_number", "")) or _space(
         getattr(case, "number", "")
@@ -144,13 +139,7 @@ def _render_exact_incident_brief(case, enriched, pattern: dict | None = None) ->
             lines.extend(["", "*Recorded work notes*", _clip(work_notes, 1600)])
 
     if raw_resolution:
-        lines.extend(
-            [
-                "",
-                "*ServiceNow resolution notes*",
-                _clip(raw_resolution, 2200),
-            ]
-        )
+        lines.extend(["", "*ServiceNow resolution notes*", _clip(raw_resolution, 2200)])
 
     root_cause = _space(getattr(enriched, "root_cause", ""))
     root_cause_pattern = _space(getattr(enriched, "root_cause_pattern", ""))
@@ -312,12 +301,13 @@ class FrontendSupportAgent(BaseAgent):
             logger.exception("Support evidence retrieval failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
         logger.info(
-            "Frontend Support timing request_id=%s stage=retrieval seconds=%.3f has_evidence=%s exact_lookup=%s enriched=%s",
+            "Frontend Support timing request_id=%s stage=retrieval seconds=%.3f has_evidence=%s exact_lookup=%s enriched=%s trusted_pattern=%s",
             context.request_id,
             time.perf_counter() - retrieval_started,
             package.has_evidence,
             package.exact_lookup_requested,
             bool(package.organisational_context),
+            bool(package.trusted_pattern_response),
         )
 
         if package.exact_lookup_requested and not (
@@ -355,6 +345,24 @@ class FrontendSupportAgent(BaseAgent):
             )
             return answer
 
+        if package.trusted_pattern_response:
+            answer = package.trusted_pattern_response.strip()
+            evidence_section = (
+                render_evidence_section(package.governed_candidates)
+                if package.governed_should_answer
+                else ""
+            )
+            if evidence_section:
+                answer = answer.rstrip() + "\n\n*Formal knowledge*\n" + evidence_section
+            if on_chunk is not None:
+                await on_chunk(answer)
+            logger.info(
+                "Frontend Support timing request_id=%s stage=trusted_pattern_deterministic total_seconds=%.3f",
+                context.request_id,
+                time.perf_counter() - overall_started,
+            )
+            return answer
+
         if not package.has_evidence:
             if not _allows_general_guidance(message, context):
                 return INSUFFICIENT_EVIDENCE_RESPONSE
@@ -367,12 +375,9 @@ class FrontendSupportAgent(BaseAgent):
 
         prompt_context = package.to_prompt_context(max_chars=PROMPT_CONTEXT_MAX_CHARS)
         task_instruction = (
-            "Use the enriched organisational evidence as the primary source for repeat knowledge. "
-            "Use organisation-wide materialised rollups for full-pattern frequency claims and the semantic neighbourhood "
-            "to establish relevance to the current symptom. Tell the technician what matching incidents repeatedly show, "
-            "including exact supplied counts and example incident IDs. Use raw similar case evidence for technical detail "
-            "and governed knowledge for formal guidance. Recommend the best-supported next action and identify known failed "
-            "paths when the evidence supports it."
+            "Use the supplied evidence conservatively. If only raw similar cases or governed knowledge are available, "
+            "distinguish recorded fact from inference and do not invent organisation-wide frequency claims. "
+            "Recommend only steps supported by the supplied evidence, or clearly label generic technical guidance."
         )
 
         messages = [
