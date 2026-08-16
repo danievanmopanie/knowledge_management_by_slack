@@ -15,7 +15,6 @@ from src.knowledge.citations import evidence_labels, render_evidence_section, sa
 from src.knowledge.retrieval_models import RetrievalQuery
 from src.knowledge.support_evidence import (
     CONVERSATIONAL_LIMIT,
-    EXACT_INCIDENT_CONTEXT_MAX_CHARS,
     PROMPT_CONTEXT_MAX_CHARS,
     SupportEvidenceService,
 )
@@ -58,20 +57,6 @@ For a normal symptom/problem request, aim for this shape when evidence allows it
 Do not force headings when a shorter natural response is clearer.
 """
 
-EXACT_INCIDENT_SYSTEM_PROMPT = SYSTEM_PROMPT + """
-
-EXACT INCIDENT LOOKUP MODE:
-- A named ServiceNow incident has been retrieved directly from the deterministic temporal store. It was NOT selected by semantic similarity.
-- Enriched support knowledge may also be supplied for the same incident. Use it to explain the symptom, troubleshooting sequence, outcome, resolution pattern, root cause and any cross-incident pattern to which the incident contributes.
-- Start with the actual recorded outcome/resolution when one exists. Then explain what was reported, what technicians did, what failed or succeeded, and useful lifecycle/ownership context.
-- Answer from the named incident first. Do not substitute other incidents for missing facts.
-- Never tell the technician to check ServiceNow for information already present in the case file.
-- Preserve useful technical detail from description, work notes, comments and resolution notes.
-- If the exact incident belongs to an organisational pattern, you may add a short "what we have learned across similar cases" observation after explaining this incident, but keep the named incident authoritative.
-- If resolution notes, work notes, timestamps, transitions or enrichment are missing, state that explicitly. Never fill gaps with guesses.
-- If evidence conflicts, distinguish the conflicting recorded statements rather than choosing one silently.
-"""
-
 INSUFFICIENT_EVIDENCE_RESPONSE = (
     "I don't have a strong internal match for this yet. "
     "I can still help troubleshoot it from what we know in the thread — add any error text or steps already tried if they aren't here yet."
@@ -87,6 +72,124 @@ def _is_private_coaching(message: str, context: RequestContext) -> bool:
 
 def _allows_general_guidance(message: str, context: RequestContext) -> bool:
     return _is_private_coaching(message, context) or "frontend_general_guidance" in context.roles
+
+
+def _space(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _clip(value, limit: int) -> str:
+    text = _space(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " …"
+
+
+def _render_exact_incident_brief(case, enriched, pattern: dict | None = None) -> str:
+    """Render one named incident without asking a response LLM to infer missing facts.
+
+    Exact case explanations are evidence reporting, not open-ended synthesis. The
+    enriched extraction provides the reusable interpretation while the temporal
+    case file remains the source of truth for the raw ServiceNow record.
+    """
+    record = dict(getattr(case, "current", {}) or {})
+    number = _space(getattr(enriched, "incident_number", "")) or _space(
+        getattr(case, "number", "")
+    )
+    resolution = _space(getattr(enriched, "resolution", ""))
+    resolution_pattern = _space(getattr(enriched, "resolution_pattern", ""))
+    raw_resolution = _space(record.get("resolution_notes"))
+    symptom = _space(getattr(enriched, "symptom", ""))
+    short_description = _space(record.get("short_description"))
+
+    lines: list[str] = []
+    if resolution:
+        lines.append(f"*{number} — recorded outcome*\n{resolution}")
+    elif raw_resolution:
+        lines.append(f"*{number} — recorded outcome*\n{_clip(raw_resolution, 900)}")
+    else:
+        lines.append(f"*{number} — no technical resolution is recorded in the imported evidence.*")
+
+    lines.extend(["", "*What was reported*"])
+    if short_description:
+        lines.append(f"• {short_description}")
+    if symptom and symptom.lower() != short_description.lower():
+        lines.append(f"• Enriched symptom: {symptom}")
+    if not short_description and not symptom:
+        lines.append("• The imported record does not contain a useful symptom description.")
+
+    actions = tuple(getattr(enriched, "actions", ()) or ())
+    if actions:
+        lines.extend(["", "*What the support team did*"])
+        outcome_labels = {
+            "successful": "Successful",
+            "failed": "Did not resolve",
+            "unknown": "Investigation / outcome not recorded",
+        }
+        for index, action in enumerate(actions, 1):
+            canonical = _space(getattr(action, "canonical_action", ""))
+            detail = _space(getattr(action, "action", ""))
+            outcome = _space(getattr(action, "outcome", "unknown")).lower() or "unknown"
+            label = canonical or detail or "Recorded action"
+            line = f"{index}. *{outcome_labels.get(outcome, 'Outcome not recorded')}* — {label}"
+            if detail and canonical and detail.lower() != canonical.lower():
+                line += f". Recorded detail: {detail}"
+            confidence = getattr(action, "confidence", None)
+            if confidence is not None:
+                line += f" (extraction confidence {float(confidence):.2f})"
+            lines.append(line)
+    else:
+        work_notes = _space(record.get("work_notes"))
+        if work_notes:
+            lines.extend(["", "*Recorded work notes*", _clip(work_notes, 1600)])
+
+    if raw_resolution:
+        lines.extend(
+            [
+                "",
+                "*ServiceNow resolution notes*",
+                _clip(raw_resolution, 2200),
+            ]
+        )
+
+    root_cause = _space(getattr(enriched, "root_cause", ""))
+    root_cause_pattern = _space(getattr(enriched, "root_cause_pattern", ""))
+    lines.extend(["", "*Root cause*"])
+    if root_cause:
+        lines.append(root_cause)
+    elif root_cause_pattern:
+        lines.append(root_cause_pattern)
+    else:
+        lines.append("No confirmed root cause is recorded in the imported evidence.")
+
+    context_bits = []
+    for label, key in (
+        ("State", "state"),
+        ("Assignment group", "assignment_group"),
+        ("Assigned to", "assigned_to"),
+        ("Location", "location"),
+    ):
+        value = _space(record.get(key))
+        if value:
+            context_bits.append(f"{label}: {value}")
+    if context_bits:
+        lines.extend(["", "*Case context*", " • ".join(context_bits)])
+
+    if resolution_pattern:
+        lines.extend(["", "*Reusable knowledge captured from this case*"])
+        count = int((pattern or {}).get("incident_count") or 0)
+        if count > 1:
+            lines.append(
+                f"Resolution pattern: *{resolution_pattern}*. The current trusted pattern rollup contains "
+                f"{count} enriched incidents; organisation-wide counts should come from that rollup."
+            )
+        else:
+            lines.append(
+                f"Resolution pattern: *{resolution_pattern}*. This is currently supported by this incident alone, "
+                "so it is useful case evidence but not yet an organisation-wide proven fix."
+            )
+
+    return "\n".join(lines).strip()
 
 
 class FrontendSupportAgent(BaseAgent):
@@ -226,6 +329,32 @@ class FrontendSupportAgent(BaseAgent):
                 "I won't guess at its history or resolution."
             )
 
+        if package.exact_lookup_requested:
+            exact_answers: list[str] = []
+            for number in package.exact_incident_numbers:
+                case = self.evidence.casefiles.get(number)
+                enriched = self.evidence.organisational.store.get(number)
+                if case is None and enriched is None:
+                    continue
+                pattern = None
+                if enriched is not None and getattr(enriched, "pattern_key", ""):
+                    pattern = self.evidence.organisational.store.get_pattern(enriched.pattern_key)
+                exact_answers.append(_render_exact_incident_brief(case, enriched, pattern))
+            answer = "\n\n---\n\n".join(value for value in exact_answers if value.strip())
+            if not answer:
+                return (
+                    "I found the incident reference but could not build a trustworthy case brief from the imported evidence. "
+                    "I won't fill the gaps with guesses."
+                )
+            if on_chunk is not None:
+                await on_chunk(answer)
+            logger.info(
+                "Frontend Support timing request_id=%s stage=exact_deterministic total_seconds=%.3f",
+                context.request_id,
+                time.perf_counter() - overall_started,
+            )
+            return answer
+
         if not package.has_evidence:
             if not _allows_general_guidance(message, context):
                 return INSUFFICIENT_EVIDENCE_RESPONSE
@@ -236,28 +365,18 @@ class FrontendSupportAgent(BaseAgent):
                 on_chunk=on_chunk,
             )
 
-        if package.exact_lookup_requested:
-            prompt_context = package.to_prompt_context(max_chars=EXACT_INCIDENT_CONTEXT_MAX_CHARS)
-            system_prompt = EXACT_INCIDENT_SYSTEM_PROMPT
-            task_instruction = (
-                "Explain the named incident richly from its exact evidence and enriched knowledge. "
-                "Lead with how it actually ended, then the symptom, investigation/actions, failed/successful steps, "
-                "root cause if supported, and lifecycle/ownership context. Add cross-incident learning only after the exact case."
-            )
-        else:
-            prompt_context = package.to_prompt_context(max_chars=PROMPT_CONTEXT_MAX_CHARS)
-            system_prompt = SYSTEM_PROMPT
-            task_instruction = (
-                "Use the enriched organisational evidence as the primary source for repeat knowledge. "
-                "Use organisation-wide materialised rollups for full-pattern frequency claims and the semantic neighbourhood "
-                "to establish relevance to the current symptom. Tell the technician what matching incidents repeatedly show, "
-                "including exact supplied counts and example incident IDs. Use raw similar case evidence for technical detail "
-                "and governed knowledge for formal guidance. Recommend the best-supported next action and identify known failed "
-                "paths when the evidence supports it."
-            )
+        prompt_context = package.to_prompt_context(max_chars=PROMPT_CONTEXT_MAX_CHARS)
+        task_instruction = (
+            "Use the enriched organisational evidence as the primary source for repeat knowledge. "
+            "Use organisation-wide materialised rollups for full-pattern frequency claims and the semantic neighbourhood "
+            "to establish relevance to the current symptom. Tell the technician what matching incidents repeatedly show, "
+            "including exact supplied counts and example incident IDs. Use raw similar case evidence for technical detail "
+            "and governed knowledge for formal guidance. Recommend the best-supported next action and identify known failed "
+            "paths when the evidence supports it."
+        )
 
         messages = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(
                 content=(
                     f"{prompt_context}\n\n"
