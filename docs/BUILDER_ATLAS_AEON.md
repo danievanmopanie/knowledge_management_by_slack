@@ -16,7 +16,7 @@ Slack #builder
          -> OpenAI-compatible http://127.0.0.1:8888/v1
          -> Atlas (GB10)
          -> AEON-7/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-BF16
-    -> local pytest gate on the GX10
+    -> local Ruff + pytest gate on the GX10
          -> if red: send failure output back to AEON and repair
          -> repeat up to BUILDER_MAX_REPAIR_ATTEMPTS
     -> only when green: git push
@@ -46,7 +46,7 @@ BUILDER_LLM_BASE_URL=http://127.0.0.1:8888/v1
 BUILDER_LLM_API_KEY=atlas-local
 BUILDER_MODEL_CHECKPOINT=AEON-7/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-BF16
 
-BUILDER_TEST_COMMAND={python} -m pytest -q
+BUILDER_TEST_COMMAND={python} -m ruff check src tests scripts && {python} -m pytest -q
 BUILDER_TEST_TIMEOUT_SECONDS=1200
 BUILDER_MAX_REPAIR_ATTEMPTS=2
 BUILDER_REQUIRE_TESTS_PASS=true
@@ -56,6 +56,14 @@ BUILDER_VALIDATION_OUTPUT_CHARS=8000
 `openai/aeon-builder` is the Aider/LiteLLM provider name. Atlas is started with
 `--model-name aeon-builder`, so the model name in Aider requests matches the
 served alias while the actual Hugging Face checkpoint remains configurable.
+
+The validation command mirrors the repository's current high-signal GitHub CI
+checks. Install the worker environment with development dependencies so both
+Ruff and pytest are available:
+
+```bash
+/opt/knowledge_management_by_slack/.venv/bin/pip install -e '.[dev]'
+```
 
 ## Start Atlas on the GX10
 
@@ -113,7 +121,7 @@ For each Slack build request the worker now:
 1. fetches `main` and creates an isolated git worktree/branch;
 2. asks AEON through Atlas to implement the requested change;
 3. runs `BUILDER_TEST_COMMAND` locally in that worktree;
-4. if validation fails, sends the bounded test output back to AEON with an
+4. if validation fails, sends the bounded validation output back to AEON with an
    instruction not to skip/weaken/xfail tests;
 5. reruns validation after each repair;
 6. refuses to push or create a PR if validation remains red;
@@ -121,7 +129,7 @@ For each Slack build request the worker now:
 8. reports progress and the final PR link in the original Slack thread.
 
 This means the human no longer needs to pull every Builder PR merely to discover
-whether the repository test suite passes.
+whether the repository's lint and test gates pass.
 
 ## Deployment order
 
@@ -131,8 +139,9 @@ until the endpoint is proven:
 ```bash
 # 1. Deploy/pull the application change.
 # 2. Update .env with the Builder-only values above.
-# 3. Start atlas-builder.service and complete the two smoke tests.
-# 4. Restart builder-worker.service.
+# 3. Ensure the worker venv has .[dev] dependencies.
+# 4. Start atlas-builder.service and complete the two smoke tests.
+# 5. Restart builder-worker.service.
 sudo systemctl restart builder-worker.service
 sudo journalctl -u builder-worker.service -f
 ```
@@ -169,5 +178,5 @@ checkout/worktree paths and the Git credentials required to push branches.
 
 An uncensored model is useful here because it is less likely to refuse legitimate
 engineering operations, but it must not be treated as a security control. The
-allowlist, isolated worktree, deterministic test gate, GitHub review, and host
-permissions remain the controls.
+allowlist, isolated worktree, deterministic validation gate, GitHub review, and
+host permissions remain the controls.
