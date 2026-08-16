@@ -2,13 +2,12 @@
 
 Retrieval lanes:
 1. Exact incident lookup -> deterministic case file + enriched incident knowledge.
-2. Organisational pattern retrieval -> enriched symptom index selects cases, then
-   deterministic aggregation produces repeated resolutions/actions/root causes.
-3. Organisation-wide pattern expansion -> dominant canonical patterns from the
-   semantic neighbourhood are expanded to all enriched incidents in that pattern.
-4. Raw historical incident vectors -> fallback candidate locator, hydrated back
+2. Organisational pattern retrieval -> enriched symptom index selects the most
+   likely canonical pattern, then the trusted materialised pattern store supplies
+   all cross-incident counts and reusable claims.
+3. Raw historical incident vectors -> fallback candidate locator, hydrated back
    into complete case files.
-5. Governed knowledge -> articles, notes and approved documents.
+4. Governed knowledge -> articles, notes and approved documents.
 
 Embeddings locate evidence. They never become the source of truth for incident
 facts or organisational frequency claims.
@@ -30,11 +29,10 @@ from src.knowledge.incident_casefile import (
     looks_like_exact_incident_lookup,
 )
 from src.knowledge.incident_rag import IncidentRAG
-from src.knowledge.organisational_knowledge import OrganisationalKnowledgeRetriever
-from src.knowledge.pattern_insights import organisation_wide_pattern_context
 from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery
 from src.knowledge.retriever import HybridRetriever
 from src.knowledge.support_graph import SupportKnowledgeGraph
+from src.knowledge.trusted_pattern_retriever import TrustedPatternKnowledgeRetriever
 
 CONVERSATIONAL_LIMIT = 3
 PROMPT_CONTEXT_MAX_CHARS = 30000
@@ -155,7 +153,7 @@ class SupportEvidenceService:
         incident_rag: IncidentRAG | None = None,
         support_graph: SupportKnowledgeGraph | None = None,
         casefiles: IncidentCaseFileStore | None = None,
-        organisational: OrganisationalKnowledgeRetriever | None = None,
+        organisational: TrustedPatternKnowledgeRetriever | None = None,
     ):
         self.retriever = retriever or HybridRetriever()
         self.incident_rag = incident_rag or IncidentRAG()
@@ -163,7 +161,7 @@ class SupportEvidenceService:
         # graph. Exact raw case files still use the temporal graph below.
         self.support_graph = support_graph or SupportKnowledgeGraph()
         self.casefiles = casefiles or IncidentCaseFileStore(graph_store=self.incident_rag.graph_store)
-        self.organisational = organisational or OrganisationalKnowledgeRetriever()
+        self.organisational = organisational or TrustedPatternKnowledgeRetriever()
         self._cache: dict[tuple, tuple[float, SupportEvidencePackage]] = {}
         self._cache_lock = threading.RLock()
 
@@ -242,10 +240,10 @@ class SupportEvidenceService:
 
         retrieval_query = RetrievalQuery(text=query, context=context, limit=limit, graph_depth=1)
 
-        # These lanes are independent. Local pattern aggregation explains the
-        # closest symptom neighbourhood, while full pattern expansion provides
-        # organisation-wide counts for canonical patterns supported by >=2 hits.
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="frontend-evidence") as pool:
+        # These lanes are independent. The organisational lane now performs both
+        # semantic pattern selection and authoritative full-pattern expansion in
+        # one bridge, so no second raw-neighbour aggregation is allowed.
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="frontend-evidence") as pool:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
             organisational_future = pool.submit(
                 self.organisational.collective_context,
@@ -253,20 +251,10 @@ class SupportEvidenceService:
                 candidate_k=settings.knowledge_pattern_candidate_k,
                 max_incidents=settings.knowledge_pattern_max_incidents,
             )
-            organisation_wide_future = pool.submit(
-                organisation_wide_pattern_context,
-                self.organisational,
-                query,
-                candidate_k=settings.knowledge_pattern_candidate_k,
-            )
             incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
             governed = governed_future.result()
-            neighbourhood_context = organisational_future.result()
-            organisation_wide_context = organisation_wide_future.result()
+            organisational_context = organisational_future.result()
             incident_docs = incident_future.result()
-
-        organisational_parts = [part for part in (neighbourhood_context, organisation_wide_context) if part]
-        organisational_context = "\n\n---\n\n".join(organisational_parts)
 
         incident_sources: set[str] = set()
         graph_lines: list[str] = []
