@@ -67,7 +67,7 @@ def _item(number, *, pattern_key, pattern_label, symptom, resolution):
     )
 
 
-def test_bridge_uses_semantics_only_to_select_authoritative_pattern():
+def _retriever():
     switch_resolutions = {
         "INC0022194": "Restore power via electrician",
         "INC0022195": "Restore power via electrician",
@@ -140,15 +140,30 @@ def test_bridge_uses_semantics_only_to_select_authoritative_pattern():
             },
         ],
         "failed_action_counts": [],
-        "root_cause_counts": [],
+        "root_cause_counts": [
+            {
+                "label": "Power transformer issue",
+                "count": 1,
+                "incidents": ["INC0022194"],
+            },
+            {
+                "label": "Incorrect device connection to power source",
+                "count": 1,
+                "incidents": ["INC0022228"],
+            },
+        ],
         "incident_numbers": list(switch_resolutions),
     }
-    retriever = TrustedPatternKnowledgeRetriever(
+    return TrustedPatternKnowledgeRetriever(
         store=_Store([*switch_items, node, account], pattern),
         index=_Index(docs),
     )
 
-    text = retriever.collective_context("Network switch is offline and users cannot connect")
+
+def test_bridge_uses_semantics_only_to_select_authoritative_pattern():
+    text = _retriever().collective_context(
+        "Network switch is offline and users cannot connect"
+    )
 
     assert "Canonical issue pattern: Network switch offline" in text
     assert "Trusted supporting incidents: 5" in text
@@ -159,3 +174,21 @@ def test_bridge_uses_semantics_only_to_select_authoritative_pattern():
     assert "Restore power via electrician" not in text
     assert "Application account disabled" not in text
     assert "144 Oxford Rd JHB" not in text
+
+
+def test_deterministic_response_preserves_counts_without_inventing_steps():
+    text = _retriever().deterministic_response(
+        "Network switch is offline and users cannot connect"
+    )
+
+    assert "5 trusted incidents" in text
+    assert "3 of 5 trusted incidents" in text
+    assert "2 of 5 trusted incidents" in text
+    assert "Restore electrical power to network equipment" in text
+    assert "Reconnect network switch" in text
+    assert "does not support one universal root cause" in text
+    assert "No repeated failed troubleshooting path" in text
+    assert "60%" not in text
+    assert "uplink" not in text.lower()
+    assert "surge protector" not in text.lower()
+    assert "misconfigured" not in text.lower()
