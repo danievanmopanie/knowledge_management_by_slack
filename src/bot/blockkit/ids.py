@@ -35,3 +35,19 @@ CANCEL_COUNT = "inventory_cancel_count"
 # Create Knowledge staged-upload decisions.
 CREATE_KNOWLEDGE_CONFIRM_STAGE = "create_knowledge_confirm_stage"
 CREATE_KNOWLEDGE_CANCEL_STAGE = "create_knowledge_cancel_stage"
+
+# Frontend Support -> Knowledge Candidate handoff.
+FRONTEND_CREATE_KNOWLEDGE_CANDIDATE = "frontend_create_knowledge_candidate"
+FRONTEND_FLAG_KNOWLEDGE_GAP = "frontend_flag_knowledge_gap"
+MODAL_FRONTEND_KNOWLEDGE_CANDIDATE = "frontend_knowledge_candidate_submit"
+
+# Create Knowledge candidate backlog workflow.
+KNOWLEDGE_CANDIDATE_CLAIM = "knowledge_candidate_claim"
+KNOWLEDGE_CANDIDATE_EDIT = "knowledge_candidate_edit"
+KNOWLEDGE_CANDIDATE_REQUEST_INPUT = "knowledge_candidate_request_input"
+KNOWLEDGE_CANDIDATE_READY = "knowledge_candidate_ready_review"
+KNOWLEDGE_CANDIDATE_APPROVE = "knowledge_candidate_approve_publish"
+KNOWLEDGE_CANDIDATE_REQUEST_CHANGES = "knowledge_candidate_request_changes"
+MODAL_KNOWLEDGE_CANDIDATE_EDIT = "knowledge_candidate_edit_submit"
+MODAL_KNOWLEDGE_CANDIDATE_INPUT = "knowledge_candidate_input_submit"
+MODAL_KNOWLEDGE_CANDIDATE_CHANGES = "knowledge_candidate_changes_submit"
