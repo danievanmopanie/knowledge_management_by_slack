@@ -27,9 +27,10 @@ def _aider_environment() -> dict[str, str]:
     env = os.environ.copy()
     if settings.builder_llm_base_url:
         base_url = settings.builder_llm_base_url.rstrip("/")
-        # Aider/LiteLLM accepts the standard OpenAI variables. The AIDER_
-        # aliases keep the endpoint explicit for newer Aider releases too.
+        # Aider/LiteLLM releases have used both OpenAI variable names. Set
+        # both so the Builder endpoint stays explicit across upgrades.
         env["OPENAI_API_BASE"] = base_url
+        env["OPENAI_BASE_URL"] = base_url
         env["AIDER_OPENAI_API_BASE"] = base_url
     if settings.builder_llm_api_key:
         env["OPENAI_API_KEY"] = settings.builder_llm_api_key
