@@ -13,6 +13,9 @@ build/
 .ruff_cache/
 .pytest_cache/
 
+# Aider / local coding harness
+.aider*
+
 # Data (keep structure, ignore contents)
 data/raw/*
 !data/raw/.gitkeep
