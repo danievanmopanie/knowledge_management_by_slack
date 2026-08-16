@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
+import time
 
 from src.core.config import settings
 from src.knowledge.organisational_knowledge import (
@@ -103,6 +105,122 @@ async def _enrich_incident(number: str) -> int:
     return 0
 
 
+def _duration(seconds: float | None) -> str:
+    if seconds is None or seconds < 0:
+        return "--:--"
+    total = int(round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+class _BatchProgress:
+    """Small dependency-free terminal progress view for enrichment backfills."""
+
+    def __init__(self) -> None:
+        self.started_at = time.perf_counter()
+        self.selected = 0
+        self.pending_before = 0
+        self.completed = 0
+        self.extraction_failed = 0
+        self.enriched = 0
+        self.persist_failed = 0
+        self.current: set[str] = set()
+        self.stage = "selecting"
+        self.last_render_len = 0
+
+    @staticmethod
+    def _bar(done: int, total: int, width: int = 24) -> str:
+        if total <= 0:
+            return "░" * width
+        filled = min(width, int(width * done / total))
+        return "█" * filled + "░" * (width - filled)
+
+    def _line(self) -> str:
+        elapsed = time.perf_counter() - self.started_at
+        done = min(self.completed, self.selected)
+        average = elapsed / done if done else None
+        eta = average * (self.selected - done) if average is not None else None
+        current = ", ".join(sorted(self.current)) or "—"
+        return (
+            f"[{self._bar(done, self.selected)}] {done}/{self.selected} "
+            f"| stage={self.stage} | current={current} "
+            f"| enriched={self.enriched} failed={self.extraction_failed + self.persist_failed} "
+            f"| elapsed={_duration(elapsed)} "
+            f"| avg={average:.1f}s" if average is not None else
+            f"[{self._bar(done, self.selected)}] {done}/{self.selected} "
+            f"| stage={self.stage} | current={current} "
+            f"| enriched={self.enriched} failed={self.extraction_failed + self.persist_failed} "
+            f"| elapsed={_duration(elapsed)} | avg=--"
+        ) + f" | ETA={_duration(eta)}"
+
+    def render(self, *, newline: bool = False) -> None:
+        line = self._line()
+        if sys.stdout.isatty() and not newline:
+            padding = " " * max(0, self.last_render_len - len(line))
+            print("\r" + line + padding, end="", flush=True)
+            self.last_render_len = len(line)
+        else:
+            if sys.stdout.isatty() and self.last_render_len:
+                print()
+                self.last_render_len = 0
+            print(line, flush=True)
+
+    def __call__(self, event: dict) -> None:
+        stage = str(event.get("stage") or self.stage)
+        kind = str(event.get("event") or "")
+        self.stage = stage
+
+        if stage == "selected":
+            self.selected = int(event.get("selected") or 0)
+            self.pending_before = int(event.get("pending_before") or 0)
+            print("\nKnowledge enrichment", flush=True)
+            print(f"Selected: {self.selected:,} | Pending before batch: {self.pending_before:,}", flush=True)
+            print(f"Model: {event.get('model') or extraction_model_key()}", flush=True)
+            self.render()
+            return
+
+        incident = str(event.get("incident") or "")
+        if stage == "extracting" and kind == "started":
+            if incident:
+                self.current.add(incident)
+            self.render()
+            return
+
+        if stage == "extracting" and kind in {"completed", "failed"}:
+            if incident:
+                self.current.discard(incident)
+            self.completed += 1
+            if kind == "failed":
+                self.extraction_failed += 1
+            self.render()
+            return
+
+        if stage == "persisting":
+            if incident:
+                self.current = {incident}
+            self.enriched = int(event.get("enriched") or self.enriched)
+            self.persist_failed = int(event.get("failed") or self.persist_failed)
+            self.render()
+            return
+
+        if stage == "indexing":
+            self.current.clear()
+            self.render()
+            return
+
+        if stage == "complete":
+            self.current.clear()
+            result = event.get("result")
+            if result is not None:
+                self.enriched = int(result.enriched)
+                self.persist_failed = int(result.failed)
+                self.completed = max(self.completed, int(result.selected))
+            self.render(newline=True)
+
+
 async def _run_batches(limit: int, until_empty: bool) -> int:
     store = OrganisationalKnowledgeStore()
     extractor = SupportKnowledgeExtractor()
@@ -110,22 +228,30 @@ async def _run_batches(limit: int, until_empty: bool) -> int:
     total_enriched = 0
     total_failed = 0
     while True:
+        progress = _BatchProgress()
         result = await run_once(
             store=store,
             extractor=extractor,
             index=index,
             batch_size=limit,
+            on_progress=progress,
         )
         total_enriched += result.enriched
         total_failed += result.failed
         print(
-            f"batch selected={result.selected} enriched={result.enriched} failed={result.failed} "
-            f"vectors={result.indexed_documents} patterns={result.patterns} "
-            f"remaining={result.remaining} seconds={result.elapsed_seconds:.1f}"
+            "\nBatch complete\n"
+            f"  selected: {result.selected:,}\n"
+            f"  enriched: {result.enriched:,}\n"
+            f"  failed: {result.failed:,}\n"
+            f"  enriched vectors written: {result.indexed_documents:,}\n"
+            f"  materialised patterns: {result.patterns:,}\n"
+            f"  remaining: {result.remaining:,}\n"
+            f"  elapsed: {_duration(result.elapsed_seconds)}",
+            flush=True,
         )
         if not until_empty or result.selected == 0:
             break
-    print(f"total enriched this run: {total_enriched}; failures: {total_failed}")
+    print(f"\nTotal enriched this run: {total_enriched:,}; failures: {total_failed:,}")
     return 0 if total_failed == 0 else 1
 
 
