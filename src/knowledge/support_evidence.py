@@ -79,9 +79,13 @@ class SupportEvidencePackage:
             parts.extend([self.organisational_context, "---"])
         if self.exact_incident_context:
             parts.extend([self.exact_incident_context, "---"])
-        if self.incident_context:
+        # A trusted organisational pattern is authoritative for a normal symptom
+        # query. Do not expose the generic raw-vector fallback or graph neighbours
+        # to the response LLM once that pattern has been selected; doing so can
+        # reintroduce unrelated incident IDs and undo the trust bridge.
+        if self.incident_context and not self.organisational_context:
             parts.extend([self.incident_context, "---"])
-        if self.graph_context:
+        if self.graph_context and not self.organisational_context:
             parts.extend([self.graph_context, "---"])
         if self.governed_context:
             parts.extend(["### Governed knowledge\n" + self.governed_context, "---"])
