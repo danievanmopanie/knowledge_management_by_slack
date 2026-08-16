@@ -11,6 +11,7 @@ PORT="${ATLAS_BUILDER_PORT:-8888}"
 MODEL_NAME="${ATLAS_BUILDER_MODEL_NAME:-aeon-builder}"
 HF_CACHE="${ATLAS_HF_CACHE:-${HOME}/.cache/huggingface}"
 ATLAS_STATE="${ATLAS_STATE_DIR:-${HOME}/.atlas}"
+MAX_SEQ_LEN="${ATLAS_BUILDER_MAX_SEQ_LEN:-65536}"
 
 mkdir -p "${HF_CACHE}" "${ATLAS_STATE}"
 
@@ -26,4 +27,7 @@ exec docker run --rm \
   --kernel-target qwen3.8-27b \
   --model-name "${MODEL_NAME}" \
   --port "${PORT}" \
+  --max-seq-len "${MAX_SEQ_LEN}" \
+  --enable-prefix-caching \
+  --tool-call-parser qwen3_coder \
   --no-auto-swap
