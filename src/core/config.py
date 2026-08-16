@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     report_aging_days: int = 3
     report_stale_hours: int = 24
 
+    # Project-wide background activity UX
+    # Long-running user-triggered work must remain visibly alive. Runtimes should
+    # update one durable status surface in place at this cadence while a phase
+    # is active, without exposing internal reasoning or noisy logs.
+    background_heartbeat_seconds: int = 30
+
     # App
     log_level: str = "INFO"
     environment: str = "development"
