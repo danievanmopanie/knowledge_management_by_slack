@@ -10,7 +10,11 @@ from typing import Any
 from src.agents.builder.task_store import BuilderTaskStore
 from src.bot.blockkit.builder import builder_status_blocks
 from src.core.config import settings
-from src.integrations.github_client import GitHubClientError, create_pull_request
+from src.integrations.github_client import (
+    GitHubClientError,
+    create_pull_request,
+    pull_request_is_open,
+)
 from src.reporting.publisher import publish_report_to_channel
 from src.worker.aider_runner import AiderResult, run_aider
 from src.worker.validation import ValidationResult, run_validation
@@ -39,19 +43,41 @@ def run_forever() -> None:
         _run_task(store, task)
 
 
+def _open_continuation(task: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return the branch/PR to continue when the previous thread PR is open."""
+    branch = task.get("continuation_branch")
+    pr_url = task.get("continuation_pr_url")
+    if not branch or not pr_url:
+        return None, None
+    try:
+        if pull_request_is_open(pr_url):
+            return branch, pr_url
+    except GitHubClientError:
+        # Continuation is an ergonomic enhancement, never a reason to block a
+        # new Builder turn. If GitHub cannot prove the PR is open, start fresh.
+        logger.exception("Could not verify continuation PR for task %s", task["task_id"])
+    return None, None
+
+
 def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
     task_id = task["task_id"]
     logger.info("Claimed builder turn %s", task_id)
     worktree: Worktree | None = None
+    continuation_branch, continuation_pr_url = _open_continuation(task)
     try:
-        worktree = prepare_worktree(task_id)
+        worktree = prepare_worktree(task_id, continuation_branch=continuation_branch)
         store.mark_running(task_id, branch_name=worktree.branch_name)
         _publish_status(
             store,
             task,
             status="running",
-            summary="I’m inspecting the repository and working through your request on the device.",
+            summary=(
+                "I’m continuing the open pull request from this Slack thread on the device."
+                if continuation_pr_url
+                else "I’m inspecting the repository and working through your request on the device."
+            ),
             branch_name=worktree.branch_name,
+            pr_url=continuation_pr_url,
         )
 
         initial = run_aider(goal=task["goal"], worktree_path=worktree.path)
@@ -59,16 +85,22 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
 
         # Natural harness behaviour: questions and inspections do not manufacture
         # a PR. If Aider made no repository change, return its answer as normal
-        # conversation and finish the turn.
+        # conversation and finish the turn. Preserve an existing PR association
+        # so later replies in the same Slack thread can keep using that session.
         if not has_repository_changes(worktree):
             answer = _aider_answer(initial)
-            store.mark_succeeded(task_id, result_text=answer)
+            store.mark_succeeded(
+                task_id,
+                pr_url=continuation_pr_url,
+                result_text=answer,
+            )
             _publish_status(
                 store,
                 task,
                 status="answered",
                 summary="I inspected the repository and didn’t need to change files for this turn.",
                 branch_name=worktree.branch_name,
+                pr_url=continuation_pr_url,
             )
             publish_report_to_channel(
                 answer,
@@ -84,35 +116,47 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
         # Aider normally commits automatically. This catches any legitimate
         # edits left dirty after a repair so the published branch matches what
         # was actually validated.
-        commit_pending_changes(worktree, message=f"Builder Agent: {_latest_request(task['goal'])[:72]}")
+        latest_request = _latest_request(task["goal"])
+        commit_pending_changes(worktree, message=f"Builder Agent: {latest_request[:72]}")
         push_branch(worktree)
         validation_label = "passed" if validation.success else "not required"
-        latest_request = _latest_request(task["goal"])
-        pr = create_pull_request(
-            branch_name=worktree.branch_name,
-            title=f"Builder Agent: {latest_request[:72]}",
-            body=(
-                "Automated change requested through the natural Slack Builder harness.\n\n"
-                f"Latest request:\n{latest_request}\n\n"
-                f"Turn: `{task_id}`\n\n"
-                "Local validation:\n"
-                f"- Status: **{validation_label}**\n"
-                f"- Command: `{validation.command or '(disabled)'}`\n"
-                f"- Repair attempts: {repair_attempts}\n\n"
-                f"Builder model checkpoint: `{settings.builder_model_checkpoint}`\n"
-                f"Inference endpoint: `{settings.builder_llm_base_url}`"
-            ),
-        )
-        store.mark_succeeded(task_id, pr_url=pr["html_url"])
+
+        if continuation_pr_url:
+            pr_url = continuation_pr_url
+            completion_summary = (
+                "Your follow-up is locally green and has been pushed to the existing pull request."
+            )
+        else:
+            pr = create_pull_request(
+                branch_name=worktree.branch_name,
+                title=f"Builder Agent: {latest_request[:72]}",
+                body=(
+                    "Automated change requested through the natural Slack Builder harness.\n\n"
+                    f"Latest request:\n{latest_request}\n\n"
+                    f"Turn: `{task_id}`\n\n"
+                    "Local validation:\n"
+                    f"- Status: **{validation_label}**\n"
+                    f"- Command: `{validation.command or '(disabled)'}`\n"
+                    f"- Repair attempts: {repair_attempts}\n\n"
+                    f"Builder model checkpoint: `{settings.builder_model_checkpoint}`\n"
+                    f"Inference endpoint: `{settings.builder_llm_base_url}`"
+                ),
+            )
+            pr_url = pr["html_url"]
+            completion_summary = (
+                "The repository change is locally green and has been published for review."
+            )
+
+        store.mark_succeeded(task_id, pr_url=pr_url)
         _publish_status(
             store,
             task,
             status="completed",
-            summary="The repository change is locally green and has been published for review.",
+            summary=completion_summary,
             branch_name=worktree.branch_name,
             validation="✅ passed" if validation.success else "not required",
             repair_attempt=str(repair_attempts),
-            pr_url=pr["html_url"],
+            pr_url=pr_url,
         )
 
     except (WorkspaceError, GitHubClientError, RuntimeError) as exc:
@@ -124,6 +168,7 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             status="failed",
             summary=f"I stopped without publishing the change. {str(exc)[:1200]}",
             branch_name=worktree.branch_name if worktree else None,
+            pr_url=continuation_pr_url,
         )
     except Exception as exc:
         logger.exception("Builder turn %s failed unexpectedly", task_id)
@@ -134,6 +179,7 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             status="failed",
             summary=f"I stopped unexpectedly without publishing. {str(exc)[:1200]}",
             branch_name=worktree.branch_name if worktree else None,
+            pr_url=continuation_pr_url,
         )
     finally:
         if worktree is not None:
@@ -195,9 +241,6 @@ def _latest_request(goal: str) -> str:
     marker = "Latest request:\n"
     if marker in goal:
         return goal.rsplit(marker, 1)[-1].strip()
-    # Root turns have no prior Slack transcript. The Builder harness instruction
-    # is separated from the request by a blank line, so the final paragraph is
-    # the best human-readable PR summary.
     parts = [part.strip() for part in goal.split("\n\n") if part.strip()]
     return parts[-1] if parts else goal.strip()
 
@@ -207,7 +250,6 @@ def _aider_answer(result: AiderResult) -> str:
     text = _ANSI_RE.sub("", (result.stdout or result.stderr or "").strip())
     if not text:
         return "I inspected the repository and didn’t find anything else I needed to change."
-    # Keep Slack conversational; very long CLI transcripts are not useful chat.
     return text[-8000:]
 
 
