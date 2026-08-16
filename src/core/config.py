@@ -98,7 +98,7 @@ class Settings(BaseSettings):
 
     # Keep Builder inference independent from the rest of the Slack agents so
     # Atlas can be introduced as a canary without moving support/extraction.
-    builder_aider_model: str = "openai/atlas"
+    builder_aider_model: str = "openai/aeon-builder"
     builder_llm_base_url: str = "http://127.0.0.1:8888/v1"
     builder_llm_api_key: str = "atlas-local"
     builder_model_checkpoint: str = "AEON-7/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-BF16"
