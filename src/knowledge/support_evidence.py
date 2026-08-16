@@ -48,6 +48,7 @@ class SupportEvidencePackage:
     governed_candidates: list[RetrievalCandidate] = field(default_factory=list)
     governed_context: str = ""
     organisational_context: str = ""
+    trusted_pattern_response: str = ""
     incident_context: str = ""
     graph_context: str = ""
     incident_sources: set[str] = field(default_factory=set)
@@ -65,6 +66,7 @@ class SupportEvidencePackage:
     def has_evidence(self) -> bool:
         return bool(
             self.exact_incident_context
+            or self.trusted_pattern_response
             or self.organisational_context
             or self.governed_context
             or self.incident_context
@@ -73,19 +75,13 @@ class SupportEvidencePackage:
 
     def to_prompt_context(self, max_chars: int = PROMPT_CONTEXT_MAX_CHARS) -> str:
         parts: list[str] = []
-        # For exact lookups the distilled enrichment comes first so a very long
-        # journal can never crowd out extracted resolution/action knowledge.
         if self.organisational_context:
             parts.extend([self.organisational_context, "---"])
         if self.exact_incident_context:
             parts.extend([self.exact_incident_context, "---"])
-        # A trusted organisational pattern is authoritative for a normal symptom
-        # query. Do not expose the generic raw-vector fallback or graph neighbours
-        # to the response LLM once that pattern has been selected; doing so can
-        # reintroduce unrelated incident IDs and undo the trust bridge.
-        if self.incident_context and not self.organisational_context:
+        if self.incident_context and not self.organizational_pattern_selected:
             parts.extend([self.incident_context, "---"])
-        if self.graph_context and not self.organisational_context:
+        if self.graph_context and not self.organizational_pattern_selected:
             parts.extend([self.graph_context, "---"])
         if self.governed_context:
             parts.extend(["### Governed knowledge\n" + self.governed_context, "---"])
@@ -94,13 +90,16 @@ class SupportEvidencePackage:
             return text[:max_chars] + "\n\n[Support evidence truncated]"
         return text
 
+    @property
+    def organizational_pattern_selected(self) -> bool:
+        return bool(self.trusted_pattern_response)
+
 
 def _normalise_query(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
 def _context_scope(context: RequestContext) -> tuple:
-    """Scope cache entries so permission-sensitive governed evidence cannot leak."""
     return (
         context.channel_id or "",
         context.user_id or "",
@@ -114,7 +113,6 @@ def _incident_context_from_casefiles(
     *,
     max_chars: int = INCIDENT_CONTEXT_MAX_CHARS,
 ) -> str:
-    """Hydrate semantically-selected raw incident IDs into complete case evidence."""
     if not docs:
         return ""
     parts = [
@@ -161,8 +159,6 @@ class SupportEvidenceService:
     ):
         self.retriever = retriever or HybridRetriever()
         self.incident_rag = incident_rag or IncidentRAG()
-        # Rich support graph is intentionally separate from the fast temporal
-        # graph. Exact raw case files still use the temporal graph below.
         self.support_graph = support_graph or SupportKnowledgeGraph()
         self.casefiles = casefiles or IncidentCaseFileStore(graph_store=self.incident_rag.graph_store)
         self.organisational = organisational or TrustedPatternKnowledgeRetriever()
@@ -244,20 +240,17 @@ class SupportEvidenceService:
 
         retrieval_query = RetrievalQuery(text=query, context=context, limit=limit, graph_depth=1)
 
-        # These lanes are independent. The organisational lane now performs both
-        # semantic pattern selection and authoritative full-pattern expansion in
-        # one bridge, so no second raw-neighbour aggregation is allowed.
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="frontend-evidence") as pool:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
             organisational_future = pool.submit(
-                self.organisational.collective_context,
+                self.organisational.collective_bundle,
                 query,
                 candidate_k=settings.knowledge_pattern_candidate_k,
                 max_incidents=settings.knowledge_pattern_max_incidents,
             )
             incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
             governed = governed_future.result()
-            organisational_context = organisational_future.result()
+            organisational_context, trusted_pattern_response = organisational_future.result()
             incident_docs = incident_future.result()
 
         incident_sources: set[str] = set()
@@ -292,6 +285,7 @@ class SupportEvidenceService:
             governed_candidates=governed.candidates,
             governed_context=governed.to_context_string() if governed.should_answer else "",
             organisational_context=organisational_context,
+            trusted_pattern_response=trusted_pattern_response,
             incident_context=_incident_context_from_casefiles(incident_docs, self.casefiles),
             graph_context=graph_context,
             incident_sources=incident_sources,
