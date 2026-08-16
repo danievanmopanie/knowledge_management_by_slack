@@ -1,4 +1,4 @@
-"""Tests for the Slack-facing Builder Agent (enqueue-only, no Aider execution)."""
+"""Tests for the Slack-facing natural-language Builder Agent."""
 
 import asyncio
 
@@ -40,7 +40,6 @@ class FakeBuilderTaskStore:
 
 def _agent(monkeypatch, allowed_user_ids: str = "U1"):
     monkeypatch.setattr(settings, "builder_agent_allowed_user_ids", allowed_user_ids)
-    # Bypass __init__ so no real BuilderTaskStore/sqlite file is created for this test.
     agent = BuilderAgent.__new__(BuilderAgent)
     agent.tasks = FakeBuilderTaskStore()
     return agent
@@ -50,71 +49,61 @@ def _context(user_id: str = "U1") -> RequestContext:
     return RequestContext.from_slack(channel_id="C1", user_id=user_id, thread_ts="123.45")
 
 
-def test_help_text_for_empty_message(monkeypatch):
+def test_help_explains_natural_language(monkeypatch):
     agent = _agent(monkeypatch)
-
     result = asyncio.run(agent.handle("", _context()))
-
-    assert "Builder Agent" in result
+    assert "Talk to me naturally" in result
+    assert "No `build:` prefix is required" in result
 
 
 def test_disallowed_user_is_refused(monkeypatch):
     agent = _agent(monkeypatch, allowed_user_ids="U2")
-
-    result = asyncio.run(agent.handle("build: add a feature", _context(user_id="U1")))
-
+    result = asyncio.run(agent.handle("Please add a health check", _context(user_id="U1")))
     assert "not on the Builder Agent allowlist" in result
     assert agent.tasks.enqueue_calls == []
 
 
-def test_build_command_enqueues_task(monkeypatch):
+def test_natural_request_enqueues_turn_without_magic_prefix(monkeypatch):
     agent = _agent(monkeypatch)
-
-    result = asyncio.run(agent.handle("build: add a health check endpoint", _context()))
+    result = asyncio.run(agent.handle("Please add a health check endpoint", _context()))
 
     assert len(agent.tasks.enqueue_calls) == 1
     call = agent.tasks.enqueue_calls[0]
-    assert call["goal"] == "add a health check endpoint"
+    assert "Please add a health check endpoint" in call["goal"]
+    assert "never require magic command words" in call["goal"]
     assert call["requester_id"] == "U1"
     assert call["channel_id"] == "C1"
     assert call["thread_ts"] == "123.45"
     assert "bld_1" in result
 
 
-def test_build_command_without_goal_is_rejected(monkeypatch):
+def test_legacy_build_prefix_remains_backward_compatible(monkeypatch):
     agent = _agent(monkeypatch)
-
-    result = asyncio.run(agent.handle("build:", _context()))
-
-    assert "describe the change" in result
-    assert agent.tasks.enqueue_calls == []
+    asyncio.run(agent.handle("build: add a health check endpoint", _context()))
+    call = agent.tasks.enqueue_calls[0]
+    assert "add a health check endpoint" in call["goal"]
+    assert "build: add a health check endpoint" not in call["goal"]
 
 
 def test_status_command_reports_task_state(monkeypatch):
     agent = _agent(monkeypatch)
-    task_id = asyncio.run(agent.handle("build: do a thing", _context()))
-    task_id = task_id.split("`")[1]
-
+    ack = asyncio.run(agent.handle("Do a thing", _context()))
+    task_id = ack.split("`")[1]
     result = asyncio.run(agent.handle(f"status {task_id}", _context()))
-
     assert task_id in result
     assert "pending" in result
 
 
 def test_status_command_unknown_task(monkeypatch):
     agent = _agent(monkeypatch)
-
     result = asyncio.run(agent.handle("status bld_missing", _context()))
-
-    assert "No build task found" in result
+    assert "No Builder turn found" in result
 
 
 def test_cancel_command_cancels_pending_task(monkeypatch):
     agent = _agent(monkeypatch)
-    ack = asyncio.run(agent.handle("build: do a thing", _context()))
+    ack = asyncio.run(agent.handle("Do a thing", _context()))
     task_id = ack.split("`")[1]
-
     result = asyncio.run(agent.handle(f"cancel {task_id}", _context()))
-
-    assert "Cancelled build task" in result
+    assert "Cancelled Builder turn" in result
     assert agent.tasks.get(task_id)["status"] == "cancelled"
