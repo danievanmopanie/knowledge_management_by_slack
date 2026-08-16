@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -32,6 +33,7 @@ from src.knowledge.support_extraction import (  # noqa: E402
 logger = logging.getLogger(__name__)
 TERMINAL_STATES = {"resolved", "closed", "cancelled", "canceled"}
 CANDIDATE_POOL_MULTIPLIER = 8
+ProgressCallback = Callable[[dict], None]
 
 
 @dataclass
@@ -43,6 +45,15 @@ class EnrichmentBatchResult:
     patterns: int = 0
     remaining: int = 0
     elapsed_seconds: float = 0.0
+
+
+def _emit(on_progress: ProgressCallback | None, **event) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(event)
+    except Exception:
+        logger.exception("Knowledge enrichment progress callback failed")
 
 
 def _knowledge_value(candidate: EnrichmentCandidate) -> tuple[int, int, int, int, str]:
@@ -73,7 +84,6 @@ def _select_candidates(
 ) -> list[EnrichmentCandidate]:
     pool_limit = max(limit, limit * CANDIDATE_POOL_MULTIPLIER)
     pool = store.pending(limit=pool_limit, model=model_key)
-    # Descending booleans/quality dimensions, deterministic incident number tie-break.
     return sorted(
         pool,
         key=lambda candidate: (
@@ -89,16 +99,22 @@ def _select_candidates(
 async def _extract_batch(
     candidates: list[EnrichmentCandidate],
     extractor: SupportKnowledgeExtractor,
+    *,
+    on_progress: ProgressCallback | None = None,
 ) -> list[tuple[EnrichmentCandidate, SupportExtraction | None, Exception | None]]:
     semaphore = asyncio.Semaphore(max(1, int(settings.support_extraction_concurrency)))
 
     async def one(candidate: EnrichmentCandidate):
         async with semaphore:
+            number = candidate.incident.number
+            _emit(on_progress, stage="extracting", event="started", incident=number)
             try:
                 extraction = await extractor.extract(candidate.incident)
+                _emit(on_progress, stage="extracting", event="completed", incident=number)
                 return candidate, extraction, None
-            except Exception as exc:  # keep the batch moving; worker will retry later
-                logger.exception("Knowledge extraction failed for %s", candidate.incident.number)
+            except Exception as exc:
+                logger.exception("Knowledge extraction failed for %s", number)
+                _emit(on_progress, stage="extracting", event="failed", incident=number)
                 return candidate, None, exc
 
     return await asyncio.gather(*(one(candidate) for candidate in candidates))
@@ -110,6 +126,7 @@ async def run_once(
     extractor: SupportKnowledgeExtractor | None = None,
     index: OrganisationalKnowledgeIndex | None = None,
     batch_size: int | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> EnrichmentBatchResult:
     started = time.perf_counter()
     store = store or OrganisationalKnowledgeStore()
@@ -119,9 +136,19 @@ async def run_once(
     limit = max(1, int(batch_size or settings.knowledge_enrichment_batch_size))
     candidates = _select_candidates(store, limit=limit, model_key=model_key)
     result = EnrichmentBatchResult(selected=len(candidates))
+    pending_before = store.pending_count(model=model_key)
+    _emit(
+        on_progress,
+        stage="selected",
+        event="batch",
+        selected=result.selected,
+        pending_before=pending_before,
+        model=model_key,
+    )
     if not candidates:
-        result.remaining = store.pending_count(model=model_key)
+        result.remaining = pending_before
         result.elapsed_seconds = time.perf_counter() - started
+        _emit(on_progress, stage="complete", event="batch", result=result)
         return result
 
     logger.info(
@@ -129,23 +156,29 @@ async def run_once(
         len(candidates),
         model_key,
         settings.support_extraction_concurrency,
-        store.pending_count(model=model_key),
+        pending_before,
     )
 
-    extracted = await _extract_batch(candidates, extractor)
+    extracted = await _extract_batch(candidates, extractor, on_progress=on_progress)
     enriched_items = []
+    _emit(on_progress, stage="persisting", event="stage", selected=result.selected)
     for candidate, extraction, error in extracted:
         if error is not None or extraction is None:
             result.failed += 1
             continue
         try:
-            # Graph writes are deliberately serial even though LLM extraction is
-            # concurrent. GraphStore is an in-memory NetworkX object persisted once
-            # at the end of the batch.
             extractor.apply(candidate.incident, extraction, save=False)
             item = store.upsert(candidate, extraction, model=model_key)
             enriched_items.append(item)
             result.enriched += 1
+            _emit(
+                on_progress,
+                stage="persisting",
+                event="completed",
+                incident=item.incident_number,
+                enriched=result.enriched,
+                failed=result.failed,
+            )
             logger.info(
                 "Enriched %s pattern=%r resolution=%r confidence=%.2f",
                 item.incident_number,
@@ -155,9 +188,18 @@ async def run_once(
             )
         except Exception:
             result.failed += 1
+            _emit(
+                on_progress,
+                stage="persisting",
+                event="failed",
+                incident=candidate.incident.number,
+                enriched=result.enriched,
+                failed=result.failed,
+            )
             logger.exception("Could not persist enriched knowledge for %s", candidate.incident.number)
 
     if enriched_items:
+        _emit(on_progress, stage="indexing", event="stage", enriched=result.enriched)
         extractor.graph.save()
         index_result = index.upsert_many(enriched_items)
         result.indexed_documents = int(index_result.get("documents") or 0)
@@ -165,6 +207,7 @@ async def run_once(
 
     result.remaining = store.pending_count(model=model_key)
     result.elapsed_seconds = time.perf_counter() - started
+    _emit(on_progress, stage="complete", event="batch", result=result)
     logger.info(
         "Knowledge enrichment complete: selected=%d enriched=%d failed=%d indexed_docs=%d "
         "patterns=%d remaining=%d seconds=%.2f",
@@ -194,7 +237,6 @@ async def run_forever() -> None:
         if result.selected == 0:
             await asyncio.sleep(max(1.0, float(settings.knowledge_enrichment_poll_seconds)))
         else:
-            # Yield between batches so Slack-facing processes are never starved.
             await asyncio.sleep(0.1)
 
 
