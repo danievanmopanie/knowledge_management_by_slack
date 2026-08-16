@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     retrieval_strong_confidence: float = 0.55
     retrieval_max_chunks_per_document: int = 2
 
+    # A confirmed fix older than this is still shown as evidence, but flagged for
+    # re-verification instead of being presented as current fact.
+    support_graph_stale_fix_days: int = 270
+
     # Paths
     vectorstore_path: Path = Path("./data/vectorstore")
     raw_docs_path: Path = Path("./data/raw")

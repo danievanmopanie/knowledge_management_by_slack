@@ -11,10 +11,17 @@ def seed_incident_graph(incident: Incident, graph: SupportKnowledgeGraph) -> Gra
 
     Rich action/root-cause extraction is intentionally left to the extraction model.
     This seed step only records relationships directly supported by CSV fields.
+
+    Facts are backdated to when the incident actually happened (resolved_at, falling
+    back to opened_at) rather than import time, so recency-based retrieval reflects
+    real support history instead of ranking every historical incident as "just now".
     """
     number = (incident.number or "").strip()
     if not number:
         return None
+
+    occurred_at = incident.resolved_at or incident.opened_at
+    occurred_at_iso = occurred_at.isoformat() if occurred_at else None
 
     node = graph.add_incident(
         number,
@@ -22,11 +29,12 @@ def seed_incident_graph(incident: Incident, graph: SupportKnowledgeGraph) -> Gra
         state=incident.state or "",
         assigned_to=incident.assigned_to or "",
         caller=incident.caller or "",
+        occurred_at=occurred_at_iso,
     )
 
     symptom = (incident.short_description or incident.description or "").strip()
     if symptom:
-        graph.add_symptom(node, symptom, confidence=1.0)
+        graph.add_symptom(node, symptom, confidence=1.0, occurred_at=occurred_at_iso)
 
     if incident.category:
         technology = GraphEntity(
@@ -35,7 +43,7 @@ def seed_incident_graph(incident: Incident, graph: SupportKnowledgeGraph) -> Gra
             incident.category,
             {"subcategory": incident.subcategory or ""},
         )
-        graph.relate(node, technology, SupportRelation.AFFECTS)
+        graph.relate(node, technology, SupportRelation.AFFECTS, occurred_at=occurred_at_iso)
 
     if incident.location:
         environment = GraphEntity(
@@ -43,7 +51,7 @@ def seed_incident_graph(incident: Incident, graph: SupportKnowledgeGraph) -> Gra
             incident.location,
             incident.location,
         )
-        graph.relate(node, environment, SupportRelation.OCCURRED_IN)
+        graph.relate(node, environment, SupportRelation.OCCURRED_IN, occurred_at=occurred_at_iso)
 
     resolution = (incident.resolution_notes or "").strip()
     if resolution and (incident.state or "").strip().lower() in {"resolved", "closed"}:
@@ -52,6 +60,7 @@ def seed_incident_graph(incident: Incident, graph: SupportKnowledgeGraph) -> Gra
             resolution,
             resolver=(incident.assigned_to or "").strip() or None,
             confidence=1.0,
+            occurred_at=occurred_at_iso,
         )
 
     return node

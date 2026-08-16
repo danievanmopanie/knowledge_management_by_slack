@@ -1,8 +1,9 @@
-"""Lightweight knowledge graph for entity relationships (Graph RAG component)."""
+"""Lightweight temporal knowledge graph for entity relationships (Graph RAG component)."""
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +12,21 @@ import networkx as nx
 from src.core.config import settings
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 class GraphStore:
     """
-    Simple persistent knowledge graph using NetworkX.
+    Simple persistent, temporally-aware knowledge graph using NetworkX.
 
     Nodes = entities (systems, error codes, floors, teams, services, etc.)
     Edges = relationships (related_to, causes, owned_by, located_on, ...)
+
+    Every node tracks first_seen_at/last_seen_at and every edge tracks
+    occurred_at (when the underlying fact happened, backdatable for historical
+    import) and created_at (when the edge was recorded), so callers can reason
+    about recency and staleness instead of treating the graph as timeless.
     """
 
     def __init__(self, path: Path | None = None):
@@ -34,25 +44,66 @@ class GraphStore:
         data = nx.node_link_data(self.graph)
         self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    def add_entity(self, entity_id: str, entity_type: str, **properties: Any) -> None:
-        self.graph.add_node(entity_id, type=entity_type, **properties)
+    def add_entity(
+        self,
+        entity_id: str,
+        entity_type: str,
+        *,
+        occurred_at: str | None = None,
+        **properties: Any,
+    ) -> None:
+        timestamp = occurred_at or _now_iso()
+        if entity_id in self.graph:
+            existing = self.graph.nodes[entity_id]
+            first_seen_at = existing.get("first_seen_at") or timestamp
+            last_seen_at = max(existing.get("last_seen_at") or timestamp, timestamp)
+        else:
+            first_seen_at = timestamp
+            last_seen_at = timestamp
+        self.graph.add_node(
+            entity_id,
+            type=entity_type,
+            first_seen_at=first_seen_at,
+            last_seen_at=last_seen_at,
+            **properties,
+        )
 
     def add_relation(
         self,
         source: str,
         target: str,
         relation: str,
+        *,
+        occurred_at: str | None = None,
         **properties: Any,
     ) -> None:
-        self.graph.add_edge(source, target, key=relation, relation=relation, **properties)
+        timestamp = occurred_at or _now_iso()
+        self.graph.add_edge(
+            source,
+            target,
+            key=relation,
+            relation=relation,
+            occurred_at=timestamp,
+            created_at=_now_iso(),
+            **properties,
+        )
 
     def get_related(
         self,
         entity_id: str,
         max_depth: int = 1,
         relation_filter: str | None = None,
+        *,
+        since: str | None = None,
+        order_by_recency: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return outgoing relationships up to max_depth, preserving parallel edge types."""
+        """Return outgoing relationships up to max_depth, preserving parallel edge types.
+
+        `since` (an ISO timestamp) drops facts that occurred earlier than it.
+        `order_by_recency` sorts the most recently occurred facts first, which
+        is what makes repeat-incident and "is this fix still current" reasoning
+        possible instead of an unordered bag of relationships.
+        """
         if entity_id not in self.graph:
             return []
 
@@ -69,6 +120,9 @@ class GraphStore:
                     rel = edge_data.get("relation")
                     if relation_filter and rel != relation_filter:
                         continue
+                    occurred_at = edge_data.get("occurred_at")
+                    if since and occurred_at and occurred_at < since:
+                        continue
 
                     # A MultiDiGraph may contain multiple meaningful relations
                     # between the same two entities (for example TRIED and
@@ -80,6 +134,7 @@ class GraphStore:
                             "type": self.graph.nodes[neighbor].get("type"),
                             "relation": rel,
                             "depth": depth,
+                            "occurred_at": occurred_at,
                             "properties": dict(self.graph.nodes[neighbor]),
                             "edge_properties": dict(edge_data),
                         }
@@ -90,6 +145,9 @@ class GraphStore:
             current_layer = next_layer
             if not current_layer:
                 break
+
+        if order_by_recency:
+            results.sort(key=lambda item: item.get("occurred_at") or "", reverse=True)
 
         return results
 

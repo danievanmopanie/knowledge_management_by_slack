@@ -26,6 +26,14 @@ The assistant acknowledges once, then continues capturing the thread without pro
 
 The ServiceNow incident number is no longer treated as an entry gate. A technical conversation can start naturally. When useful, the assistant reminds the requester to add the `INC...` number so the learning remains referenceable.
 
+When the assistant has some evidence but not enough to answer with confidence, it asks
+one focused clarifying question (for example the exact device model or error text)
+instead of guessing. A reply anywhere in that thread — even something as short as
+"a Dell Latitude 5420" that wouldn't otherwise look like a technical message — routes
+straight back to the assistant, so the exchange reads as a real conversation rather
+than a form. See `docs/FRONTEND_SUPPORT_KNOWLEDGE_ARCHITECTURE.md` for how this is
+implemented.
+
 ## Evidence versus knowledge
 
 All relevant human conversation is stored as evidence. It is **not automatically treated as formal knowledge**.
@@ -36,23 +44,34 @@ Historical incident notes are also evidence, not truth. The technician-facing ag
 
 ## Formal knowledge gap loop
 
-After a human confirms a field resolution, the bot checks the governed knowledge store using the problem plus confirmed resolution.
+After a human confirms a field resolution, the bot checks the governed knowledge store using the problem plus confirmed resolution and reacts by match strength:
 
-If there is no strong governed match, it creates a deduplicated `KG-xxxxx` task and posts it to:
+- **Strong match** — an existing article already covers this. No task is created; the
+  thread is told which article matched, and the confirmed fix stays recorded as
+  operational evidence only. This is the duplicate-knowledge guard: it stops
+  `#create-knowledge` from filling up with near-duplicate articles.
+- **Weak or no match** — the bot drafts a full structured knowledge article with an LLM
+  (title, symptom, environment, root cause, resolution steps, validation, related
+  incidents — grounded only in confirmed evidence) and posts it as one reviewable card
+  to:
+  1. `CHANNEL_CREATE_KNOWLEDGE`, when configured; otherwise
+  2. `CHANNEL_KNOWLEDGE_UPLOADS` as a temporary fallback.
 
-1. `CHANNEL_CREATE_KNOWLEDGE`, when configured; otherwise
-2. `CHANNEL_KNOWLEDGE_UPLOADS` as a temporary fallback.
+  A weak match additionally flags the related existing article on the card so the
+  reviewer can choose to update it in place instead of publishing a near-duplicate.
 
-The task contains:
+The card (`KG-xxxxx`) shows the drafted article, contributors, the source
+incident/thread and four one-click controls:
 
-- source incident number
-- problem/symptom
-- confirmed field resolution
-- contributors
-- reason the knowledge gap was created
-- source Slack channel/thread identity
+- **Publish new article** — commits the draft as searchable governed knowledge immediately.
+- **Update existing article instead** — shown only when a related article was flagged; commits the draft as a new version of that same document rather than a new one.
+- **Assign a teammate** — a Slack user picker; the assignee gets a direct message with the problem, the confirmed resolution and a link back to the review channel.
+- **Dismiss** — closes the card without publishing.
 
-This deliberately separates fast operational learning from formal curation.
+This deliberately separates fast operational learning (captured the moment a fix is
+confirmed) from formal curation (a reviewer's one-click decision on an
+already-drafted article), while the strong-match check keeps that curation from
+duplicating what already exists.
 
 ## Private technician coaching
 
@@ -72,6 +91,13 @@ In the Slack app configuration:
 4. Reinstall the Slack app to the workspace after adding OAuth scopes.
 
 The existing public-channel message subscription remains required for ambient `#frontend-support` listening.
+
+### Slack app settings required for knowledge task assignment DMs
+
+Assigning a knowledge task now has the bot open a fresh DM (`conversations.open`)
+rather than replying in one the user already started. Add the `im:write` bot token
+scope and reinstall the app; without it, assignment still records who was assigned
+but `send_dm()` logs a failure and the DM is silently skipped.
 
 ## Voice notes
 
@@ -165,7 +191,8 @@ Run these in order:
 5. **Mute:** say `We've got this`. The agent should stop proactive replies but continue recording subsequent troubleshooting messages.
 6. **Resume:** say `Assistant, help again`. Proactive support should resume.
 7. **Resolution:** confirm a real fix. The requester/resolver should be able to capture it as operational knowledge.
-8. **Knowledge gap:** if governed knowledge coverage is weak, a `KG-xxxxx` task should appear in `#create-knowledge`.
+8. **Knowledge gap:** if governed knowledge coverage is weak or absent, an AI-drafted `KG-xxxxx` article card should appear in `#create-knowledge` with Publish/Assign/Dismiss controls; if coverage is strong, no card should appear and the thread should be told which existing article matched instead.
+9. **Assignment:** click *Assign a teammate* on a knowledge task card and confirm the assignee receives a DM naming the task, problem and confirmed resolution.
 9. **Private coaching:** DM the bot about the same technical issue. Private content must not appear in the public thread.
 10. **Voice note:** post a short incident voice note and verify the transcript is used for troubleshooting.
 11. **Morning pulse:** run `python scripts/run_daily_report.py` manually once before enabling the timer.
@@ -176,6 +203,9 @@ Run these in order:
 ```bash
 # Tests
 pytest -q tests/test_frontend_collaboration.py tests/test_frontend_voice.py tests/test_support_operations.py
+
+# Clarifying follow-up, gen-AI drafting and the create-knowledge card flow
+pytest -q tests/test_frontend_clarification.py tests/test_article_drafting.py tests/test_frontend_knowledge_tasks.py
 
 # Existing support/RAG regression tests
 pytest -q tests/test_frontend_abstention.py tests/test_incident_field_aware_rag.py tests/test_support_graph.py

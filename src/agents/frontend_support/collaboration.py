@@ -134,6 +134,7 @@ class ThreadState:
     root_message: str
     participants: tuple[str, ...]
     assistant_suppressed: bool = False
+    awaiting_clarification: bool = False
 
 
 class FrontendThreadStore:
@@ -231,6 +232,22 @@ class FrontendThreadStore:
                 "assistant_suppressed",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            self._ensure_column(
+                conn,
+                "frontend_thread_state",
+                "awaiting_clarification",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(conn, "frontend_knowledge_tasks", "assignee_id", "TEXT")
+            self._ensure_column(conn, "frontend_knowledge_tasks", "related_document_id", "TEXT")
+            self._ensure_column(conn, "frontend_knowledge_tasks", "related_document_title", "TEXT")
+            self._ensure_column(
+                conn, "frontend_knowledge_tasks", "drafted_title", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                conn, "frontend_knowledge_tasks", "drafted_markdown", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(conn, "frontend_knowledge_tasks", "published_document_id", "TEXT")
 
     def ensure_thread(
         self,
@@ -269,6 +286,7 @@ class FrontendThreadStore:
             root_message=row["root_message"],
             participants=tuple(json.loads(row["participants_json"] or "[]")),
             assistant_suppressed=bool(row["assistant_suppressed"]),
+            awaiting_clarification=bool(row["awaiting_clarification"]),
         )
 
     def add_event(
@@ -320,6 +338,16 @@ class FrontendThreadStore:
                 WHERE channel_id=? AND thread_ts=?
                 """,
                 (1 if suppressed else 0, channel_id, thread_ts),
+            )
+
+    def set_awaiting_clarification(self, channel_id: str, thread_ts: str, awaiting: bool) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE frontend_thread_state SET awaiting_clarification=?
+                WHERE channel_id=? AND thread_ts=?
+                """,
+                (1 if awaiting else 0, channel_id, thread_ts),
             )
 
     def mark_possible_resolution(self, channel_id: str, thread_ts: str, resolver_id: str) -> None:
@@ -447,6 +475,10 @@ class FrontendThreadStore:
         thread_ts: str,
         created_by: str,
         reason: str,
+        related_document_id: str | None = None,
+        related_document_title: str | None = None,
+        drafted_title: str = "",
+        drafted_markdown: str = "",
     ) -> dict:
         state = self.get_thread(channel_id, thread_ts)
         if not state.incident_number:
@@ -459,8 +491,9 @@ class FrontendThreadStore:
                 """
                 INSERT OR IGNORE INTO frontend_knowledge_tasks
                     (source_channel_id, source_thread_ts, incident_number, symptom,
-                     resolution, contributors_json, reason, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     resolution, contributors_json, reason, created_by,
+                     related_document_id, related_document_title, drafted_title, drafted_markdown)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     channel_id,
@@ -471,6 +504,10 @@ class FrontendThreadStore:
                     json.dumps(contributors),
                     reason,
                     created_by,
+                    related_document_id,
+                    related_document_title,
+                    drafted_title,
+                    drafted_markdown,
                 ),
             )
             row = conn.execute(
@@ -482,10 +519,41 @@ class FrontendThreadStore:
             ).fetchone()
         if not row:
             raise RuntimeError("Knowledge task was not created")
+        return self._task_row_to_dict(row)
+
+    @staticmethod
+    def _task_row_to_dict(row: sqlite3.Row) -> dict:
         task = dict(row)
         task["task_id"] = f"KG-{int(task['id']):05d}"
         task["contributors"] = json.loads(task.pop("contributors_json") or "[]")
         return task
+
+    def get_knowledge_task(self, task_id: int) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM frontend_knowledge_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+        return self._task_row_to_dict(row) if row else None
+
+    def assign_knowledge_task(self, task_id: int, assignee_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE frontend_knowledge_tasks SET assignee_id=?, status='assigned' WHERE id=?",
+                (assignee_id, task_id),
+            )
+
+    def mark_knowledge_task_published(self, task_id: int, *, published_document_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE frontend_knowledge_tasks SET status='published', published_document_id=? WHERE id=?",
+                (published_document_id, task_id),
+            )
+
+    def dismiss_knowledge_task(self, task_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE frontend_knowledge_tasks SET status='dismissed' WHERE id=?", (task_id,)
+            )
 
 
 class FrontendCollaborationService:
@@ -562,6 +630,15 @@ class FrontendCollaborationService:
         )
         state = self.store.get_thread(channel_id, root_ts)
 
+        # A reply to the assistant's own clarifying question should route back to
+        # it even when the reply text alone doesn't look technical (e.g. "Dell
+        # Latitude 5420" in answer to "what's the device model?"). The flag is
+        # single-use: whatever arrives next consumes it, whether or not it was
+        # actually the requested detail.
+        was_awaiting_clarification = state.awaiting_clarification
+        if was_awaiting_clarification:
+            self.store.set_awaiting_clarification(channel_id, root_ts, False)
+
         incident_match = INCIDENT_RE.search(text or "")
         incident_number = incident_match.group(0).upper() if incident_match else None
         if incident_number and user_id == state.requester_id:
@@ -597,7 +674,9 @@ class FrontendCollaborationService:
             MessageKind.SUPPORT_SIGNAL,
             MessageKind.TROUBLESHOOTING,
         }
-        invoke_agent = kind in meaningful and not state.assistant_suppressed
+        invoke_agent = (
+            kind in meaningful or was_awaiting_clarification
+        ) and not state.assistant_suppressed
         prompt_for_incident = bool(
             is_root
             and kind in {MessageKind.TECHNICAL_QUESTION, MessageKind.SUPPORT_SIGNAL}
@@ -669,13 +748,26 @@ class FrontendCollaborationService:
         return "\n".join(lines)
 
     def create_knowledge_gap_task(
-        self, channel_id: str, thread_ts: str, actor_id: str, reason: str
+        self,
+        channel_id: str,
+        thread_ts: str,
+        actor_id: str,
+        reason: str,
+        *,
+        related_document_id: str | None = None,
+        related_document_title: str | None = None,
+        drafted_title: str = "",
+        drafted_markdown: str = "",
     ) -> dict:
         return self.store.create_knowledge_task(
             channel_id=channel_id,
             thread_ts=thread_ts,
             created_by=actor_id,
             reason=reason,
+            related_document_id=related_document_id,
+            related_document_title=related_document_title,
+            drafted_title=drafted_title,
+            drafted_markdown=drafted_markdown,
         )
 
     def confirm_knowledge(self, channel_id: str, thread_ts: str, actor_id: str) -> str:

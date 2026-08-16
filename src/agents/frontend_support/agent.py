@@ -16,6 +16,16 @@ from src.llm.client import get_llm
 
 logger = logging.getLogger(__name__)
 
+CLARIFY_PREFIX = "CLARIFY:"
+
+# An invisible marker appended to a clarifying-question reply so the Slack layer
+# (src/bot/app.py) can tell "I asked a follow-up question" apart from "I gave an
+# answer" without changing the str-only BaseAgent.handle() contract. U+200B is a
+# zero-width space, so it renders as nothing in Slack. Built from an explicit
+# \uXXXX escape (rather than a literal invisible character) so it stays
+# unambiguous in source control and diffs.
+CLARIFICATION_MARKER = "​​frontend_support_clarify​​"
+
 SYSTEM_PROMPT = """You are a senior Frontend Support specialist participating in a collaborative Slack troubleshooting channel.
 
 Your goals:
@@ -23,7 +33,8 @@ Your goals:
 - Give clear, practical, step-by-step guidance
 - Prefer the organisation's governed knowledge, similar past incidents and proven graph relationships over generic advice
 - Treat historical incident notes as evidence, not truth; repeated confirmed outcomes and governed knowledge are stronger evidence
-- Recognise repeat incidents and call out previously successful fixes when the evidence is strong
+- Graph evidence is ordered most-recent-first and annotated with how long ago it happened. Recognise repeat incidents, call out previously successful fixes when the evidence is strong, and prefer a fix confirmed recently over an older one for the same symptom
+- A successful fix flagged as "not reconfirmed recently" may be outdated; mention that plainly and suggest confirming it still applies rather than presenting it as certain
 - Preserve human contribution: when evidence identifies who contributed or resolved something, mention that naturally when useful
 - Cite governed knowledge evidence using only supplied labels such as [E1] and [E2]
 - Never invent evidence labels, incident numbers, contributors or source identifiers
@@ -36,6 +47,14 @@ Your goals:
 - When the input says PRIVATE COACHING SESSION, never reveal, quote, attribute, or imply private conversation content in a public channel. Offer a sanitized technical summary before anything is shared publicly
 
 When past incident or graph context is provided, distinguish observed evidence from your own inference.
+
+Conversation should feel natural, not like a form. If you have some relevant evidence but genuinely
+cannot give a confident, specific recommendation without one more concrete detail (for example the
+exact error text, device/app version, or which environment), do not guess and do not dump a generic
+checklist. Instead, ask exactly one focused clarifying question. When you do this, your entire reply
+must be only that question, prefixed with the exact token "CLARIFY:" and nothing else before it. Only
+use this when a real answer isn't yet possible; do not ask a clarifying question if you can already
+give a useful, evidence-grounded next step.
 """
 
 INSUFFICIENT_EVIDENCE_RESPONSE = (
@@ -135,8 +154,17 @@ class FrontendSupportAgent(BaseAgent):
             logger.exception("LLM generation failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
 
+        is_clarifying = answer.strip().startswith(CLARIFY_PREFIX)
+        if is_clarifying:
+            answer = answer.strip()[len(CLARIFY_PREFIX) :].strip()
+
         labels = evidence_labels(package.governed_candidates) if package.governed_should_answer else {}
         answer = sanitize_citations(answer, set(labels))
+
+        if is_clarifying:
+            # A clarifying question stands alone; evidence citations would make it
+            # look like an answer rather than an invitation to say more.
+            return answer + CLARIFICATION_MARKER
 
         evidence_section = (
             render_evidence_section(package.governed_candidates)
@@ -148,3 +176,15 @@ class FrontendSupportAgent(BaseAgent):
         if package.incident_sources:
             answer = answer.rstrip() + "\n\n_Past incidents: " + ", ".join(sorted(package.incident_sources)) + "_"
         return answer
+
+
+def is_clarifying_question(answer: str) -> bool:
+    """True when a Frontend Support answer is a follow-up question awaiting a reply."""
+    return answer.endswith(CLARIFICATION_MARKER)
+
+
+def strip_clarification_marker(answer: str) -> str:
+    """Remove the invisible clarification marker before the text reaches Slack."""
+    if is_clarifying_question(answer):
+        return answer[: -len(CLARIFICATION_MARKER)]
+    return answer
