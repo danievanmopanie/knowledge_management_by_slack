@@ -29,6 +29,10 @@ terminal commands as the Builder service account, edit code, run tests and local
 runtime checks, and push repaired code back to the same PR when you hand one off.
 You do not need to copy/paste generated commands into the GX10 terminal.
 
+Long-running work gets one live progress card in the Slack thread. It is updated
+in place with phase changes, elapsed time and periodic heartbeats so silence never
+looks like a frozen process.
+
 Deterministic escape hatches remain available:
 • `status <task-id>`
 • `cancel <task-id>` (only while still queued)
@@ -62,13 +66,7 @@ def extract_pr_number(text: str) -> str | None:
 
 
 class BuilderAgent(BaseAgent):
-    """Slack-facing coordinator for natural Builder conversations.
-
-    The Slack event loop never runs the coding harness itself. Every substantive
-    conversational turn is queued for the on-device worker so repo inspection,
-    terminal execution, code editing and validation remain isolated from Bolt
-    event handling.
-    """
+    """Slack-facing coordinator for natural Builder conversations."""
 
     name = "builder"
 
@@ -92,7 +90,6 @@ class BuilderAgent(BaseAgent):
             if match := CANCEL_RE.match(text):
                 return self._cancel(match.group("task_id"))
 
-            # Preserve old muscle memory without making it the contract.
             if match := LEGACY_BUILD_RE.match(text):
                 text = match.group("goal").strip()
 
@@ -108,13 +105,13 @@ class BuilderAgent(BaseAgent):
             if handoff_pr_number:
                 return (
                     f"Got it — I’m taking PR #{handoff_pr_number} onto the GX10 as `{task_id}`. "
-                    "I’ll check out that PR branch, execute it locally, repair anything I can prove is "
-                    "wrong, run the required gates, and push fixes back to the same PR."
+                    "I’ll keep one live progress card updated while I inspect, execute, validate and "
+                    "repair it, then push proven fixes back to the same PR."
                 )
             return (
                 f"Got it — I’ve started working on that as `{task_id}`. "
-                "I’ll inspect and execute on the GX10 itself. If code changes are needed, "
-                "I’ll validate them before I publish anything."
+                "A live progress card will appear in this thread and keep updating with phase changes, "
+                "elapsed time and heartbeats until the turn completes or fails."
             )
         except Exception:
             logger.exception("Builder agent operation failed request_id=%s", context.request_id)
