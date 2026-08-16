@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from src.core.config import settings
@@ -264,7 +265,7 @@ def rebuild_trusted_patterns(store: Any, *, model_key: str) -> int:
                 json.dumps(counter(environments), ensure_ascii=False),
                 json.dumps(counter(locations), ensure_ascii=False),
                 json.dumps(sorted(incidents), ensure_ascii=False),
-                __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             )
         )
 
