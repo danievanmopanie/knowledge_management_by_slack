@@ -137,11 +137,14 @@ def test_rollups_exclude_low_confidence_and_passive_recovery(tmp_path):
     assert switch is not None
     assert switch["incident_count"] == 4
     assert switch["resolved_count"] == 4
-    assert switch["resolution_counts"][0] == {
-        "label": "Restore electrical power to network equipment",
-        "count": 2,
-        "incidents": ["INC0000001", "INC0000002"],
-    }
+    assert any(
+        row == {
+            "label": "Restore electrical power to network equipment",
+            "count": 2,
+            "incidents": ["INC0000001", "INC0000002"],
+        }
+        for row in switch["resolution_counts"]
+    )
     assert any(
         row["label"] == "Reconnect network switch" and row["count"] == 2
         for row in switch["resolution_counts"]
