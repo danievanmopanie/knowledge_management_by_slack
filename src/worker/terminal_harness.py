@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ import httpx
 
 from src.core.config import settings
 from src.worker.aider_runner import run_aider
+from src.worker.turn_control import TurnControl
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,16 @@ class TerminalHarnessResult:
     answer: str
     tool_calls: int
     error: str = ""
+    stopped_reason: str | None = None
+
+
+@dataclass
+class HarnessStepEvent:
+    step: int
+    tool_calls: int
+    tool_name: str
+    detail: str
+    result_excerpt: str
 
 
 _RUN_SHELL_TOOL: dict[str, Any] = {
@@ -92,8 +104,14 @@ _BLOCKED_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bmkfs(?:\.|\s)|\bfdisk\b|\bparted\b", re.I), "disk formatting/partitioning is disabled"),
     (re.compile(r"\bdd\s+.*\bof=/dev/", re.I), "raw device writes are disabled"),
     (re.compile(r"\brm\s+-[^\n]*r[^\n]*f[^\n]*\s+/(?:\s|$)", re.I), "destructive root deletion is disabled"),
-    (re.compile(r"(?:^|[\s/])\.env(?:\s|$|/)", re.I), "reading deployment .env files is disabled"),
-    (re.compile(r"(?:^|[\s/])\.ssh(?:\s|$|/)", re.I), "reading SSH credential directories is disabled"),
+    # Non-word boundaries (not just whitespace/slash) so quote/paren-wrapped
+    # literals used to defeat naive matching are still caught, e.g.
+    # `python -c "print(open('.env').read())"`. This is still a shallow,
+    # bypassable deterrent (string concatenation, base64, char codes, etc.
+    # cannot be closed by regex) — see docs/BUILDER_ATLAS_AEON.md for the real
+    # fix, which is the OS file-permission boundary, not this pattern.
+    (re.compile(r"(?<!\w)\.env(?!\w)", re.I), "reading deployment .env files is disabled"),
+    (re.compile(r"(?<!\w)\.ssh(?!\w)", re.I), "reading SSH credential directories is disabled"),
     (re.compile(r"/etc/shadow\b", re.I), "reading password hashes is disabled"),
     (re.compile(r"/proc/[^\s]*/environ\b", re.I), "reading process environments is disabled"),
     (re.compile(r"\b(id_rsa|id_ed25519|credentials\.json)\b", re.I), "reading credential material is disabled"),
@@ -234,8 +252,40 @@ def _tool_result(tool_call: dict[str, Any], *, worktree_path: Path) -> str:
     return f"UNKNOWN TOOL: {name}"
 
 
-def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessResult:
-    """Run a bounded multi-turn tool loop against the Builder-only Atlas model."""
+def _event_detail(call: dict[str, Any]) -> tuple[str, str]:
+    """Build a short, human-scannable summary of a tool call for progress updates."""
+    function = call.get("function") or {}
+    name = function.get("name") or "unknown"
+    try:
+        arguments = json.loads(function.get("arguments") or "{}")
+    except json.JSONDecodeError:
+        arguments = {}
+    if name == "run_shell":
+        detail = str(arguments.get("command") or "")
+    elif name == "edit_code":
+        detail = str(arguments.get("instruction") or "")
+    else:
+        detail = ""
+    limit = max(20, settings.builder_progress_detail_max_chars)
+    if len(detail) > limit:
+        detail = detail[: limit - 1] + "…"
+    return name, detail
+
+
+def run_terminal_harness(
+    *,
+    goal: str,
+    worktree_path: Path,
+    control: TurnControl | None = None,
+    on_step: Callable[[HarnessStepEvent], None] | None = None,
+) -> TerminalHarnessResult:
+    """Run a bounded multi-turn tool loop against the Builder-only Atlas model.
+
+    `control` lets an in-progress turn be stopped cooperatively (cancel or
+    overall deadline) between steps; `on_step` reports each completed tool
+    call for live Slack progress. Both are optional so existing callers are
+    unaffected.
+    """
     if not settings.builder_terminal_enabled:
         return TerminalHarnessResult(
             success=False,
@@ -253,7 +303,10 @@ def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessRe
 
     try:
         with httpx.Client(timeout=settings.builder_task_timeout_seconds) as client:
-            for _step in range(settings.builder_terminal_max_steps):
+            for step in range(settings.builder_terminal_max_steps):
+                if control and (reason := control.check()):
+                    return TerminalHarnessResult(False, "", tool_calls, stopped_reason=reason)
+
                 response = client.post(
                     endpoint,
                     headers={
@@ -310,6 +363,21 @@ def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessRe
                             "content": result,
                         }
                     )
+                    if on_step:
+                        name, detail = _event_detail(call)
+                        on_step(
+                            HarnessStepEvent(
+                                step=step,
+                                tool_calls=tool_calls,
+                                tool_name=name,
+                                detail=detail,
+                                result_excerpt=result[:200],
+                            )
+                        )
+                    # Re-check between tool calls, not just once per LLM
+                    # round-trip, so a multi-call step can also be interrupted.
+                    if control and (reason := control.check()):
+                        return TerminalHarnessResult(False, "", tool_calls, stopped_reason=reason)
     except httpx.HTTPError as exc:
         return TerminalHarnessResult(False, "", tool_calls, f"Atlas tool-loop request failed: {exc}")
 

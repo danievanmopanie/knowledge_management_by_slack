@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from src.core.config import settings
 from src.core.database import connect
 
 
@@ -32,6 +33,8 @@ class BuilderTaskStore:
                     result_text TEXT,
                     error_message TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    deadline_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     started_at TEXT,
@@ -47,9 +50,14 @@ class BuilderTaskStore:
                 "handoff_pr_number",
                 "continuation_branch",
                 "continuation_pr_url",
+                "deadline_at",
             ):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE builder_tasks ADD COLUMN {name} TEXT")
+            if "cancel_requested" not in columns:
+                conn.execute(
+                    "ALTER TABLE builder_tasks ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_builder_tasks_status ON builder_tasks(status)"
             )
@@ -140,13 +148,17 @@ class BuilderTaskStore:
     def claim_next(self) -> dict[str, Any] | None:
         """Atomically claim the oldest pending turn, flipping it to running."""
         now = datetime.now(timezone.utc).isoformat()
+        deadline_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=settings.builder_turn_deadline_seconds)
+        ).isoformat()
         with connect(self.path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
                     """
                     UPDATE builder_tasks
-                    SET status='running', started_at=?, updated_at=?, attempts=attempts + 1
+                    SET status='running', started_at=?, updated_at=?, attempts=attempts + 1,
+                        deadline_at=?, cancel_requested=0
                     WHERE task_id = (
                         SELECT task_id FROM builder_tasks
                         WHERE status='pending'
@@ -155,13 +167,82 @@ class BuilderTaskStore:
                     )
                     RETURNING *
                     """,
-                    (now, now),
+                    (now, now, deadline_at),
                 ).fetchone()
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
         return dict(row) if row else None
+
+    def count_ahead(self, task_id: str) -> int:
+        """Return how many other turns are queued/running ahead of this one.
+
+        Builder is a strict FIFO single-worker queue, so this is an exact
+        queue position, not an estimate.
+        """
+        with connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT created_at FROM builder_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return 0
+            count = conn.execute(
+                """
+                SELECT COUNT(*) FROM builder_tasks
+                WHERE status IN ('pending', 'running') AND created_at < ?
+                """,
+                (row["created_at"],),
+            ).fetchone()[0]
+        return int(count)
+
+    def request_cancel(self, task_id: str) -> bool:
+        """Ask a currently-running turn to stop at its next safe checkpoint.
+
+        The worker polls `cancel_requested` between tool-loop steps and repair
+        attempts; this cannot interrupt an already in-flight subprocess call.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with connect(self.path) as conn:
+            cursor = conn.execute(
+                "UPDATE builder_tasks SET cancel_requested=1, updated_at=? "
+                "WHERE task_id=? AND status='running'",
+                (now, task_id),
+            )
+        return cursor.rowcount > 0
+
+    def mark_cancelled_from_running(self, task_id: str) -> bool:
+        """Cancel a turn the worker stopped mid-run in response to request_cancel."""
+        now = datetime.now(timezone.utc).isoformat()
+        with connect(self.path) as conn:
+            cursor = conn.execute(
+                "UPDATE builder_tasks SET status='cancelled', updated_at=?, finished_at=? "
+                "WHERE task_id=? AND status='running'",
+                (now, now, task_id),
+            )
+        return cursor.rowcount > 0
+
+    def recover_stuck_tasks(self) -> list[dict[str, Any]]:
+        """Fail any turn still 'running' from a previous, crashed worker process.
+
+        A stuck turn is deliberately failed rather than silently retried: if the
+        crash happened after a pull request was already created but before the
+        turn was marked succeeded, blind retry risks opening a duplicate PR.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with connect(self.path) as conn:
+            rows = conn.execute(
+                """
+                UPDATE builder_tasks
+                SET status='failed',
+                    error_message='Builder worker restarted while this turn was running.',
+                    updated_at=?, finished_at=?
+                WHERE status='running'
+                RETURNING *
+                """,
+                (now, now),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def mark_running(self, task_id: str, *, branch_name: str) -> None:
         now = datetime.now(timezone.utc).isoformat()

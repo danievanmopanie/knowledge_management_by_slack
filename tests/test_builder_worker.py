@@ -4,7 +4,7 @@ from pathlib import Path
 
 from src.core.config import settings
 from src.worker.aider_runner import AiderResult
-from src.worker.builder_worker import _repair_prompt, _run_task, _validate_and_repair
+from src.worker.builder_worker import _repair_prompt, _run_task, _show_merge_deploy, _validate_and_repair
 from src.worker.validation import ValidationResult
 from src.worker.workspace import Worktree
 
@@ -22,6 +22,7 @@ class RecordingStore(FakeStore):
         self.running = []
         self.succeeded = []
         self.failed = []
+        self.cancelled = []
 
     def mark_running(self, task_id, *, branch_name):
         self.running.append((task_id, branch_name))
@@ -31,6 +32,10 @@ class RecordingStore(FakeStore):
 
     def mark_failed(self, task_id, *, error_message):
         self.failed.append((task_id, error_message))
+
+    def mark_cancelled_from_running(self, task_id):
+        self.cancelled.append(task_id)
+        return True
 
 
 def _validation(success: bool, output: str = "") -> ValidationResult:
@@ -71,10 +76,11 @@ def test_validation_failure_is_sent_back_for_repair(monkeypatch, tmp_path: Path)
     task = {"task_id": "bld_test", "goal": "add widget", "channel_id": "C1"}
     worktree = Worktree(task_id="bld_test", branch_name="builder/bld_test", path=tmp_path)
 
-    result, attempts = _validate_and_repair(FakeStore(), task, worktree)
+    result, attempts, stopped_reason = _validate_and_repair(FakeStore(), task, worktree)
 
     assert result.success is True
     assert attempts == 1
+    assert stopped_reason is None
     assert len(repair_goals) == 1
     assert "FAILED test_widget" in repair_goals[0]
     assert "Do not remove, skip, weaken, or xfail tests" in repair_goals[0]
@@ -101,11 +107,22 @@ def test_repair_loop_stops_at_configured_limit(monkeypatch, tmp_path: Path):
     task = {"task_id": "bld_test", "goal": "add widget", "channel_id": "C1"}
     worktree = Worktree(task_id="bld_test", branch_name="builder/bld_test", path=tmp_path)
 
-    result, attempts = _validate_and_repair(FakeStore(), task, worktree)
+    result, attempts, stopped_reason = _validate_and_repair(FakeStore(), task, worktree)
 
     assert result.success is False
     assert attempts == 2
+    assert stopped_reason is None
     assert validation_calls == 3
+
+
+def test_show_merge_deploy_requires_pr_green_validation_and_configured_units(monkeypatch):
+    monkeypatch.setattr(settings, "builder_deploy_restart_units", "svc.service")
+    assert _show_merge_deploy("https://github.com/org/repo/pull/1", _validation(True)) is True
+    assert _show_merge_deploy(None, _validation(True)) is False
+    assert _show_merge_deploy("https://github.com/org/repo/pull/1", _validation(False)) is False
+
+    monkeypatch.setattr(settings, "builder_deploy_restart_units", "")
+    assert _show_merge_deploy("https://github.com/org/repo/pull/1", _validation(True)) is False
 
 
 def test_repair_prompt_preserves_original_goal_and_failure():
@@ -160,13 +177,13 @@ def test_external_pr_handoff_validates_even_when_no_edit_is_required(monkeypatch
     )
     monkeypatch.setattr(
         "src.worker.builder_worker._execute_primary_harness",
-        lambda *, goal, worktree: "Executed the handed-off PR locally.",
+        lambda *, goal, worktree, control=None, on_step=None: ("Executed the handed-off PR locally.", None),
     )
     monkeypatch.setattr("src.worker.builder_worker.has_repository_changes", lambda worktree: False)
 
-    def fake_validate(store_arg, task_arg, worktree_arg):
+    def fake_validate(store_arg, task_arg, worktree_arg, control_arg=None):
         validation_calls.append((store_arg, task_arg, worktree_arg))
-        return _validation(True, "passed"), 0
+        return _validation(True, "passed"), 0, None
 
     monkeypatch.setattr("src.worker.builder_worker._validate_and_repair", fake_validate)
     monkeypatch.setattr("src.worker.builder_worker.push_branch", lambda worktree: pushes.append(worktree))
@@ -206,12 +223,12 @@ def test_external_pr_handoff_pushes_repairs_to_same_branch_without_new_pr(monkey
     )
     monkeypatch.setattr(
         "src.worker.builder_worker._execute_primary_harness",
-        lambda *, goal, worktree: "Found and repaired a runtime problem.",
+        lambda *, goal, worktree, control=None, on_step=None: ("Found and repaired a runtime problem.", None),
     )
     monkeypatch.setattr("src.worker.builder_worker.has_repository_changes", lambda worktree: True)
     monkeypatch.setattr(
         "src.worker.builder_worker._validate_and_repair",
-        lambda store_arg, task_arg, worktree_arg: (_validation(True, "passed"), 0),
+        lambda store_arg, task_arg, worktree_arg, control_arg=None: (_validation(True, "passed"), 0, None),
     )
     monkeypatch.setattr(
         "src.worker.builder_worker.commit_pending_changes",
@@ -232,3 +249,92 @@ def test_external_pr_handoff_pushes_repairs_to_same_branch_without_new_pr(monkey
     assert commits and commits[0][0] == "feature/external"
     assert store.failed == []
     assert store.succeeded[0][1] == "https://github.com/org/repo/pull/83"
+
+
+def _plain_task():
+    return {
+        "task_id": "bld_plain",
+        "goal": "do something",
+        "channel_id": "C1",
+        "thread_ts": None,
+        "handoff_pr_number": None,
+        "continuation_branch": None,
+        "continuation_pr_url": None,
+    }
+
+
+def _never_call(label: str):
+    def _raise(*_args, **_kwargs):
+        raise AssertionError(label)
+
+    return _raise
+
+
+def test_cancelled_turn_stops_before_validation_and_push(monkeypatch, tmp_path: Path):
+    store = RecordingStore()
+    worktree = Worktree(
+        task_id="bld_plain", branch_name="builder/bld_plain", path=tmp_path, start_sha="abc"
+    )
+
+    monkeypatch.setattr(
+        "src.worker.builder_worker.prepare_worktree",
+        lambda task_id, continuation_branch=None: worktree,
+    )
+    monkeypatch.setattr(
+        "src.worker.builder_worker._execute_primary_harness",
+        lambda *, goal, worktree, control=None, on_step=None: ("", "cancelled"),
+    )
+    monkeypatch.setattr("src.worker.builder_worker.cleanup_worktree", lambda worktree: None)
+    monkeypatch.setattr("src.worker.builder_worker._publish_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.worker.builder_worker._validate_and_repair", _never_call("must not validate a cancelled turn")
+    )
+    monkeypatch.setattr(
+        "src.worker.builder_worker.push_branch", _never_call("must not push a cancelled turn")
+    )
+    monkeypatch.setattr(
+        "src.worker.builder_worker.create_pull_request",
+        _never_call("must not create a PR for a cancelled turn"),
+    )
+
+    _run_task(store, _plain_task())
+
+    assert store.cancelled == ["bld_plain"]
+    assert store.succeeded == []
+    assert store.failed == []
+
+
+def test_deadline_exceeded_turn_fails_without_validation_or_push(monkeypatch, tmp_path: Path):
+    store = RecordingStore()
+    worktree = Worktree(
+        task_id="bld_plain", branch_name="builder/bld_plain", path=tmp_path, start_sha="abc"
+    )
+
+    monkeypatch.setattr(
+        "src.worker.builder_worker.prepare_worktree",
+        lambda task_id, continuation_branch=None: worktree,
+    )
+    monkeypatch.setattr(
+        "src.worker.builder_worker._execute_primary_harness",
+        lambda *, goal, worktree, control=None, on_step=None: ("", "deadline"),
+    )
+    monkeypatch.setattr("src.worker.builder_worker.cleanup_worktree", lambda worktree: None)
+    monkeypatch.setattr("src.worker.builder_worker._publish_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.worker.builder_worker._validate_and_repair", _never_call("must not validate a timed-out turn")
+    )
+    monkeypatch.setattr(
+        "src.worker.builder_worker.push_branch", _never_call("must not push a timed-out turn")
+    )
+    monkeypatch.setattr(
+        "src.worker.builder_worker.create_pull_request",
+        _never_call("must not create a PR for a timed-out turn"),
+    )
+
+    _run_task(store, _plain_task())
+
+    assert store.cancelled == []
+    assert store.succeeded == []
+    assert len(store.failed) == 1
+    assert store.failed[0][0] == "bld_plain"
+    assert "deadline" in store.failed[0][1]

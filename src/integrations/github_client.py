@@ -115,6 +115,47 @@ def get_pull_request(
     }
 
 
+def pr_number_from_url(pr_url: str) -> str | None:
+    """Extract the numeric PR id from a GitHub pull request URL, if present."""
+    match = _PR_NUMBER_RE.search(pr_url or "")
+    return match.group(1) if match else None
+
+
+def get_pull_request_state(
+    pr_number: str | int,
+    *,
+    owner: str | None = None,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """Lightweight PR state probe used by Merge & Deploy.
+
+    Unlike `get_pull_request`, this does NOT raise on a closed/merged PR — the
+    caller (deploy.py) needs to tell "already merged, safe to proceed to
+    restart" apart from "closed without merging, nothing to deploy" apart from
+    "genuinely still open," and `get_pull_request`'s open-only contract can't
+    express that.
+    """
+    owner, repo = _owner_repo(owner, repo)
+    number = str(pr_number).strip()
+    if not number.isdigit():
+        raise GitHubClientError(f"Invalid pull request number: {pr_number!r}")
+    url = f"{settings.github_api_base_url}/repos/{owner}/{repo}/pulls/{number}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(url, headers=_headers())
+    if response.status_code >= 400:
+        raise GitHubClientError(
+            f"GitHub API error loading PR {number}: {response.status_code} {response.text[:500]}"
+        )
+    data = response.json()
+    head = data.get("head") or {}
+    return {
+        "number": number,
+        "state": data.get("state") or "",
+        "merged": bool(data.get("merged")),
+        "head_sha": head.get("sha") or "",
+    }
+
+
 def pull_request_is_open(
     pr_url: str,
     *,
@@ -127,17 +168,67 @@ def pull_request_is_open(
     published PR remains open. Once that PR is merged/closed, the next turn
     starts a fresh branch from main instead of mutating historical work.
     """
-    match = _PR_NUMBER_RE.search(pr_url or "")
-    if not match:
+    number = pr_number_from_url(pr_url)
+    if not number:
         return False
     owner, repo = _owner_repo(owner, repo)
-    url = f"{settings.github_api_base_url}/repos/{owner}/{repo}/pulls/{match.group(1)}"
+    url = f"{settings.github_api_base_url}/repos/{owner}/{repo}/pulls/{number}"
     with httpx.Client(timeout=30.0) as client:
         response = client.get(url, headers=_headers())
     if response.status_code >= 400:
         raise GitHubClientError(
-            f"GitHub API error checking PR {match.group(1)}: "
-            f"{response.status_code} {response.text[:300]}"
+            f"GitHub API error checking PR {number}: {response.status_code} {response.text[:300]}"
         )
     data = response.json()
     return data.get("state") == "open" and not bool(data.get("merged"))
+
+
+def merge_pull_request(
+    pr_number: str | int,
+    *,
+    sha: str | None = None,
+    merge_method: str | None = None,
+    owner: str | None = None,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """Merge a pull request via the GitHub REST API.
+
+    This is the deterministic Merge & Deploy path — never called from the AEON
+    tool loop, only from an explicit, allowlist-checked Slack button click.
+    Pinning `sha` (the PR's head commit at the time the card was last rendered)
+    makes a stale merge fail safely with a 409 instead of silently merging
+    commits the user never saw validated.
+    """
+    owner, repo = _owner_repo(owner, repo)
+    number = str(pr_number).strip()
+    if not number.isdigit():
+        raise GitHubClientError(f"Invalid pull request number: {pr_number!r}")
+    url = f"{settings.github_api_base_url}/repos/{owner}/{repo}/pulls/{number}/merge"
+    payload: dict[str, Any] = {"merge_method": merge_method or settings.builder_merge_method}
+    if sha:
+        payload["sha"] = sha
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.put(url, headers=_headers(), json=payload)
+
+    if response.status_code == 405:
+        raise GitHubClientError(
+            f"PR #{number} is not mergeable right now (branch protection, required checks, "
+            f"or conflicts): {response.text[:500]}"
+        )
+    if response.status_code == 409:
+        raise GitHubClientError(
+            f"PR #{number}'s head branch moved since it was last checked; refusing to merge "
+            f"commits that were never validated: {response.text[:500]}"
+        )
+    if response.status_code >= 400:
+        raise GitHubClientError(
+            f"GitHub API error merging PR {number}: {response.status_code} {response.text[:500]}"
+        )
+
+    data = response.json()
+    return {
+        "merged": bool(data.get("merged")),
+        "sha": data.get("sha") or "",
+        "message": data.get("message") or "",
+    }

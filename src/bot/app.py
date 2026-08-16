@@ -13,6 +13,7 @@ from src.agents.frontend_support.agent import INSUFFICIENT_EVIDENCE_RESPONSE
 from src.agents.frontend_support.collaboration import MessageKind
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.blockkit.actions import attach_confirm_cancel
+from src.bot.builder_interactivity import register as register_builder_interactivity
 from src.bot.frontend_actions import build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service as get_frontend_service
 from src.bot.frontend_interactivity import register as register_frontend_interactivity
@@ -32,6 +33,7 @@ app = AsyncApp(
 
 register_interactivity(app)
 register_frontend_interactivity(app)
+register_builder_interactivity(app)
 
 BUILDER_STATUS_PREFIX = "[Builder status]"
 _BUILDER_CONTROL_RE = re.compile(r"^(status|cancel)\s+\S+\s*$", re.I)

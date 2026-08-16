@@ -15,6 +15,10 @@ EnvironmentFile=-/opt/knowledge_management_by_slack/.env
 ExecStart=/bin/bash /opt/knowledge_management_by_slack/scripts/run_atlas_builder.sh
 ExecStop=-/usr/bin/docker stop atlas-builder
 TimeoutStartSec=infinity
+# Safe alongside the HOME-relative -v mounts in run_atlas_builder.sh: those
+# host paths are resolved and bind-mounted by the Docker daemon (a separate,
+# unconfined service), not read directly by this unit's own process.
+ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target

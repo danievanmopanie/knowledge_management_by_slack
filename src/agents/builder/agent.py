@@ -31,7 +31,8 @@ You do not need to copy/paste generated commands into the GX10 terminal.
 
 Deterministic escape hatches remain available:
 • `status <task-id>`
-• `cancel <task-id>` (only while still queued)
+• `cancel <task-id>` — stops a queued turn immediately, or asks a running turn
+  to stop at its next safe checkpoint (a Cancel button is also on the status card)
 """
 
 STATUS_RE = re.compile(r"^status\s+(?P<task_id>\S+)$", re.I)
@@ -59,6 +60,37 @@ def extract_pr_number(text: str) -> str | None:
     if match := _PR_TEXT_RE.search(text or ""):
         return match.group("number")
     return None
+
+
+def is_builder_allowed(user_id: str | None) -> bool:
+    """Shared allowlist check used by both the chat command and Block Kit buttons.
+
+    Button visibility is never sufficient authorization on its own — a button
+    handler must call this again server-side rather than trusting that only an
+    allowlisted user could have seen the card.
+    """
+    allowed = {
+        item.strip() for item in settings.builder_agent_allowed_user_ids.split(",") if item.strip()
+    }
+    return bool(user_id and user_id in allowed)
+
+
+def cancel_builder_task(store: BuilderTaskStore, task_id: str) -> str:
+    """Cancel a queued turn outright, or ask a running turn to stop cooperatively."""
+    task = store.get(task_id)
+    if task is None:
+        return f"No Builder turn found with id `{task_id}`."
+    if task["status"] == "pending":
+        store.mark_cancelled(task_id)
+        return f"Cancelled Builder turn `{task_id}`."
+    if task["status"] == "running":
+        store.request_cancel(task_id)
+        return (
+            f"I've asked Builder turn `{task_id}` to stop as soon as it's safely between steps "
+            "— it'll skip validation/push and mark itself cancelled. This can take a little "
+            "while if a command is already running."
+        )
+    return f"Builder turn `{task_id}` is already *{task['status']}* and can no longer be cancelled."
 
 
 class BuilderAgent(BaseAgent):
@@ -105,28 +137,40 @@ class BuilderAgent(BaseAgent):
                 thread_ts=context.thread_ts,
                 handoff_pr_number=handoff_pr_number,
             )
+            queue_note = self._queue_note(task_id)
             if handoff_pr_number:
                 return (
                     f"Got it — I’m taking PR #{handoff_pr_number} onto the GX10 as `{task_id}`. "
                     "I’ll check out that PR branch, execute it locally, repair anything I can prove is "
-                    "wrong, run the required gates, and push fixes back to the same PR."
+                    f"wrong, run the required gates, and push fixes back to the same PR.{queue_note}"
                 )
             return (
                 f"Got it — I’ve started working on that as `{task_id}`. "
                 "I’ll inspect and execute on the GX10 itself. If code changes are needed, "
-                "I’ll validate them before I publish anything."
+                f"I’ll validate them before I publish anything.{queue_note}"
             )
         except Exception:
             logger.exception("Builder agent operation failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
 
+    def _queue_note(self, task_id: str) -> str:
+        """Queue-position feedback: Builder is a strict single-worker FIFO queue,
+        so a turn can legitimately wait behind others for a long time (see
+        BUILDER_TURN_DEADLINE_SECONDS). Say so up front instead of leaving the
+        user guessing why nothing is happening yet."""
+        ahead = self.tasks.count_ahead(task_id)
+        if ahead <= 0:
+            return ""
+        turns = "1 turn" if ahead == 1 else f"{ahead} turns"
+        minutes = max(1, settings.builder_turn_deadline_seconds // 60)
+        return (
+            f" There {'is' if ahead == 1 else 'are'} {turns} ahead of yours on the GX10 "
+            f"(each can take up to ~{minutes} min), so I'll get to it once those finish. "
+            f"I'll update the `{task_id}` card once I start."
+        )
+
     def _is_allowed(self, user_id: str | None) -> bool:
-        allowed = {
-            item.strip()
-            for item in settings.builder_agent_allowed_user_ids.split(",")
-            if item.strip()
-        }
-        return bool(user_id and user_id in allowed)
+        return is_builder_allowed(user_id)
 
     def _status(self, task_id: str) -> str:
         task = self.tasks.get(task_id)
@@ -136,6 +180,10 @@ class BuilderAgent(BaseAgent):
             f"*Builder turn `{task_id}`*",
             f"• Status: *{task['status']}*",
         ]
+        if task["status"] == "pending":
+            ahead = self.tasks.count_ahead(task_id)
+            if ahead > 0:
+                lines.append(f"• Queue position: {ahead} turn(s) ahead")
         if task.get("handoff_pr_number"):
             lines.append(f"• Handoff PR: `#{task['handoff_pr_number']}`")
         if task.get("branch_name"):
@@ -147,13 +195,4 @@ class BuilderAgent(BaseAgent):
         return "\n".join(lines)
 
     def _cancel(self, task_id: str) -> str:
-        task = self.tasks.get(task_id)
-        if task is None:
-            return f"No Builder turn found with id `{task_id}`."
-        if task["status"] != "pending":
-            return (
-                f"Builder turn `{task_id}` is already *{task['status']}* "
-                "and can no longer be cancelled."
-            )
-        self.tasks.mark_cancelled(task_id)
-        return f"Cancelled Builder turn `{task_id}`."
+        return cancel_builder_task(self.tasks, task_id)

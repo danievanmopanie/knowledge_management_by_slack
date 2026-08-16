@@ -130,6 +130,46 @@ class Settings(BaseSettings):
     builder_git_remote: str = "origin"
     builder_base_branch: str = "main"
 
+    # Security: startup self-check for accidentally-readable deployment secrets.
+    # If this worker process can itself read .env/SSH keys, any run_shell
+    # subprocess it spawns can too, regardless of the shell command blocklist.
+    builder_secret_check_enabled: bool = True
+    builder_secret_check_extra_paths: str = ""
+
+    # Reliability: recover turns stuck 'running' after a worker crash/restart.
+    builder_startup_recovery_enabled: bool = True
+
+    # Reliability: overall wall-clock deadline for one Slack turn, covering the
+    # terminal tool loop plus any repair/validation passes. Independent of the
+    # per-call timeouts above, which bound a single step, not the whole turn.
+    builder_turn_deadline_seconds: int = 5400
+
+    # UX: live progress detail on the persistent status card. Updates are
+    # throttled so the tool loop cannot exceed Slack's practical chat.update rate.
+    builder_progress_min_interval_seconds: float = 4.0
+    builder_progress_detail_max_chars: int = 200
+
+    # Merge & Deploy: deterministic, non-LLM path triggered only by an explicit
+    # Slack button click. Empty restart units keeps the button hidden by default.
+    builder_deploy_restart_units: str = ""
+    builder_merge_method: str = "squash"
+    builder_deploy_restart_timeout_seconds: int = 60
+    builder_deploy_health_check_timeout_seconds: int = 20
+
+    # The live checkout that must be synced to the exact merged commit before
+    # any unit is restarted. Restarting a systemd unit only re-execs whatever
+    # is already on disk — it does not pull new code. Empty defaults to the
+    # current process's working directory at deploy time (matches the
+    # WorkingDirectory= of the systemd units in deploy/systemd/).
+    builder_deploy_checkout_path: str = ""
+
+    # If the process running Merge & Deploy is itself one of the configured
+    # restart units (e.g. knowledge-management-by-slack.service), restarting
+    # it kills this process before it can report a result. Name that unit here
+    # so its restart is deferred until after the deployment record and Slack
+    # card are finalized, and issued as a final best-effort action.
+    builder_deploy_self_unit: str = ""
+
     # GitHub (pull request creation / handoff for Builder Agent)
     github_token: str = ""
     github_api_base_url: str = "https://api.github.com"

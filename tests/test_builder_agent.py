@@ -51,6 +51,20 @@ class FakeBuilderTaskStore:
             return True
         return False
 
+    def request_cancel(self, task_id):
+        task = self.tasks.get(task_id)
+        if task and task["status"] == "running":
+            task["cancel_requested"] = True
+            return True
+        return False
+
+    def count_ahead(self, task_id):
+        order = list(self.tasks.keys())
+        idx = order.index(task_id)
+        return sum(
+            1 for other_id in order[:idx] if self.tasks[other_id]["status"] in ("pending", "running")
+        )
+
 
 def _agent(monkeypatch, allowed_user_ids: str = "U1"):
     monkeypatch.setattr(settings, "builder_agent_allowed_user_ids", allowed_user_ids)
@@ -151,3 +165,42 @@ def test_cancel_command_cancels_pending_task(monkeypatch):
     result = asyncio.run(agent.handle(f"cancel {task_id}", _context()))
     assert "Cancelled Builder turn" in result
     assert agent.tasks.get(task_id)["status"] == "cancelled"
+
+
+def test_cancel_command_asks_running_task_to_stop(monkeypatch):
+    agent = _agent(monkeypatch)
+    ack = asyncio.run(agent.handle("Do a thing", _context()))
+    task_id = ack.split("`")[1]
+    agent.tasks.tasks[task_id]["status"] = "running"
+
+    result = asyncio.run(agent.handle(f"cancel {task_id}", _context()))
+
+    assert "safely between steps" in result
+    assert agent.tasks.tasks[task_id].get("cancel_requested") is True
+    assert agent.tasks.get(task_id)["status"] == "running"  # worker flips this once it notices
+
+
+def test_first_turn_in_queue_gets_no_queue_note(monkeypatch):
+    agent = _agent(monkeypatch)
+    result = asyncio.run(agent.handle("Do a thing", _context()))
+    assert "ahead of yours" not in result
+
+
+def test_queued_turn_reports_position_and_eta(monkeypatch):
+    agent = _agent(monkeypatch)
+    asyncio.run(agent.handle("first request", _context()))
+    result = asyncio.run(agent.handle("second request", _context()))
+
+    assert "1 turn ahead of yours" in result
+    assert "bld_2" in result
+
+
+def test_status_command_reports_queue_position_for_pending_task(monkeypatch):
+    agent = _agent(monkeypatch)
+    asyncio.run(agent.handle("first request", _context()))
+    ack = asyncio.run(agent.handle("second request", _context()))
+    task_id = ack.split("`")[1]
+
+    result = asyncio.run(agent.handle(f"status {task_id}", _context()))
+
+    assert "Queue position: 1 turn(s) ahead" in result

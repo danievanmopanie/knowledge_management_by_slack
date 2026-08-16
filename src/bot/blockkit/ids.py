@@ -32,3 +32,7 @@ CONFIRM_RECEIPT = "inventory_confirm_receipt"
 CANCEL_RECEIPT = "inventory_cancel_receipt"
 CONFIRM_COUNT = "inventory_confirm_count"
 CANCEL_COUNT = "inventory_cancel_count"
+
+# Builder Agent persistent status card buttons.
+BUILDER_CANCEL_TURN = "builder_cancel_turn"
+BUILDER_MERGE_DEPLOY = "builder_merge_deploy"

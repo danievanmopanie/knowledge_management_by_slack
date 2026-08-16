@@ -113,20 +113,64 @@ The implementation adds several layers:
 - Slack Builder remains protected by `BUILDER_AGENT_ALLOWED_USER_IDS`;
 - Atlas is localhost-only;
 - child shell processes receive a scrubbed environment without Slack, GitHub or
-  Builder model credentials;
-- direct reads of `.env`, SSH key paths, process environments and common
-  credential material are blocked by the shell guard;
+  Builder model credentials — this is a real boundary (the variables are
+  removed before the subprocess exists), not a string match;
+- the most common naive attempts to read `.env`, SSH key paths, process
+  environments and common credential material are pattern-matched and
+  rejected by the shell guard;
 - `sudo`, `doas`, `pkexec`, user switching, host power operations, raw disk
   writes and destructive root deletion are blocked;
 - `docker run` / `docker create` are blocked by default;
-- systemd uses `NoNewPrivileges`, `RestrictSUIDSGID`, kernel/control-group
-  protections and a private temp area; and
+- systemd uses `NoNewPrivileges`, `RestrictSUIDSGID`, `ProtectHome`,
+  kernel/control-group protections and a private temp area; and
 - the publish boundary still requires deterministic local validation.
 
-These string-level command guards are defence in depth, not a substitute for OS
-permissions. Run Builder under a dedicated non-root account in production. If
-that account is added to the Docker group, treat that as a deliberate high-trust
-permission because Docker access can be host-powerful.
+**Be honest with yourself about what the shell guard is.** It is a raw-string
+pattern match over the command text, run before the shell interprets it. It
+catches the naive case (`cat .env`, `cat ~/.ssh/id_ed25519`) but cannot catch
+every form of indirection — `python -c "print(open('.env').read())"`,
+string concatenation, base64, or character-code composition can all defeat a
+regex in principle. Treat it as a deterrent against accidents and unsophisticated
+misuse, never as the reason secrets are safe from a misbehaving or
+adversarially-prompted model.
+
+### One-time secret-permission bootstrap (the fix that actually matters)
+
+The boundary that matters is whether the OS account running
+`builder-worker.service` can read secret material off disk at all — because if
+it can, every `run_shell` subprocess it spawns can too, no matter what the
+regex catches.
+
+For `.env`: `deploy/systemd/builder-worker.service` and `atlas-builder.service`
+already load secrets with `EnvironmentFile=-/opt/.../.env`. That line is read
+by **systemd itself (PID 1, running as root)** before it drops privileges to
+`User=danie` — the resulting variables are injected straight into the spawned
+process's environment. The service account does **not** need read access to
+the file on disk for that to keep working, which means you can lock it down:
+
+```bash
+sudo scripts/harden_builder_secrets.sh /opt/knowledge_management_by_slack
+# chown root:root .env && chmod 600 .env
+```
+
+Run this once as part of deployment, after `.env` is populated.
+
+For SSH keys, `chmod` cannot help if the service account owns its own key —
+any process running as that account can always read a key it owns, with
+normal `600` permissions. The honest fix is architectural: **don't put a
+personal or deploy SSH private key under this account's home directory at
+all.** `push_branch()` just runs `git push <remote> <branch>`; configure the
+Builder repo's `origin` remote as an HTTPS URL authenticated with
+`GITHUB_TOKEN` (already required for PR creation/handoff) instead of an SSH
+remote, and there is no SSH key for this account to expose.
+
+Because file permissions can be misconfigured or reverted, the worker also
+runs a startup self-check (`src/worker/secret_exposure_check.py`,
+`BUILDER_SECRET_CHECK_ENABLED=true` by default): it probes whether the worker
+process itself can read `.env` and common SSH key paths, and if so, logs a
+`critical` line and posts a one-time warning to `#builder` mentioning the
+allowlisted users. This detects a misconfigured deployment; it does not fix
+one.
 
 ## Target architecture
 
@@ -172,10 +216,120 @@ Block Kit is used where structure materially helps: durable progress, validation
 state, warnings, choices and links to created artefacts. Builder creates one
 persistent status card per turn and updates that card in place as work moves
 through execution, repair, validation, failure or PR-ready state. It does not
-spam the thread with a new progress message for every internal step.
+spam the thread with a new progress message for every internal step. While a
+turn is `running`/`repairing`, the card also shows the last tool call executed
+(e.g. `run_shell: pytest -q`), throttled to `BUILDER_PROGRESS_MIN_INTERVAL_SECONDS`
+so it does not exceed Slack's practical `chat.update` rate.
 
-The final card exposes an **Open pull request** action only when a PR exists. The
-repository-wide rule is documented in `docs/SLACK_UX_RULES.md`.
+The card exposes an **Open pull request** action once a PR exists, a **Cancel**
+action while the turn is `running`/`repairing`, and a **Merge & Deploy** action
+once the turn is `completed` and green (see below). The repository-wide rule is
+documented in `docs/SLACK_UX_RULES.md`.
+
+## Reliability: deadline, cancel, crash recovery
+
+- **Overall turn deadline** (`BUILDER_TURN_DEADLINE_SECONDS`, default 5400s):
+  Builder is a single-worker FIFO queue — one GPU, one turn at a time — so a
+  runaway turn silently blocks every other queued Slack conversation without
+  this. The deadline covers the whole turn (tool loop + repair + validation),
+  independent of the per-call timeouts that bound a single step.
+- **Cancel** (typed `cancel <task-id>` or the card's Cancel button): stops a
+  queued turn immediately, or asks a running turn to stop cooperatively at its
+  next safe checkpoint (between tool-loop steps or repair attempts). This is
+  **cooperative, not preemptive** — it cannot interrupt an already in-flight
+  shell command or Aider call, so worst-case latency to actually stop is bounded
+  by the longest single configured timeout (up to `BUILDER_TEST_TIMEOUT_SECONDS`),
+  not instant.
+- **Crash recovery** (`BUILDER_STARTUP_RECOVERY_ENABLED`, default true): if the
+  worker process dies or the GX10 reboots mid-turn, the next startup marks any
+  turn still `running` as `failed` and updates its Slack card, rather than
+  leaving a stale "Working on it" card forever. This is deliberately fail-safe,
+  not auto-retry: retrying blindly risks opening a duplicate PR if the crash
+  happened after a PR was already created but before the turn was recorded as
+  succeeded. Resend the request if this happens.
+- **Queue position**: when a turn is queued behind others, the initial Slack
+  reply says how many turns are ahead of it instead of leaving you guessing why
+  nothing has started yet.
+
+## Merge & Deploy
+
+Once a turn's PR is green, the persistent card can show a **Merge & Deploy**
+button (behind a native Slack confirmation dialog, since merging and restarting
+a live service is not easily reversible). Clicking it, as an allowlisted user:
+
+1. re-fetches the PR's current head SHA and merges it (idempotent — if it's
+   already merged, e.g. a repeat click, this skips straight to step 2);
+2. **syncs the live checkout** at `BUILDER_DEPLOY_CHECKOUT_PATH` to the exact
+   merged commit (`git fetch` + `git reset --hard`) — restarting a systemd
+   unit only re-execs whatever is already on disk, it does not pull anything,
+   so skipping this step would restart the *old* code while reporting the
+   change as deployed. This refuses to run (no units are restarted) if the
+   checkout has uncommitted changes or has diverged from the merged branch;
+3. restarts the systemd unit(s) named in `BUILDER_DEPLOY_RESTART_UNITS`,
+   deferring `BUILDER_DEPLOY_SELF_UNIT` (if configured) to last — see below;
+4. checks `systemctl is-active` on each restarted unit and reports the real
+   result; and
+5. updates the same Slack card to a final `deployed` or `deploy_failed` state.
+
+This is a **deterministic, non-LLM code path** (`src/worker/deploy.py`), never
+reachable from the AEON tool loop — the terminal harness stays fully no-sudo by
+design. Merge & Deploy runs as the account behind the main Bolt app
+(`knowledge-management-by-slack.service`), a separate trust boundary from
+`builder-worker.service`, using a narrowly-scoped sudoers rule
+(`deploy/sudoers/builder-deploy`) that permits `sudo systemctl restart` on
+exactly the named unit(s) and nothing else.
+
+**Restarting the process that is running Merge & Deploy is a special case.**
+If `BUILDER_DEPLOY_RESTART_UNITS` includes the unit that the main Bolt app
+itself runs under (typically `knowledge-management-by-slack.service`), set
+`BUILDER_DEPLOY_SELF_UNIT` to that same unit name. Restarting your own unit
+kills the process mid-function, so nothing after that call is guaranteed to
+run — without this setting, the deployment audit record and the final Slack
+card update could simply never happen. When `BUILDER_DEPLOY_SELF_UNIT` is set:
+every *other* configured unit is restarted and health-checked first, then the
+deployment record and Slack card are finalized (this cannot itself be
+health-checked from within the dying process, so the card explains that in its
+message), and only then is the self-restart issued, fire-and-forget, as the
+last action.
+
+**The button stays hidden by default.** `BUILDER_DEPLOY_RESTART_UNITS` ships
+empty; until you set it to your actual unit name(s), Merge & Deploy is not
+offered. There is no in-repo systemd unit for the main bot process on `main`
+today — `deploy/systemd/knowledge-management-by-slack.service` is provided as a
+default, but you must verify it matches (or rename it to match) whatever
+actually runs your production bot before enabling the button.
+
+One-time bootstrap, alongside the existing Atlas/worker install steps:
+
+```bash
+# Validate and install the sudoers rule (edit the unit names first if yours differ)
+sudo visudo -cf deploy/sudoers/builder-deploy
+sudo cp deploy/sudoers/builder-deploy /etc/sudoers.d/builder-deploy
+sudo chmod 440 /etc/sudoers.d/builder-deploy
+
+# Install the main bot's systemd unit if you don't already have one
+sudo cp deploy/systemd/knowledge-management-by-slack.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now knowledge-management-by-slack.service
+```
+
+```dotenv
+BUILDER_DEPLOY_RESTART_UNITS=knowledge-management-by-slack.service,builder-worker.service
+BUILDER_DEPLOY_SELF_UNIT=knowledge-management-by-slack.service
+BUILDER_MERGE_METHOD=squash
+# Leave BUILDER_DEPLOY_CHECKOUT_PATH unset to use the process's own working
+# directory (/opt/knowledge_management_by_slack per the systemd units above).
+```
+
+Every Merge & Deploy click is recorded in the `builder_deployments` table
+(`src/agents/builder/deployment_store.py`) — who triggered it, which PR, the
+merge SHA, which units were restarted, and whether it succeeded — independent
+of the ordinary Builder turn queue.
+
+Clicking Merge & Deploy re-checks the PR's head SHA before merging (a stale
+branch fails safely with a 409 rather than merging unreviewed commits), but it
+does **not** re-run the GX10 validation gate. If the branch changed since the
+card last went green, ask Builder to re-action the PR before merging.
 
 ## Why Atlas is a canary
 
@@ -215,6 +369,15 @@ BUILDER_TEST_TIMEOUT_SECONDS=1200
 BUILDER_MAX_REPAIR_ATTEMPTS=2
 BUILDER_REQUIRE_TESTS_PASS=true
 BUILDER_VALIDATION_OUTPUT_CHARS=8000
+
+# Reliability, live progress and Merge & Deploy — see .env.example for the
+# full commented list (secret check, crash recovery, turn deadline, progress
+# throttling, Merge & Deploy restart units/method).
+BUILDER_SECRET_CHECK_ENABLED=true
+BUILDER_STARTUP_RECOVERY_ENABLED=true
+BUILDER_TURN_DEADLINE_SECONDS=5400
+BUILDER_PROGRESS_MIN_INTERVAL_SECONDS=4.0
+BUILDER_DEPLOY_RESTART_UNITS=
 ```
 
 The validation command mirrors the repository's high-signal GitHub CI checks.
@@ -304,6 +467,21 @@ restart the worker:
 
 ```dotenv
 BUILDER_AIDER_MODEL=ollama_chat/qwen3-coder:30b
+```
+
+To disable Merge & Deploy without touching anything else, clear the restart
+units — the button simply stops appearing:
+
+```dotenv
+BUILDER_DEPLOY_RESTART_UNITS=
+```
+
+To disable the startup secret-exposure check or crash recovery (not
+recommended, but available for debugging):
+
+```dotenv
+BUILDER_SECRET_CHECK_ENABLED=false
+BUILDER_STARTUP_RECOVERY_ENABLED=false
 ```
 
 The Builder queue, Slack routing, session model, worktrees and GitHub PR flow
