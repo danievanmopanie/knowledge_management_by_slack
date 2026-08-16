@@ -21,33 +21,58 @@ class Worktree:
     task_id: str
     branch_name: str
     path: Path
+    start_sha: str | None = None
 
 
-def prepare_worktree(task_id: str) -> Worktree:
-    """Fetch the base branch and create a fresh isolated worktree + branch."""
+def prepare_worktree(task_id: str, *, continuation_branch: str | None = None) -> Worktree:
+    """Create an isolated worktree, optionally continuing an existing PR branch."""
     repo_path = Path(settings.builder_repo_path)
-    branch_name = f"builder/{task_id}"
+    branch_name = continuation_branch or f"builder/{task_id}"
     worktree_path = Path(settings.builder_workdir) / task_id
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        _run(["git", "fetch", settings.builder_git_remote, settings.builder_base_branch], cwd=repo_path)
-        _run(
-            [
-                "git",
-                "worktree",
-                "add",
-                "-b",
-                branch_name,
-                str(worktree_path),
-                f"{settings.builder_git_remote}/{settings.builder_base_branch}",
-            ],
-            cwd=repo_path,
-        )
+        if continuation_branch:
+            _run(["git", "fetch", settings.builder_git_remote, continuation_branch], cwd=repo_path)
+            # -B resets/creates the local branch at the remote PR head. The
+            # previous task's worktree has already been removed, so the branch
+            # is not checked out elsewhere.
+            _run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-B",
+                    branch_name,
+                    str(worktree_path),
+                    f"{settings.builder_git_remote}/{continuation_branch}",
+                ],
+                cwd=repo_path,
+            )
+        else:
+            _run(["git", "fetch", settings.builder_git_remote, settings.builder_base_branch], cwd=repo_path)
+            _run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch_name,
+                    str(worktree_path),
+                    f"{settings.builder_git_remote}/{settings.builder_base_branch}",
+                ],
+                cwd=repo_path,
+            )
+        start_sha = _run(["git", "rev-parse", "HEAD"], cwd=worktree_path).stdout.strip()
     except subprocess.CalledProcessError as exc:
         raise WorkspaceError(f"Failed to prepare worktree for {task_id}: {exc.stderr}") from exc
 
-    return Worktree(task_id=task_id, branch_name=branch_name, path=worktree_path)
+    return Worktree(
+        task_id=task_id,
+        branch_name=branch_name,
+        path=worktree_path,
+        start_sha=start_sha,
+    )
 
 
 def cleanup_worktree(worktree: Worktree) -> None:
@@ -64,7 +89,7 @@ def cleanup_worktree(worktree: Worktree) -> None:
 
 
 def has_repository_changes(worktree: Worktree) -> bool:
-    """Return True when Aider changed tracked content or created commits."""
+    """Return True when this turn changed the worktree relative to its start SHA."""
     dirty = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=worktree.path,
@@ -72,19 +97,18 @@ def has_repository_changes(worktree: Worktree) -> bool:
         capture_output=True,
         text=True,
     ).stdout.strip()
-    ahead = subprocess.run(
-        [
-            "git",
-            "rev-list",
-            "--count",
-            f"{settings.builder_git_remote}/{settings.builder_base_branch}..HEAD",
-        ],
+    if dirty:
+        return True
+    if not worktree.start_sha:
+        return False
+    commits = subprocess.run(
+        ["git", "rev-list", "--count", f"{worktree.start_sha}..HEAD"],
         cwd=worktree.path,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
-    return bool(dirty or int(ahead or "0"))
+    return int(commits or "0") > 0
 
 
 def commit_pending_changes(worktree: Worktree, *, message: str) -> None:
