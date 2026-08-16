@@ -22,6 +22,7 @@ def test_enqueue_creates_pending_task(tmp_path: Path):
     assert task["requester_id"] == "U1"
     assert task["channel_id"] == "C1"
     assert task["thread_ts"] == "123.45"
+    assert task["handoff_pr_number"] is None
     assert task["attempts"] == 0
 
 
@@ -131,6 +132,32 @@ def test_followup_turn_inherits_latest_published_pr_in_same_thread(tmp_path: Pat
     assert followup is not None
     assert followup["continuation_branch"] == f"builder/{first_id}"
     assert followup["continuation_pr_url"] == "https://github.com/org/repo/pull/9"
+
+
+def test_explicit_handoff_overrides_previous_thread_pr(tmp_path: Path):
+    store = BuilderTaskStore(tmp_path / "platform.db")
+    first_id = store.enqueue(
+        goal="first change",
+        requester_id="U1",
+        channel_id="C1",
+        thread_ts="100.1",
+    )
+    store.mark_running(first_id, branch_name=f"builder/{first_id}")
+    store.mark_succeeded(first_id, pr_url="https://github.com/org/repo/pull/9")
+
+    handoff_id = store.enqueue(
+        goal="take PR #83",
+        requester_id="U1",
+        channel_id="C1",
+        thread_ts="100.1",
+        handoff_pr_number="83",
+    )
+    handoff = store.get(handoff_id)
+
+    assert handoff is not None
+    assert handoff["handoff_pr_number"] == "83"
+    assert handoff["continuation_branch"] is None
+    assert handoff["continuation_pr_url"] is None
 
 
 def test_new_thread_does_not_inherit_previous_pr(tmp_path: Path):
