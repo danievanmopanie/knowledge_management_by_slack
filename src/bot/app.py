@@ -89,7 +89,8 @@ async def _builder_thread_prompt(event: dict, latest_text: str) -> str:
         body = _clean_mention_text((message.get("text") or "").strip())
         if not body or body.startswith(BUILDER_STATUS_PREFIX):
             continue
-        role = "User" if message.get("user") else "Builder"
+        is_bot = bool(message.get("bot_id")) or message.get("subtype") == "bot_message"
+        role = "Builder" if is_bot else "User"
         turns.append(f"{role}: {body}")
 
     history = "\n".join(turns)
