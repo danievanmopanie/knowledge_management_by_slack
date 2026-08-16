@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 HELP = """*Builder Agent*
 
-Post a coding task and a background worker will implement it with Aider,
-push a branch, and open a pull request.
+Post a coding task and the device worker will implement it, run the local test
+suite, repair failures, and only then push a branch and open a pull request.
 
 • `build: <describe the change you want>`
 • `status <task-id>`
@@ -66,8 +66,9 @@ class BuilderAgent(BaseAgent):
                 )
                 return (
                     f"Queued build task `{task_id}`.\n"
-                    "A worker will pick it up shortly and reply in this thread "
-                    f"with a pull request link. Check progress with `status {task_id}`."
+                    "The device worker will implement it, validate it locally, and repair "
+                    "test failures before it is allowed to publish a PR. "
+                    f"Check progress with `status {task_id}`."
                 )
             if match := STATUS_RE.match(text):
                 return self._status(match.group("task_id"))
