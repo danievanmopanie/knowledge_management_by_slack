@@ -28,9 +28,9 @@ from src.knowledge.organisational_knowledge import (  # noqa: E402
     OrganisationalKnowledgeIndex,
     OrganisationalKnowledgeStore,
 )
+from src.knowledge.resilient_support_extraction import SupportKnowledgeExtractor  # noqa: E402
 from src.knowledge.support_extraction import (  # noqa: E402
     SupportExtraction,
-    SupportKnowledgeExtractor,
     extraction_model_key,
 )
 
