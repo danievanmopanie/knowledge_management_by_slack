@@ -173,6 +173,7 @@ class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
         lines = [
             "### Organisational pattern evidence",
             "Semantic retrieval selected the canonical pattern; counts below come only from the trusted materialised pattern store.",
+            "When describing frequency to a technician, preserve these small-sample counts as 'x of y incidents'; do not convert them into percentages or probabilities.",
             f"Canonical issue pattern: {pattern.get('label') or pattern_key}",
             f"Trusted supporting incidents: {incident_count}",
             f"Incidents with reusable resolution knowledge: {int(pattern.get('resolved_count') or 0)}",
