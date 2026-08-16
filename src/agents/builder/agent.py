@@ -1,4 +1,4 @@
-"""Builder Agent – queues Aider-driven coding tasks from Slack for a background worker."""
+"""Builder Agent – natural Slack interface for the on-device coding harness."""
 
 from __future__ import annotations
 
@@ -15,26 +15,59 @@ logger = logging.getLogger(__name__)
 
 HELP = """*Builder Agent*
 
-Post a coding task and a background worker will implement it with Aider,
-push a branch, and open a pull request.
+Talk to me naturally, like a coding assistant. No `build:` prefix is required.
 
-• `build: <describe the change you want>`
+Examples:
+• `Have a look at why the frontend tests are failing.`
+• `Add a health endpoint and cover it with tests.`
+• `What does the builder worker do today?`
+• `Take PR #83 and action it on the GX10. Make sure it actually works.`
+• `Run the app locally and check the endpoint.`
+
+I work on the GX10 itself. I can inspect the repo, execute real non-interactive
+terminal commands as the Builder service account, edit code, run tests and local
+runtime checks, and push repaired code back to the same PR when you hand one off.
+You do not need to copy/paste generated commands into the GX10 terminal.
+
+Deterministic escape hatches remain available:
 • `status <task-id>`
 • `cancel <task-id>` (only while still queued)
 """
 
-BUILD_RE = re.compile(r"^build:?\s+(?P<goal>.+)$", re.I | re.S)
 STATUS_RE = re.compile(r"^status\s+(?P<task_id>\S+)$", re.I)
 CANCEL_RE = re.compile(r"^cancel\s+(?P<task_id>\S+)$", re.I)
+# Backward compatibility only. Natural language is the primary interface.
+LEGACY_BUILD_RE = re.compile(r"^build:?\s+(?P<goal>.+)$", re.I | re.S)
+_PR_URL_RE = re.compile(r"github\.com/[^\s/]+/[^\s/]+/pull/(?P<number>\d+)", re.I)
+_PR_TEXT_RE = re.compile(r"\b(?:pull\s*request|PR)\s*#?\s*(?P<number>\d+)\b", re.I)
+
+HARNESS_INSTRUCTION = """You are the repository-aware Builder coding harness running on the user's GX10.
+Treat the latest Slack request as natural language; never require magic command words.
+Use the supplied conversation context when it exists.
+Use your real on-device terminal tools to inspect, execute and verify instead of asking the user to copy/paste commands.
+If the user is asking a question or requesting inspection/explanation only, inspect the repository/device and answer without editing files.
+If the user asks for a code/config/test/documentation change, implement it completely in the checked-out worktree.
+If an existing PR is handed off, validate and repair that existing PR branch and keep the Slack thread bound to it.
+Do not invent repository or runtime facts that you can inspect directly.
+"""
+
+
+def extract_pr_number(text: str) -> str | None:
+    """Extract an explicit GitHub PR handoff reference from natural language."""
+    if match := _PR_URL_RE.search(text or ""):
+        return match.group("number")
+    if match := _PR_TEXT_RE.search(text or ""):
+        return match.group("number")
+    return None
 
 
 class BuilderAgent(BaseAgent):
-    """Slack-facing coordinator for the Builder Agent task queue.
+    """Slack-facing coordinator for natural Builder conversations.
 
-    Only ever enqueues tasks into BuilderTaskStore and returns immediately —
-    never runs Aider itself, so the Bolt event loop is never blocked. A
-    separate long-running worker process (src/worker/builder_worker.py)
-    executes queued tasks.
+    The Slack event loop never runs the coding harness itself. Every substantive
+    conversational turn is queued for the on-device worker so repo inspection,
+    terminal execution, code editing and validation remain isolated from Bolt
+    event handling.
     """
 
     name = "builder"
@@ -54,26 +87,35 @@ class BuilderAgent(BaseAgent):
             )
 
         try:
-            if match := BUILD_RE.match(text):
-                goal = match.group("goal").strip()
-                if not goal:
-                    return "Please describe the change after `build:`."
-                task_id = self.tasks.enqueue(
-                    goal=goal,
-                    requester_id=context.user_id,
-                    channel_id=context.channel_id,
-                    thread_ts=context.thread_ts,
-                )
-                return (
-                    f"Queued build task `{task_id}`.\n"
-                    "A worker will pick it up shortly and reply in this thread "
-                    f"with a pull request link. Check progress with `status {task_id}`."
-                )
             if match := STATUS_RE.match(text):
                 return self._status(match.group("task_id"))
             if match := CANCEL_RE.match(text):
                 return self._cancel(match.group("task_id"))
-            return HELP
+
+            # Preserve old muscle memory without making it the contract.
+            if match := LEGACY_BUILD_RE.match(text):
+                text = match.group("goal").strip()
+
+            handoff_pr_number = extract_pr_number(text)
+            goal = f"{HARNESS_INSTRUCTION}\n\n{text}".strip()
+            task_id = self.tasks.enqueue(
+                goal=goal,
+                requester_id=context.user_id,
+                channel_id=context.channel_id,
+                thread_ts=context.thread_ts,
+                handoff_pr_number=handoff_pr_number,
+            )
+            if handoff_pr_number:
+                return (
+                    f"Got it — I’m taking PR #{handoff_pr_number} onto the GX10 as `{task_id}`. "
+                    "I’ll check out that PR branch, execute it locally, repair anything I can prove is "
+                    "wrong, run the required gates, and push fixes back to the same PR."
+                )
+            return (
+                f"Got it — I’ve started working on that as `{task_id}`. "
+                "I’ll inspect and execute on the GX10 itself. If code changes are needed, "
+                "I’ll validate them before I publish anything."
+            )
         except Exception:
             logger.exception("Builder agent operation failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
@@ -89,12 +131,13 @@ class BuilderAgent(BaseAgent):
     def _status(self, task_id: str) -> str:
         task = self.tasks.get(task_id)
         if task is None:
-            return f"No build task found with id `{task_id}`."
+            return f"No Builder turn found with id `{task_id}`."
         lines = [
-            f"*Build task `{task_id}`*",
+            f"*Builder turn `{task_id}`*",
             f"• Status: *{task['status']}*",
-            f"• Goal: {task['goal']}",
         ]
+        if task.get("handoff_pr_number"):
+            lines.append(f"• Handoff PR: `#{task['handoff_pr_number']}`")
         if task.get("branch_name"):
             lines.append(f"• Branch: `{task['branch_name']}`")
         if task.get("pr_url"):
@@ -106,11 +149,11 @@ class BuilderAgent(BaseAgent):
     def _cancel(self, task_id: str) -> str:
         task = self.tasks.get(task_id)
         if task is None:
-            return f"No build task found with id `{task_id}`."
+            return f"No Builder turn found with id `{task_id}`."
         if task["status"] != "pending":
             return (
-                f"Build task `{task_id}` is already *{task['status']}* "
+                f"Builder turn `{task_id}` is already *{task['status']}* "
                 "and can no longer be cancelled."
             )
         self.tasks.mark_cancelled(task_id)
-        return f"Cancelled build task `{task_id}`."
+        return f"Cancelled Builder turn `{task_id}`."

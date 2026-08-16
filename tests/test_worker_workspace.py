@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from src.core.config import settings
-from src.worker.workspace import prepare_worktree, cleanup_worktree, push_branch
+from src.worker.workspace import (
+    cleanup_worktree,
+    has_repository_changes,
+    prepare_worktree,
+    push_branch,
+)
 
 
 def _init_repo(path: Path) -> None:
@@ -30,8 +35,6 @@ def builder_repo(tmp_path, monkeypatch):
 
     repo_path = tmp_path / "worker_repo"
     subprocess.run(["git", "clone", str(origin), str(repo_path)], check=True, capture_output=True)
-    # Git identity is repository-local configuration and is not copied by clone.
-    # Configure the throwaway clone explicitly so CI does not depend on runner globals.
     subprocess.run(
         ["git", "-C", str(repo_path), "config", "user.email", "test@example.com"],
         check=True,
@@ -54,6 +57,8 @@ def test_prepare_worktree_creates_branch_and_checkout(builder_repo):
     assert worktree.path.exists()
     assert (worktree.path / "README.md").exists()
     assert worktree.branch_name == "builder/bld_test1"
+    assert worktree.start_sha
+    assert has_repository_changes(worktree) is False
 
     branches = subprocess.run(
         ["git", "-C", str(builder_repo), "branch", "--list", worktree.branch_name],
@@ -71,7 +76,7 @@ def test_cleanup_worktree_is_safe_to_call_twice(builder_repo):
     worktree = prepare_worktree("bld_test2")
 
     cleanup_worktree(worktree)
-    cleanup_worktree(worktree)  # should not raise
+    cleanup_worktree(worktree)
 
     assert not worktree.path.exists()
 
@@ -79,6 +84,7 @@ def test_cleanup_worktree_is_safe_to_call_twice(builder_repo):
 def test_push_branch_pushes_commit_to_remote(builder_repo):
     worktree = prepare_worktree("bld_test3")
     (worktree.path / "new_file.txt").write_text("content\n")
+    assert has_repository_changes(worktree) is True
     subprocess.run(["git", "-C", str(worktree.path), "add", "."], check=True)
     subprocess.run(
         ["git", "-C", str(worktree.path), "commit", "-m", "add file"],
@@ -97,3 +103,28 @@ def test_push_branch_pushes_commit_to_remote(builder_repo):
     assert worktree.branch_name in ls_remote
 
     cleanup_worktree(worktree)
+
+
+def test_continuation_worktree_starts_clean_from_existing_pr_branch(builder_repo):
+    first = prepare_worktree("bld_first")
+    (first.path / "feature.txt").write_text("first turn\n")
+    subprocess.run(["git", "-C", str(first.path), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(first.path), "commit", "-m", "first turn"],
+        check=True,
+        capture_output=True,
+    )
+    push_branch(first)
+    branch = first.branch_name
+    cleanup_worktree(first)
+
+    second = prepare_worktree("bld_second", continuation_branch=branch)
+
+    assert second.branch_name == branch
+    assert (second.path / "feature.txt").read_text() == "first turn\n"
+    # Existing PR commits are the starting state, not a change made by this turn.
+    assert has_repository_changes(second) is False
+
+    (second.path / "feature.txt").write_text("second turn\n")
+    assert has_repository_changes(second) is True
+    cleanup_worktree(second)

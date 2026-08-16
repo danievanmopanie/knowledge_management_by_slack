@@ -1,0 +1,20 @@
+[Unit]
+Description=Knowledge Management by Slack – Atlas inference for AEON Builder
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+WorkingDirectory=/opt/knowledge_management_by_slack
+User=danie
+Group=danie
+EnvironmentFile=-/opt/knowledge_management_by_slack/.env
+ExecStart=/bin/bash /opt/knowledge_management_by_slack/scripts/run_atlas_builder.sh
+ExecStop=-/usr/bin/docker stop atlas-builder
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

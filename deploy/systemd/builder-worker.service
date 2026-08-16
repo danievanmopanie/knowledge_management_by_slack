@@ -1,5 +1,5 @@
 [Unit]
-Description=Knowledge Management by Slack – Builder Agent worker (Aider + PR automation)
+Description=Knowledge Management by Slack – Builder GX10 engineering harness
 After=network.target
 
 [Service]
@@ -7,14 +7,24 @@ Type=simple
 Restart=always
 RestartSec=10
 WorkingDirectory=/opt/knowledge_management_by_slack
-# Adjust user/group to the account that runs the bot on the GX10
+# Builder terminal commands execute with exactly this account's permissions.
+# Use a dedicated non-root account in production. Add Docker-group membership
+# only if you intentionally want Builder to operate existing Docker workloads.
 User=danie
 Group=danie
 Environment=PYTHONUNBUFFERED=1
-# Load the same .env the bot uses
+# Secrets are available to the worker for Slack/GitHub API calls, but the
+# terminal_harness deliberately scrubs them from every child-shell environment.
 EnvironmentFile=-/opt/knowledge_management_by_slack/.env
 ExecStart=/opt/knowledge_management_by_slack/.venv/bin/python /opt/knowledge_management_by_slack/scripts/run_builder_worker.py
 Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

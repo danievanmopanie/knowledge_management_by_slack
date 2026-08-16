@@ -91,17 +91,46 @@ class Settings(BaseSettings):
     channel_create_knowledge: str | None = None
     channel_builder_agent: str | None = None
 
-    # Builder Agent (Aider-driven autonomous coding tasks)
+    # Builder Agent – natural on-device engineering harness
     builder_agent_allowed_user_ids: str = ""
     builder_repo_path: Path = Path("./data/builder/repo")
     builder_workdir: Path = Path("./data/builder/worktrees")
-    builder_aider_model: str = "ollama_chat/qwen3-coder:30b"
+
+    # Keep Builder inference independent from the rest of the Slack agents so
+    # Atlas can be introduced as a canary without moving support/extraction.
+    builder_aider_model: str = "openai/aeon-builder"
+    builder_llm_model: str = "aeon-builder"
+    builder_llm_base_url: str = "http://127.0.0.1:8888/v1"
+    builder_llm_api_key: str = "atlas-local"
+    builder_model_checkpoint: str = "AEON-7/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-BF16"
+
+    # Real terminal/tool loop. Commands execute on the GX10 as the Builder
+    # service account with a scrubbed environment; no sudo bypass is provided.
+    builder_terminal_enabled: bool = True
+    builder_terminal_max_steps: int = 16
+    builder_terminal_command_timeout_seconds: int = 180
+    builder_terminal_max_command_timeout_seconds: int = 900
+    builder_terminal_output_chars: int = 12000
+    builder_terminal_max_tokens: int = 4096
+    builder_terminal_temperature: float = 0.1
+    builder_terminal_allow_docker_run: bool = False
+
+    # Local code validation gate. {python} resolves to the worker's interpreter.
+    # A PR is never pushed when this command fails when require_tests_pass=True.
+    builder_test_command: str = (
+        "{python} -m ruff check src tests scripts && {python} -m pytest -q"
+    )
+    builder_test_timeout_seconds: int = 1200
+    builder_max_repair_attempts: int = 2
+    builder_require_tests_pass: bool = True
+    builder_validation_output_chars: int = 8000
+
     builder_task_timeout_seconds: int = 1800
     builder_poll_interval_seconds: int = 15
     builder_git_remote: str = "origin"
     builder_base_branch: str = "main"
 
-    # GitHub (pull request creation for Builder Agent)
+    # GitHub (pull request creation / handoff for Builder Agent)
     github_token: str = ""
     github_api_base_url: str = "https://api.github.com"
     github_repo_owner: str = ""
