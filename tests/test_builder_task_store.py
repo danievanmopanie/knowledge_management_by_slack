@@ -160,6 +160,81 @@ def test_explicit_handoff_overrides_previous_thread_pr(tmp_path: Path):
     assert handoff["continuation_pr_url"] is None
 
 
+def test_claim_next_sets_deadline_at(tmp_path: Path):
+    store = BuilderTaskStore(tmp_path / "platform.db")
+    task_id = store.enqueue(goal="goal", requester_id="U1", channel_id="C1", thread_ts=None)
+
+    claimed = store.claim_next()
+
+    assert claimed["task_id"] == task_id
+    assert claimed["deadline_at"] is not None
+
+
+def test_count_ahead_reflects_fifo_position(tmp_path: Path):
+    store = BuilderTaskStore(tmp_path / "platform.db")
+    first_id = store.enqueue(goal="first", requester_id="U1", channel_id="C1", thread_ts=None)
+    second_id = store.enqueue(goal="second", requester_id="U1", channel_id="C1", thread_ts=None)
+    third_id = store.enqueue(goal="third", requester_id="U1", channel_id="C1", thread_ts=None)
+
+    assert store.count_ahead(first_id) == 0
+    assert store.count_ahead(second_id) == 1
+    assert store.count_ahead(third_id) == 2
+
+    store.claim_next()  # first_id -> running, still counts as "ahead"
+
+    assert store.count_ahead(second_id) == 1
+    assert store.count_ahead(third_id) == 2
+
+
+def test_count_ahead_unknown_task_returns_zero(tmp_path: Path):
+    store = BuilderTaskStore(tmp_path / "platform.db")
+
+    assert store.count_ahead("bld_missing") == 0
+
+
+def test_request_cancel_only_applies_to_running(tmp_path: Path):
+    store = BuilderTaskStore(tmp_path / "platform.db")
+    pending_id = store.enqueue(goal="goal", requester_id="U1", channel_id="C1", thread_ts=None)
+
+    assert store.request_cancel(pending_id) is False
+    assert store.get(pending_id)["cancel_requested"] == 0
+
+    store.claim_next()
+
+    assert store.request_cancel(pending_id) is True
+    assert store.get(pending_id)["cancel_requested"] == 1
+
+
+def test_mark_cancelled_from_running_only_applies_to_running(tmp_path: Path):
+    store = BuilderTaskStore(tmp_path / "platform.db")
+    task_id = store.enqueue(goal="goal", requester_id="U1", channel_id="C1", thread_ts=None)
+
+    assert store.mark_cancelled_from_running(task_id) is False
+
+    store.claim_next()
+    store.request_cancel(task_id)
+
+    assert store.mark_cancelled_from_running(task_id) is True
+    assert store.get(task_id)["status"] == "cancelled"
+
+
+def test_recover_stuck_tasks_fails_running_rows_only(tmp_path: Path):
+    store = BuilderTaskStore(tmp_path / "platform.db")
+    stuck_id = store.enqueue(goal="stuck", requester_id="U1", channel_id="C1", thread_ts=None)
+    pending_id = store.enqueue(goal="pending", requester_id="U1", channel_id="C1", thread_ts=None)
+    store.claim_next()  # claims stuck_id, leaves it "running" to simulate a crash
+
+    recovered = store.recover_stuck_tasks()
+
+    assert [row["task_id"] for row in recovered] == [stuck_id]
+    assert store.get(stuck_id)["status"] == "failed"
+    assert store.get(stuck_id)["error_message"]
+    assert store.get(pending_id)["status"] == "pending"
+
+    # Idempotent: nothing left to recover on a second call.
+    assert store.recover_stuck_tasks() == []
+
+
 def test_new_thread_does_not_inherit_previous_pr(tmp_path: Path):
     store = BuilderTaskStore(tmp_path / "platform.db")
     first_id = store.enqueue(

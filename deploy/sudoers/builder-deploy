@@ -1,0 +1,18 @@
+# One-time bootstrap file. Install with:
+#   sudo visudo -cf deploy/sudoers/builder-deploy   # validate first
+#   sudo cp deploy/sudoers/builder-deploy /etc/sudoers.d/builder-deploy
+#   sudo chmod 440 /etc/sudoers.d/builder-deploy
+#
+# Grants the account running the main Slack bot process (knowledge-management-
+# by-slack.service, User=danie below) permission to restart EXACTLY the named
+# systemd units, and nothing else. This is a deliberate, narrow, auditable
+# exception for the Slack "Merge & Deploy" button (src/worker/deploy.py) — it
+# is a SEPARATE privilege grant from builder-worker.service, which stays
+# no-sudo by design because it runs the LLM-driven terminal tool loop.
+#
+# Replace "danie" and the unit names below to match your actual deployment
+# before installing this file. BUILDER_DEPLOY_RESTART_UNITS in .env must list
+# the exact same unit names, or the button will report restart failures.
+
+danie ALL=(root) NOPASSWD: /usr/bin/systemctl restart knowledge-management-by-slack.service
+danie ALL=(root) NOPASSWD: /usr/bin/systemctl restart builder-worker.service

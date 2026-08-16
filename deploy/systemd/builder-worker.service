@@ -21,6 +21,7 @@ Nice=10
 NoNewPrivileges=true
 PrivateTmp=true
 RestrictSUIDSGID=true
+ProtectHome=yes
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

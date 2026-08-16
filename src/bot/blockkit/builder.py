@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.bot.blockkit import ids
 
 _STATUS_COPY = {
     "running": ("🛠️", "Working on it"),
@@ -12,6 +13,10 @@ _STATUS_COPY = {
     "answered": ("💬", "Answered from the repository"),
     "completed": ("✅", "Ready for review"),
     "failed": ("❌", "Builder stopped"),
+    "cancelled": ("🛑", "Cancelled"),
+    "timed_out": ("⏱️", "Stopped: turn deadline reached"),
+    "deployed": ("🚀", "Merged & deployed"),
+    "deploy_failed": ("❌", "Merge & Deploy failed"),
 }
 
 
@@ -24,6 +29,9 @@ def builder_status_blocks(
     validation: str | None = None,
     repair_attempt: str | None = None,
     pr_url: str | None = None,
+    current_step: str | None = None,
+    show_cancel: bool = False,
+    show_merge_deploy: bool = False,
 ) -> list[dict[str, Any]]:
     """Return a compact persistent progress card for one Builder turn.
 
@@ -54,21 +62,59 @@ def builder_status_blocks(
         fields.append({"type": "mrkdwn", "text": f"*Repair*\n{repair_attempt}"})
     blocks.append({"type": "section", "fields": fields[:10]})
 
-    if pr_url:
+    if current_step:
         blocks.append(
             {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Open pull request", "emoji": True},
-                        "url": pr_url,
-                        "action_id": "builder_open_pr",
-                        "style": "primary",
-                    }
-                ],
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"⏱️ _{current_step}_"}],
             }
         )
+
+    action_elements: list[dict[str, Any]] = []
+    if pr_url:
+        action_elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open pull request", "emoji": True},
+                "url": pr_url,
+                "action_id": "builder_open_pr",
+                "style": "primary",
+            }
+        )
+    if show_merge_deploy:
+        action_elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Merge & Deploy", "emoji": True},
+                "action_id": ids.BUILDER_MERGE_DEPLOY,
+                "value": task_id,
+                "style": "primary",
+                "confirm": {
+                    "title": {"type": "plain_text", "text": "Merge and deploy?"},
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "This merges the pull request and restarts the configured GX10 "
+                            "service(s). This is not easily reversible."
+                        ),
+                    },
+                    "confirm": {"type": "plain_text", "text": "Merge & Deploy"},
+                    "deny": {"type": "plain_text", "text": "Cancel"},
+                },
+            }
+        )
+    if show_cancel:
+        action_elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                "action_id": ids.BUILDER_CANCEL_TURN,
+                "value": task_id,
+                "style": "danger",
+            }
+        )
+    if action_elements:
+        blocks.append({"type": "actions", "elements": action_elements})
 
     blocks.append(
         {

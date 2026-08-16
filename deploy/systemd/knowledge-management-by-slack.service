@@ -1,0 +1,24 @@
+[Unit]
+Description=Knowledge Management by Slack – main Bolt app (Socket Mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+WorkingDirectory=/opt/knowledge_management_by_slack
+User=danie
+Group=danie
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/knowledge_management_by_slack/.env
+ExecStart=/opt/knowledge_management_by_slack/.venv/bin/python /opt/knowledge_management_by_slack/main.py
+NoNewPrivileges=false
+# NoNewPrivileges must stay false: this is the process that runs `sudo
+# systemctl restart <unit>` for the Slack Merge & Deploy button (see
+# deploy/sudoers/builder-deploy and src/worker/deploy.py). That is a
+# deliberate, narrowly-scoped exception — unlike builder-worker.service, which
+# runs the LLM-driven terminal tool loop and stays fully no-sudo.
+
+[Install]
+WantedBy=multi-user.target

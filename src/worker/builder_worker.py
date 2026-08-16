@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from src.agents.builder.task_store import BuilderTaskStore
@@ -18,7 +20,9 @@ from src.integrations.github_client import (
 )
 from src.reporting.publisher import publish_report_to_channel
 from src.worker.aider_runner import AiderResult, run_aider
-from src.worker.terminal_harness import run_terminal_harness
+from src.worker.secret_exposure_check import check_secret_exposure, log_and_warn_findings
+from src.worker.terminal_harness import HarnessStepEvent, run_terminal_harness
+from src.worker.turn_control import TurnControl, parse_deadline
 from src.worker.validation import ValidationResult, run_validation
 from src.worker.workspace import (
     WorkspaceError,
@@ -27,6 +31,7 @@ from src.worker.workspace import (
     commit_pending_changes,
     has_repository_changes,
     prepare_worktree,
+    prune_orphaned_worktrees,
     push_branch,
 )
 
@@ -36,6 +41,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def run_forever() -> None:
     store = BuilderTaskStore()
+    if settings.builder_secret_check_enabled:
+        log_and_warn_findings(check_secret_exposure())
+    if settings.builder_startup_recovery_enabled:
+        _recover_on_startup(store)
     logger.info("Builder worker started, polling every %ss", settings.builder_poll_interval_seconds)
     while True:
         task = store.claim_next()
@@ -43,6 +52,34 @@ def run_forever() -> None:
             time.sleep(settings.builder_poll_interval_seconds)
             continue
         _run_task(store, task)
+
+
+def _recover_on_startup(store: BuilderTaskStore) -> None:
+    """Fail and surface any turn still 'running' from a crashed worker process."""
+    prune_orphaned_worktrees()
+    for task in store.recover_stuck_tasks():
+        logger.warning("Recovered stuck Builder turn %s as failed", task["task_id"])
+        branch_name = task.get("branch_name")
+        if branch_name:
+            cleanup_worktree(
+                Worktree(
+                    task_id=task["task_id"],
+                    branch_name=branch_name,
+                    path=Path(settings.builder_workdir) / task["task_id"],
+                )
+            )
+        _publish_status(
+            store,
+            task,
+            status="failed",
+            summary=(
+                "The Builder worker restarted while this turn was in progress, so it could not "
+                "be safely resumed automatically. If a pull request already exists for this "
+                "branch, check GitHub directly; otherwise, resend your request."
+            ),
+            branch_name=branch_name,
+            pr_url=task.get("pr_url"),
+        )
 
 
 def _open_continuation(task: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -91,10 +128,75 @@ def _goal_with_pr_context(goal: str, pr: dict[str, Any] | None) -> str:
     )
 
 
-def _execute_primary_harness(*, goal: str, worktree: Worktree) -> str:
-    """Run the real terminal tool loop, falling back to legacy Aider only if disabled."""
+class _ProgressThrottle:
+    """Bounds how often the persistent Slack card is updated mid-turn.
+
+    Slack has no published exact rate limit for `chat.update`, but bursty
+    per-second updates are known to trigger 429s in practice. A missed tick is
+    non-fatal here — `_publish_status` already swallows/logs errors, and the
+    next throttled tick recovers automatically.
+    """
+
+    def __init__(self, min_interval: float):
+        self.min_interval = min_interval
+        self._last = 0.0
+
+    def ready(self) -> bool:
+        now = time.monotonic()
+        if now - self._last >= self.min_interval:
+            self._last = now
+            return True
+        return False
+
+
+def _make_progress_reporter(
+    *,
+    store: BuilderTaskStore,
+    task: dict[str, Any],
+    worktree: Worktree,
+    pr_url: str | None,
+    running_summary: str,
+) -> Callable[[HarnessStepEvent], None]:
+    """Build a throttled on_step callback that updates the same persistent card."""
+    throttle = _ProgressThrottle(settings.builder_progress_min_interval_seconds)
+
+    def on_step(event: HarnessStepEvent) -> None:
+        if not throttle.ready():
+            return
+        current_step = f"{event.tool_name}: {event.detail}" if event.detail else event.tool_name
+        _publish_status(
+            store,
+            task,
+            status="running",
+            summary=running_summary,
+            branch_name=worktree.branch_name,
+            pr_url=pr_url,
+            current_step=current_step,
+            show_cancel=True,
+        )
+
+    return on_step
+
+
+def _execute_primary_harness(
+    *,
+    goal: str,
+    worktree: Worktree,
+    control: TurnControl | None = None,
+    on_step: Callable[[HarnessStepEvent], None] | None = None,
+) -> tuple[str, str | None]:
+    """Run the real terminal tool loop, falling back to legacy Aider only if disabled.
+
+    Returns (answer, stopped_reason). A non-None stopped_reason means the turn
+    was cooperatively cancelled or hit its overall deadline — expected control
+    flow, not an error, and the caller must not raise on it.
+    """
     if settings.builder_terminal_enabled:
-        result = run_terminal_harness(goal=goal, worktree_path=worktree.path)
+        result = run_terminal_harness(
+            goal=goal, worktree_path=worktree.path, control=control, on_step=on_step
+        )
+        if result.stopped_reason:
+            return "", result.stopped_reason
         if not result.success:
             raise RuntimeError(result.error or "Builder terminal harness failed.")
         logger.info(
@@ -102,11 +204,11 @@ def _execute_primary_harness(*, goal: str, worktree: Worktree) -> str:
             worktree.task_id,
             result.tool_calls,
         )
-        return result.answer
+        return result.answer, None
 
     initial = run_aider(goal=goal, worktree_path=worktree.path)
     _require_aider_success(initial, phase="initial turn")
-    return _aider_answer(initial)
+    return _aider_answer(initial), None
 
 
 def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
@@ -121,32 +223,56 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
         explicit_handoff = handoff_pr is not None
         worktree = prepare_worktree(task_id, continuation_branch=target_branch)
         store.mark_running(task_id, branch_name=worktree.branch_name)
+        control = TurnControl(
+            store=store, task_id=task_id, deadline_at=parse_deadline(task.get("deadline_at"))
+        )
+        running_summary = (
+            f"I’ve checked out PR #{handoff_pr['number']} on the GX10 and I’m executing it locally."
+            if explicit_handoff
+            else (
+                "I’m continuing the open pull request from this Slack thread on the GX10."
+                if target_pr_url
+                else "I’m inspecting the repository and executing your request on the GX10."
+            )
+        )
         _publish_status(
             store,
             task,
             status="running",
-            summary=(
-                f"I’ve checked out PR #{handoff_pr['number']} on the GX10 and I’m executing it locally."
-                if explicit_handoff
-                else (
-                    "I’m continuing the open pull request from this Slack thread on the GX10."
-                    if target_pr_url
-                    else "I’m inspecting the repository and executing your request on the GX10."
-                )
-            ),
+            summary=running_summary,
             branch_name=worktree.branch_name,
             pr_url=target_pr_url,
+            show_cancel=True,
         )
 
         goal = _goal_with_pr_context(task["goal"], handoff_pr)
-        answer = _execute_primary_harness(goal=goal, worktree=worktree)
+        on_step = _make_progress_reporter(
+            store=store, task=task, worktree=worktree, pr_url=target_pr_url, running_summary=running_summary
+        )
+        answer, stopped_reason = _execute_primary_harness(
+            goal=goal, worktree=worktree, control=control, on_step=on_step
+        )
+        if stopped_reason:
+            _finish_stopped_turn(
+                store, task, stopped_reason=stopped_reason,
+                branch_name=worktree.branch_name, pr_url=target_pr_url,
+            )
+            return
         changed = has_repository_changes(worktree)
 
         # Explicit PR handoff is a proof request, not merely a conversational
         # inspection. Always run the deterministic repository gate on the GX10,
         # even when the PR needed no edits during the model-driven tool loop.
         if explicit_handoff:
-            validation, repair_attempts = _validate_and_repair(store, task, worktree)
+            validation, repair_attempts, stopped_reason = _validate_and_repair(
+                store, task, worktree, control
+            )
+            if stopped_reason:
+                _finish_stopped_turn(
+                    store, task, stopped_reason=stopped_reason,
+                    branch_name=worktree.branch_name, pr_url=target_pr_url,
+                )
+                return
             if not validation.success and settings.builder_require_tests_pass:
                 raise RuntimeError(_validation_failure_message(validation, repair_attempts))
 
@@ -174,6 +300,7 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
                 validation="✅ passed" if validation.success else "not required",
                 repair_attempt=str(repair_attempts),
                 pr_url=target_pr_url,
+                show_merge_deploy=_show_merge_deploy(target_pr_url, validation),
             )
             if answer:
                 publish_report_to_channel(
@@ -206,7 +333,13 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             )
             return
 
-        validation, repair_attempts = _validate_and_repair(store, task, worktree)
+        validation, repair_attempts, stopped_reason = _validate_and_repair(store, task, worktree, control)
+        if stopped_reason:
+            _finish_stopped_turn(
+                store, task, stopped_reason=stopped_reason,
+                branch_name=worktree.branch_name, pr_url=target_pr_url,
+            )
+            return
         if not validation.success and settings.builder_require_tests_pass:
             raise RuntimeError(_validation_failure_message(validation, repair_attempts))
 
@@ -251,6 +384,7 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             validation="✅ passed" if validation.success else "not required",
             repair_attempt=str(repair_attempts),
             pr_url=pr_url,
+            show_merge_deploy=_show_merge_deploy(pr_url, validation),
         )
         if answer:
             publish_report_to_channel(
@@ -290,12 +424,20 @@ def _validate_and_repair(
     store: BuilderTaskStore,
     task: dict[str, Any],
     worktree: Worktree,
-) -> tuple[ValidationResult, int]:
-    """Run local validation and let the coding model repair failures in-place."""
+    control: TurnControl | None = None,
+) -> tuple[ValidationResult, int, str | None]:
+    """Run local validation and let the coding model repair failures in-place.
+
+    The third return value is a stop reason ("cancelled"/"deadline") when the
+    caller stopped before another repair attempt started — checked once per
+    loop iteration, not mid-attempt, so a repair already underway completes.
+    """
     validation = run_validation(worktree_path=worktree.path)
     repair_attempts = 0
 
     while not validation.success and repair_attempts < settings.builder_max_repair_attempts:
+        if control and (reason := control.check()):
+            return validation, repair_attempts, reason
         repair_attempts += 1
         _publish_status(
             store,
@@ -306,6 +448,7 @@ def _validate_and_repair(
             validation="❌ failed",
             repair_attempt=f"{repair_attempts}/{settings.builder_max_repair_attempts}",
             pr_url=task.get("continuation_pr_url"),
+            show_cancel=True,
         )
         repair_goal = _repair_prompt(task["goal"], validation, repair_attempts)
         repair = run_aider(goal=repair_goal, worktree_path=worktree.path)
@@ -323,7 +466,47 @@ def _validate_and_repair(
             repair_attempt=str(repair_attempts),
             pr_url=task.get("continuation_pr_url"),
         )
-    return validation, repair_attempts
+    return validation, repair_attempts, None
+
+
+def _finish_stopped_turn(
+    store: BuilderTaskStore,
+    task: dict[str, Any],
+    *,
+    stopped_reason: str,
+    branch_name: str | None,
+    pr_url: str | None,
+) -> None:
+    """Handle a turn that stopped cooperatively (cancel or deadline), not an error."""
+    task_id = task["task_id"]
+    if stopped_reason == "cancelled":
+        store.mark_cancelled_from_running(task_id)
+        _publish_status(
+            store,
+            task,
+            status="cancelled",
+            summary=(
+                "Stopped because a Cancel was requested from Slack before this turn finished. "
+                "No validation ran and nothing was pushed."
+            ),
+            branch_name=branch_name,
+            pr_url=pr_url,
+        )
+        return
+
+    store.mark_failed(task_id, error_message="Exceeded the configured overall turn deadline.")
+    _publish_status(
+        store,
+        task,
+        status="timed_out",
+        summary=(
+            f"Stopped after exceeding the configured {settings.builder_turn_deadline_seconds}s "
+            "overall deadline for one Slack turn. Nothing was pushed. Consider breaking the "
+            "request into smaller turns."
+        ),
+        branch_name=branch_name,
+        pr_url=pr_url,
+    )
 
 
 def _repair_prompt(goal: str, validation: ValidationResult, attempt: int) -> str:
@@ -362,6 +545,14 @@ def _require_aider_success(result: AiderResult, *, phase: str) -> None:
     raise RuntimeError(f"Aider {phase} failed (code {result.returncode}): {detail}")
 
 
+def _show_merge_deploy(pr_url: str | None, validation: ValidationResult) -> bool:
+    """The Merge & Deploy button only ever appears when there's something to
+    merge, it's actually green, and the operator has explicitly configured
+    which unit(s) it's allowed to restart. An unconfigured deployment target
+    keeps the button hidden by default rather than failing loudly."""
+    return bool(pr_url) and validation.success and bool(settings.builder_deploy_restart_units.strip())
+
+
 def _validation_failure_message(validation: ValidationResult, repair_attempts: int) -> str:
     return (
         "Local validation is still failing after "
@@ -380,6 +571,9 @@ def _publish_status(
     validation: str | None = None,
     repair_attempt: str | None = None,
     pr_url: str | None = None,
+    current_step: str | None = None,
+    show_cancel: bool = False,
+    show_merge_deploy: bool = False,
 ) -> None:
     """Create or update one persistent Block Kit card for this Builder turn."""
     try:
@@ -398,6 +592,9 @@ def _publish_status(
                 validation=validation,
                 repair_attempt=repair_attempt,
                 pr_url=pr_url,
+                current_step=current_step,
+                show_cancel=show_cancel,
+                show_merge_deploy=show_merge_deploy,
             ),
             update_message_ts=message_ts,
         )

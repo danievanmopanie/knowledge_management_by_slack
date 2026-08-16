@@ -75,6 +75,19 @@ def prepare_worktree(task_id: str, *, continuation_branch: str | None = None) ->
     )
 
 
+def prune_orphaned_worktrees() -> None:
+    """Clear git's worktree registrations left behind by a crashed worker.
+
+    Safe to call on every startup, whether or not anything is actually
+    orphaned — `git worktree prune` is a no-op when there's nothing stale.
+    """
+    repo_path = Path(settings.builder_repo_path)
+    try:
+        _run(["git", "worktree", "prune"], cwd=repo_path)
+    except subprocess.CalledProcessError:
+        logger.exception("git worktree prune failed for %s", repo_path)
+
+
 def cleanup_worktree(worktree: Worktree) -> None:
     """Remove the worktree directory and its git registration. Safe to call twice."""
     repo_path = Path(settings.builder_repo_path)
