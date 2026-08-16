@@ -1,4 +1,4 @@
-"""Publish generated reports into a Slack channel."""
+"""Publish generated reports and durable worker cards into Slack."""
 
 from __future__ import annotations
 
@@ -17,15 +17,15 @@ def publish_report_to_channel(
     text: str,
     channel_id: str | None = None,
     thread_ts: str | None = None,
+    *,
+    blocks: list[dict[str, Any]] | None = None,
+    update_message_ts: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Post a report message to the Frontend Support channel (or override).
+    """Post or update a Slack message.
 
-    Pass thread_ts to reply within an existing thread (used by the Builder
-    Agent worker to post results back into the originating Slack thread).
-
-    Slack has a practical limit around 40k characters per message; we keep
-    reports well under that. Long reports can later be split or uploaded as files.
+    `text` is always supplied as the accessible notification/fallback string.
+    When `update_message_ts` is set the existing message is updated in place;
+    this is used by Builder progress cards to avoid status-message spam.
     """
     channel = channel_id or settings.channel_frontend_support
     if not channel:
@@ -35,20 +35,30 @@ def publish_report_to_channel(
         )
 
     client = WebClient(token=settings.slack_bot_token)
-
-    # Soft trim to stay safe in Slack
     if len(text) > 35000:
         text = text[:34900] + "\n\n_…report truncated_"
 
     try:
-        result = client.chat_postMessage(
-            channel=channel,
-            text=text,
-            mrkdwn=True,
-            thread_ts=thread_ts,
-        )
-        logger.info("Published report to %s (ts=%s)", channel, result.get("ts"))
-        return {"ok": True, "channel": channel, "ts": result.get("ts")}
+        if update_message_ts:
+            result = client.chat_update(
+                channel=channel,
+                ts=update_message_ts,
+                text=text,
+                blocks=blocks,
+            )
+            message_ts = result.get("ts") or update_message_ts
+            logger.info("Updated Slack message in %s (ts=%s)", channel, message_ts)
+        else:
+            result = client.chat_postMessage(
+                channel=channel,
+                text=text,
+                mrkdwn=True,
+                thread_ts=thread_ts,
+                blocks=blocks,
+            )
+            message_ts = result.get("ts")
+            logger.info("Published report to %s (ts=%s)", channel, message_ts)
+        return {"ok": True, "channel": channel, "ts": message_ts}
     except SlackApiError as e:
         logger.error("Slack API error publishing report: %s", e.response.get("error"))
         raise
