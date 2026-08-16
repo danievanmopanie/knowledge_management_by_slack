@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 
 import httpx
 
@@ -61,6 +62,57 @@ def create_pull_request(
 
     data = response.json()
     return {"html_url": data["html_url"], "number": str(data["number"])}
+
+
+def get_pull_request(
+    pr_number: str | int,
+    *,
+    owner: str | None = None,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """Resolve an existing PR in the configured repository for GX10 handoff.
+
+    Builder mutates the existing PR head branch, so fork-based PRs are rejected
+    for now rather than accidentally pushing a similarly named branch into the
+    configured origin repository.
+    """
+    owner, repo = _owner_repo(owner, repo)
+    number = str(pr_number).strip()
+    if not number.isdigit():
+        raise GitHubClientError(f"Invalid pull request number: {pr_number!r}")
+    url = f"{settings.github_api_base_url}/repos/{owner}/{repo}/pulls/{number}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(url, headers=_headers())
+    if response.status_code >= 400:
+        raise GitHubClientError(
+            f"GitHub API error loading PR {number}: {response.status_code} {response.text[:500]}"
+        )
+    data = response.json()
+    head = data.get("head") or {}
+    head_repo = head.get("repo") or {}
+    expected_repo = f"{owner}/{repo}".lower()
+    head_repo_name = str(head_repo.get("full_name") or "").lower()
+    if head_repo_name and head_repo_name != expected_repo:
+        raise GitHubClientError(
+            f"PR #{number} comes from fork {head_repo.get('full_name')}; "
+            "automatic mutation of fork PR branches is not enabled."
+        )
+    if data.get("state") != "open" or bool(data.get("merged")):
+        raise GitHubClientError(f"PR #{number} is not open and cannot be actioned in place.")
+    head_ref = str(head.get("ref") or "").strip()
+    if not head_ref:
+        raise GitHubClientError(f"PR #{number} has no usable head branch.")
+    return {
+        "number": number,
+        "html_url": data.get("html_url") or "",
+        "title": data.get("title") or "",
+        "body": data.get("body") or "",
+        "state": data.get("state") or "",
+        "head_ref": head_ref,
+        "head_sha": head.get("sha") or "",
+        "base_ref": (data.get("base") or {}).get("ref") or "",
+        "head_repo_full_name": head_repo.get("full_name") or f"{owner}/{repo}",
+    }
 
 
 def pull_request_is_open(
