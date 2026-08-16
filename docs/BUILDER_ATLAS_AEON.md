@@ -259,10 +259,17 @@ a live service is not easily reversible). Clicking it, as an allowlisted user:
 
 1. re-fetches the PR's current head SHA and merges it (idempotent — if it's
    already merged, e.g. a repeat click, this skips straight to step 2);
-2. restarts the systemd unit(s) named in `BUILDER_DEPLOY_RESTART_UNITS`;
-3. checks `systemctl is-active` on each restarted unit and reports the real
+2. **syncs the live checkout** at `BUILDER_DEPLOY_CHECKOUT_PATH` to the exact
+   merged commit (`git fetch` + `git reset --hard`) — restarting a systemd
+   unit only re-execs whatever is already on disk, it does not pull anything,
+   so skipping this step would restart the *old* code while reporting the
+   change as deployed. This refuses to run (no units are restarted) if the
+   checkout has uncommitted changes or has diverged from the merged branch;
+3. restarts the systemd unit(s) named in `BUILDER_DEPLOY_RESTART_UNITS`,
+   deferring `BUILDER_DEPLOY_SELF_UNIT` (if configured) to last — see below;
+4. checks `systemctl is-active` on each restarted unit and reports the real
    result; and
-4. updates the same Slack card to a final `deployed` or `deploy_failed` state.
+5. updates the same Slack card to a final `deployed` or `deploy_failed` state.
 
 This is a **deterministic, non-LLM code path** (`src/worker/deploy.py`), never
 reachable from the AEON tool loop — the terminal harness stays fully no-sudo by
@@ -271,6 +278,19 @@ design. Merge & Deploy runs as the account behind the main Bolt app
 `builder-worker.service`, using a narrowly-scoped sudoers rule
 (`deploy/sudoers/builder-deploy`) that permits `sudo systemctl restart` on
 exactly the named unit(s) and nothing else.
+
+**Restarting the process that is running Merge & Deploy is a special case.**
+If `BUILDER_DEPLOY_RESTART_UNITS` includes the unit that the main Bolt app
+itself runs under (typically `knowledge-management-by-slack.service`), set
+`BUILDER_DEPLOY_SELF_UNIT` to that same unit name. Restarting your own unit
+kills the process mid-function, so nothing after that call is guaranteed to
+run — without this setting, the deployment audit record and the final Slack
+card update could simply never happen. When `BUILDER_DEPLOY_SELF_UNIT` is set:
+every *other* configured unit is restarted and health-checked first, then the
+deployment record and Slack card are finalized (this cannot itself be
+health-checked from within the dying process, so the card explains that in its
+message), and only then is the self-restart issued, fire-and-forget, as the
+last action.
 
 **The button stays hidden by default.** `BUILDER_DEPLOY_RESTART_UNITS` ships
 empty; until you set it to your actual unit name(s), Merge & Deploy is not
@@ -295,7 +315,10 @@ sudo systemctl enable --now knowledge-management-by-slack.service
 
 ```dotenv
 BUILDER_DEPLOY_RESTART_UNITS=knowledge-management-by-slack.service,builder-worker.service
+BUILDER_DEPLOY_SELF_UNIT=knowledge-management-by-slack.service
 BUILDER_MERGE_METHOD=squash
+# Leave BUILDER_DEPLOY_CHECKOUT_PATH unset to use the process's own working
+# directory (/opt/knowledge_management_by_slack per the systemd units above).
 ```
 
 Every Merge & Deploy click is recorded in the `builder_deployments` table

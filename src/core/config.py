@@ -156,6 +156,20 @@ class Settings(BaseSettings):
     builder_deploy_restart_timeout_seconds: int = 60
     builder_deploy_health_check_timeout_seconds: int = 20
 
+    # The live checkout that must be synced to the exact merged commit before
+    # any unit is restarted. Restarting a systemd unit only re-execs whatever
+    # is already on disk — it does not pull new code. Empty defaults to the
+    # current process's working directory at deploy time (matches the
+    # WorkingDirectory= of the systemd units in deploy/systemd/).
+    builder_deploy_checkout_path: str = ""
+
+    # If the process running Merge & Deploy is itself one of the configured
+    # restart units (e.g. knowledge-management-by-slack.service), restarting
+    # it kills this process before it can report a result. Name that unit here
+    # so its restart is deferred until after the deployment record and Slack
+    # card are finalized, and issued as a final best-effort action.
+    builder_deploy_self_unit: str = ""
+
     # GitHub (pull request creation / handoff for Builder Agent)
     github_token: str = ""
     github_api_base_url: str = "https://api.github.com"

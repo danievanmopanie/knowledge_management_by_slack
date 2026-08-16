@@ -28,7 +28,7 @@ from src.agents.builder.task_store import BuilderTaskStore
 from src.bot.blockkit import ids
 from src.bot.blockkit.builder import builder_status_blocks
 from src.integrations.github_client import pr_number_from_url
-from src.worker.deploy import merge_and_deploy
+from src.worker.deploy import merge_and_deploy, trigger_pending_self_restart
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,12 @@ async def _run_merge_and_deploy(client, *, task, user_id: str, channel_id: str, 
         summary=result.message,
         pr_url=pr_url,
     )
+
+    if result.pending_self_restart:
+        # Must run LAST, strictly after the record/card above are finalized:
+        # this restarts the unit this very process runs under, which kills
+        # the process before any code after this call is guaranteed to run.
+        await asyncio.to_thread(trigger_pending_self_restart, result.pending_self_restart)
 
 
 async def _update_card(

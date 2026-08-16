@@ -209,11 +209,12 @@ def test_merge_deploy_button_requires_a_stored_pr_url(monkeypatch):
 
 
 class SimpleDeployResult:
-    def __init__(self, *, success, merge_sha, message, restarted=None):
+    def __init__(self, *, success, merge_sha, message, restarted=None, pending_self_restart=None):
         self.success = success
         self.merge_sha = merge_sha
         self.message = message
         self.restarted = restarted or []
+        self.pending_self_restart = pending_self_restart
 
 
 def test_merge_deploy_button_updates_card_on_success(monkeypatch):
@@ -258,3 +259,65 @@ def test_merge_deploy_button_updates_card_on_failure(monkeypatch):
     blocks = client.chat_update.call_args.kwargs["blocks"]
     assert "Merge & Deploy failed" in blocks[0]["text"]["text"]
     assert deployment_store.results[0]["success"] is False
+
+
+def test_merge_deploy_button_triggers_self_restart_only_after_finalizing_status(monkeypatch):
+    """The whole point of deferring a self-unit restart: the deployment record
+    and Slack card must be written BEFORE the process that would restart
+    itself is killed, not after (there is no "after" for that process)."""
+    monkeypatch.setattr(settings, "builder_agent_allowed_user_ids", "U1")
+    order: list[str] = []
+    client = fake_client()
+    client.chat_update.side_effect = lambda **kwargs: order.append("chat_update")
+
+    class OrderedDeploymentStore(FakeDeploymentStore):
+        def mark_result(self, deployment_id, **kwargs):
+            order.append("mark_result")
+            super().mark_result(deployment_id, **kwargs)
+
+    deployment_store = OrderedDeploymentStore()
+    monkeypatch.setattr("src.bot.builder_interactivity.BuilderTaskStore", lambda: FakeTaskStore("succeeded"))
+    monkeypatch.setattr("src.bot.builder_interactivity.BuilderDeploymentStore", lambda: deployment_store)
+    monkeypatch.setattr(
+        "src.bot.builder_interactivity.merge_and_deploy",
+        lambda **kwargs: SimpleDeployResult(
+            success=True,
+            merge_sha="def456",
+            message="Merged; restarting self.",
+            pending_self_restart="knowledge-management-by-slack.service",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.bot.builder_interactivity.trigger_pending_self_restart",
+        lambda unit: order.append("trigger_pending_self_restart"),
+    )
+
+    app = registered_app()
+    asyncio.run(
+        _invoke_and_drain(app.actions[ids.BUILDER_MERGE_DEPLOY], AsyncMock(), merge_deploy_body(), client)
+    )
+
+    assert order == ["mark_result", "chat_update", "trigger_pending_self_restart"]
+
+
+def test_merge_deploy_button_does_not_trigger_self_restart_when_none_pending(monkeypatch):
+    monkeypatch.setattr(settings, "builder_agent_allowed_user_ids", "U1")
+    client = fake_client()
+    monkeypatch.setattr("src.bot.builder_interactivity.BuilderTaskStore", lambda: FakeTaskStore("succeeded"))
+    monkeypatch.setattr("src.bot.builder_interactivity.BuilderDeploymentStore", FakeDeploymentStore)
+    monkeypatch.setattr(
+        "src.bot.builder_interactivity.merge_and_deploy",
+        lambda **kwargs: SimpleDeployResult(success=True, merge_sha="def456", message="Merged; deployed."),
+    )
+    restart_calls: list[str] = []
+    monkeypatch.setattr(
+        "src.bot.builder_interactivity.trigger_pending_self_restart",
+        lambda unit: restart_calls.append(unit),
+    )
+
+    app = registered_app()
+    asyncio.run(
+        _invoke_and_drain(app.actions[ids.BUILDER_MERGE_DEPLOY], AsyncMock(), merge_deploy_body(), client)
+    )
+
+    assert restart_calls == []
