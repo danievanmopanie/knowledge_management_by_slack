@@ -19,6 +19,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.core.config import settings  # noqa: E402
+from src.knowledge.knowledge_trust import (  # noqa: E402
+    index_trusted_items,
+    rebuild_trusted_patterns,
+)
 from src.knowledge.organisational_knowledge import (  # noqa: E402
     EnrichmentCandidate,
     OrganisationalKnowledgeIndex,
@@ -57,11 +61,7 @@ def _emit(on_progress: ProgressCallback | None, **event) -> None:
 
 
 def _knowledge_value(candidate: EnrichmentCandidate) -> tuple[int, int, int, int, str]:
-    """Rank pending records so useful resolved knowledge is built first.
-
-    This is scheduling only; it does not decide whether an extracted fact is true.
-    Thin incidents remain pending and will still be processed after richer cases.
-    """
+    """Rank pending records so useful resolved knowledge is built first."""
     inc = candidate.incident
     resolution_len = len((inc.resolution_notes or "").strip())
     work_len = len((inc.work_notes or "").strip())
@@ -201,9 +201,9 @@ async def run_once(
     if enriched_items:
         _emit(on_progress, stage="indexing", event="stage", enriched=result.enriched)
         extractor.graph.save()
-        index_result = index.upsert_many(enriched_items)
+        index_result = index_trusted_items(index, enriched_items, model_key=model_key)
         result.indexed_documents = int(index_result.get("documents") or 0)
-        result.patterns = store.rebuild_patterns()
+        result.patterns = rebuild_trusted_patterns(store, model_key=model_key)
 
     result.remaining = store.pending_count(model=model_key)
     result.elapsed_seconds = time.perf_counter() - started
