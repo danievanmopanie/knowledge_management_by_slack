@@ -1,4 +1,4 @@
-"""Durable task queue for Builder Agent (Aider-driven) coding tasks."""
+"""Durable task queue for Builder Agent coding-harness turns."""
 
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ class BuilderTaskStore:
                     status TEXT NOT NULL,
                     branch_name TEXT,
                     pr_url TEXT,
+                    progress_message_ts TEXT,
+                    result_text TEXT,
                     error_message TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
@@ -34,6 +36,12 @@ class BuilderTaskStore:
                 )
                 """
             )
+            # Safe additive migration for existing Builder databases.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(builder_tasks)").fetchall()}
+            if "progress_message_ts" not in columns:
+                conn.execute("ALTER TABLE builder_tasks ADD COLUMN progress_message_ts TEXT")
+            if "result_text" not in columns:
+                conn.execute("ALTER TABLE builder_tasks ADD COLUMN result_text TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_builder_tasks_status ON builder_tasks(status)"
             )
@@ -79,14 +87,7 @@ class BuilderTaskStore:
         return [dict(row) for row in rows]
 
     def claim_next(self) -> dict[str, Any] | None:
-        """Atomically claim the oldest pending task, flipping it to 'running'.
-
-        Single-worker design: BEGIN IMMEDIATE serializes this against concurrent
-        enqueue() writers, and the UPDATE...WHERE(subquery)...RETURNING is one
-        atomic statement so there is no separate select-then-update race window.
-        Running two worker processes against this store would need an added
-        lease/heartbeat column; not needed for the current single-worker deploy.
-        """
+        """Atomically claim the oldest pending turn, flipping it to running."""
         now = datetime.now(timezone.utc).isoformat()
         with connect(self.path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -119,14 +120,28 @@ class BuilderTaskStore:
                 (branch_name, now, task_id),
             )
 
-    def mark_succeeded(self, task_id: str, *, pr_url: str) -> None:
+    def set_progress_message_ts(self, task_id: str, message_ts: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with connect(self.path) as conn:
+            conn.execute(
+                "UPDATE builder_tasks SET progress_message_ts=?, updated_at=? WHERE task_id=?",
+                (message_ts, now, task_id),
+            )
+
+    def mark_succeeded(
+        self,
+        task_id: str,
+        *,
+        pr_url: str | None = None,
+        result_text: str | None = None,
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with connect(self.path) as conn:
             conn.execute(
                 """UPDATE builder_tasks
-                SET status='succeeded', pr_url=?, updated_at=?, finished_at=?
+                SET status='succeeded', pr_url=?, result_text=?, updated_at=?, finished_at=?
                 WHERE task_id=?""",
-                (pr_url, now, now, task_id),
+                (pr_url, result_text, now, now, task_id),
             )
 
     def mark_failed(self, task_id: str, *, error_message: str) -> None:
@@ -140,7 +155,7 @@ class BuilderTaskStore:
             )
 
     def mark_cancelled(self, task_id: str) -> bool:
-        """Cancel a task while it is still pending. Returns False if it was not pending."""
+        """Cancel a turn while it is still pending. Returns False if it was not pending."""
         now = datetime.now(timezone.utc).isoformat()
         with connect(self.path) as conn:
             cursor = conn.execute(
