@@ -290,9 +290,9 @@ async def submit_knowledge_candidate(ack, body, view, client):
     except (TypeError, ValueError):
         metadata = {}
     seed = _candidate_seed(metadata.get("incident_number", ""))
+    seed["title"] = _view_value(view, "title") or seed["title"]
     candidate, created = candidate_store.create(
         **seed,
-        title=_view_value(view, "title") or seed["title"],
         knowledge_gap=_view_value(view, "knowledge_gap"),
         notes=_view_value(view, "notes"),
         requested_by=str((body.get("user") or {}).get("id") or ""),
