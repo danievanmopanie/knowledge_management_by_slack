@@ -11,6 +11,7 @@ def test_trusted_pattern_context_excludes_raw_fallback_and_graph_neighbours():
             "- Restore electrical power to network equipment: 3 incident(s)\n"
             "- Reconnect network switch: 2 incident(s)"
         ),
+        trusted_pattern_response="We have 5 trusted incidents matching Network switch offline.",
         incident_context=(
             "### Raw historical case evidence\n"
             "INC0067217 breaker tripping\n"
