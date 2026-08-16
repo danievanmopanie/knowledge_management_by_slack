@@ -25,6 +25,7 @@ class BuilderTaskStore:
                     status TEXT NOT NULL,
                     branch_name TEXT,
                     pr_url TEXT,
+                    handoff_pr_number TEXT,
                     continuation_branch TEXT,
                     continuation_pr_url TEXT,
                     progress_message_ts TEXT,
@@ -43,6 +44,7 @@ class BuilderTaskStore:
             for name in (
                 "progress_message_ts",
                 "result_text",
+                "handoff_pr_number",
                 "continuation_branch",
                 "continuation_pr_url",
             ):
@@ -67,20 +69,20 @@ class BuilderTaskStore:
         requester_id: str | None,
         channel_id: str,
         thread_ts: str | None,
+        handoff_pr_number: str | None = None,
     ) -> str:
         """Queue a turn and inherit the latest published PR in the same thread.
 
-        A Slack thread is a Builder coding session. Follow-up turns can therefore
-        continue the branch/PR created earlier in that thread. The worker still
-        verifies that the PR is open before reusing it; otherwise it starts a
-        fresh branch from the configured base branch.
+        An explicit external PR handoff always wins over implicit thread
+        continuation. After the handoff succeeds, its PR URL/branch are stored
+        on the task and later replies naturally continue that same PR.
         """
         task_id = "bld_" + uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
         continuation_branch: str | None = None
         continuation_pr_url: str | None = None
         with connect(self.path) as conn:
-            if thread_ts:
+            if thread_ts and not handoff_pr_number:
                 previous = conn.execute(
                     """
                     SELECT branch_name, pr_url
@@ -101,15 +103,16 @@ class BuilderTaskStore:
             conn.execute(
                 """INSERT INTO builder_tasks
                 (task_id, goal, requester_id, channel_id, thread_ts, status,
-                 continuation_branch, continuation_pr_url,
+                 handoff_pr_number, continuation_branch, continuation_pr_url,
                  attempts, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 0, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, 0, ?, ?)""",
                 (
                     task_id,
                     goal,
                     requester_id,
                     channel_id,
                     thread_ts,
+                    handoff_pr_number,
                     continuation_branch,
                     continuation_pr_url,
                     now,
