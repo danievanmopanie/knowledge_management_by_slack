@@ -33,6 +33,9 @@ app = AsyncApp(
 register_interactivity(app)
 register_frontend_interactivity(app)
 
+BUILDER_STATUS_PREFIX = "[Builder status]"
+_BUILDER_CONTROL_RE = re.compile(r"^(status|cancel)\s+\S+\s*$", re.I)
+
 
 def _clean_mention_text(text: str) -> str:
     """Remove the bot mention from the message text."""
@@ -59,6 +62,65 @@ async def _resolve_message_text(event: dict) -> str:
     return transcript
 
 
+async def _builder_thread_prompt(event: dict, latest_text: str) -> str:
+    """Build compact conversational context for a Builder thread.
+
+    Slack remains the source of conversational memory. We include recent human
+    and assistant turns, but deliberately exclude Builder progress-card fallback
+    text so operational status noise does not become coding context.
+    """
+    root_ts = event.get("thread_ts")
+    if not root_ts:
+        return latest_text
+
+    try:
+        response = await app.client.conversations_replies(
+            channel=event.get("channel", ""),
+            ts=root_ts,
+            limit=30,
+            inclusive=True,
+        )
+    except Exception:
+        logger.exception("Could not load Builder thread context for %s", root_ts)
+        return latest_text
+
+    turns: list[str] = []
+    for message in response.get("messages", [])[-24:]:
+        body = _clean_mention_text((message.get("text") or "").strip())
+        if not body or body.startswith(BUILDER_STATUS_PREFIX):
+            continue
+        role = "User" if message.get("user") else "Builder"
+        turns.append(f"{role}: {body}")
+
+    history = "\n".join(turns)
+    if len(history) > 12000:
+        history = history[-12000:]
+    return (
+        "Slack Builder thread context (oldest to newest):\n"
+        f"{history}\n\n"
+        "Latest request:\n"
+        f"{latest_text}"
+    )
+
+
+async def _handle_builder_message(event: dict, say, context: RequestContext, text: str) -> bool:
+    """Treat ordinary #builder messages as natural coding-harness turns."""
+    if context.channel_id != settings.channel_builder_agent or not text or not event.get("user"):
+        return False
+
+    root_ts = event.get("thread_ts") or event.get("ts") or context.thread_ts
+    # Keep deterministic controls exact; all other turns receive recent thread
+    # context and are interpreted naturally by the coding harness.
+    prompt = text if _BUILDER_CONTROL_RE.match(text.strip()) else await _builder_thread_prompt(event, text)
+    try:
+        response = await route_message(prompt, context)
+    except Exception:
+        logger.exception("Builder conversation failed request_id=%s", context.request_id)
+        response = safe_error_message(context.request_id)
+    await say(text=response, thread_ts=root_ts)
+    return True
+
+
 @app.event("app_mention")
 async def handle_app_mention(event, say):
     """Route @mentions to the appropriate agent based on channel."""
@@ -72,6 +134,11 @@ async def handle_app_mention(event, say):
         context.user_id,
         text[:80],
     )
+
+    # Builder does not require mentions, but a mention inside #builder should
+    # behave exactly like an ordinary conversational turn.
+    if await _handle_builder_message(event, say, context, text):
+        return
 
     try:
         response = await route_message(text, context)
@@ -176,9 +243,6 @@ async def _handle_frontend_message(event: dict, say, context: RequestContext, te
         logger.exception("Frontend proactive response failed request_id=%s", context.request_id)
         return True
 
-    # Do not interrupt every troubleshooting contribution just to say that the
-    # knowledge base is empty. A direct question or a new support signal still
-    # gets the collaborative abstention message; routine updates remain quiet.
     if response == INSUFFICIENT_EVIDENCE_RESPONSE and decision.kind == MessageKind.TROUBLESHOOTING:
         return True
 
@@ -194,7 +258,7 @@ async def _handle_frontend_message(event: dict, say, context: RequestContext, te
 
 @app.event("message")
 async def handle_message(event, say):
-    """Observe support collaboration, private coaching, voice notes and knowledge uploads."""
+    """Observe support collaboration, Builder conversation, voice notes and uploads."""
     if event.get("subtype") in ("bot_message", "message_changed", "message_deleted"):
         return
 
@@ -205,7 +269,10 @@ async def handle_message(event, say):
     try:
         text = await _resolve_message_text(event)
     except VoiceTranscriptionError as exc:
-        if context.channel_id == settings.channel_frontend_support or event.get("channel_type") == "im":
+        if (
+            context.channel_id in {settings.channel_frontend_support, settings.channel_builder_agent}
+            or event.get("channel_type") == "im"
+        ):
             await say(text=f"I couldn't transcribe that voice note locally: {exc}")
             return
         text = event.get("text", "") or ""
@@ -214,6 +281,9 @@ async def handle_message(event, say):
         return
 
     if await _handle_frontend_message(event, say, context, text):
+        return
+
+    if await _handle_builder_message(event, say, context, text):
         return
 
     knowledge_channels = {
@@ -257,12 +327,13 @@ def start() -> None:
 
     logger.info("Starting Knowledge Management by Slack bot...")
     logger.info(
-        "Configured channels → frontend_support=%s, inventory=%s, work_management=%s, knowledge_uploads=%s, create_knowledge=%s",
+        "Configured channels → frontend_support=%s, inventory=%s, work_management=%s, knowledge_uploads=%s, create_knowledge=%s, builder=%s",
         settings.channel_frontend_support,
         settings.channel_inventory,
         settings.channel_work_management,
         settings.channel_knowledge_uploads,
         settings.channel_create_knowledge,
+        settings.channel_builder_agent,
     )
     asyncio.run(_start_async())
 
