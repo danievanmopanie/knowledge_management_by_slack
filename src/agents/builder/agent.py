@@ -21,11 +21,13 @@ Examples:
 • `Have a look at why the frontend tests are failing.`
 • `Add a health endpoint and cover it with tests.`
 • `What does the builder worker do today?`
-• `Change that so a red local build never opens a PR.`
+• `Take PR #83 and action it on the GX10. Make sure it actually works.`
+• `Run the app locally and check the endpoint.`
 
-I inspect the repo on the device. If your request only needs an explanation, I
-reply without creating a PR. If it changes code, I validate and repair locally
-before publishing the PR.
+I work on the GX10 itself. I can inspect the repo, execute real non-interactive
+terminal commands as the Builder service account, edit code, run tests and local
+runtime checks, and push repaired code back to the same PR when you hand one off.
+You do not need to copy/paste generated commands into the GX10 terminal.
 
 Deterministic escape hatches remain available:
 • `status <task-id>`
@@ -36,14 +38,27 @@ STATUS_RE = re.compile(r"^status\s+(?P<task_id>\S+)$", re.I)
 CANCEL_RE = re.compile(r"^cancel\s+(?P<task_id>\S+)$", re.I)
 # Backward compatibility only. Natural language is the primary interface.
 LEGACY_BUILD_RE = re.compile(r"^build:?\s+(?P<goal>.+)$", re.I | re.S)
+_PR_URL_RE = re.compile(r"github\.com/[^\s/]+/[^\s/]+/pull/(?P<number>\d+)", re.I)
+_PR_TEXT_RE = re.compile(r"\b(?:pull\s*request|PR)\s*#?\s*(?P<number>\d+)\b", re.I)
 
-HARNESS_INSTRUCTION = """You are the repository-aware Builder coding harness running on the user's device.
+HARNESS_INSTRUCTION = """You are the repository-aware Builder coding harness running on the user's GX10.
 Treat the latest Slack request as natural language; never require magic command words.
 Use the supplied conversation context when it exists.
-If the user is asking a question or requesting inspection/explanation only, inspect the repository and answer without editing files.
-If the user asks for a code/config/test/documentation change, implement it completely in the worktree.
-Do not invent repository facts that you can inspect directly.
+Use your real on-device terminal tools to inspect, execute and verify instead of asking the user to copy/paste commands.
+If the user is asking a question or requesting inspection/explanation only, inspect the repository/device and answer without editing files.
+If the user asks for a code/config/test/documentation change, implement it completely in the checked-out worktree.
+If an existing PR is handed off, validate and repair that existing PR branch and keep the Slack thread bound to it.
+Do not invent repository or runtime facts that you can inspect directly.
 """
+
+
+def extract_pr_number(text: str) -> str | None:
+    """Extract an explicit GitHub PR handoff reference from natural language."""
+    if match := _PR_URL_RE.search(text or ""):
+        return match.group("number")
+    if match := _PR_TEXT_RE.search(text or ""):
+        return match.group("number")
+    return None
 
 
 class BuilderAgent(BaseAgent):
@@ -51,7 +66,8 @@ class BuilderAgent(BaseAgent):
 
     The Slack event loop never runs the coding harness itself. Every substantive
     conversational turn is queued for the on-device worker so repo inspection,
-    code editing and validation remain isolated from Bolt event handling.
+    terminal execution, code editing and validation remain isolated from Bolt
+    event handling.
     """
 
     name = "builder"
@@ -80,17 +96,25 @@ class BuilderAgent(BaseAgent):
             if match := LEGACY_BUILD_RE.match(text):
                 text = match.group("goal").strip()
 
+            handoff_pr_number = extract_pr_number(text)
             goal = f"{HARNESS_INSTRUCTION}\n\n{text}".strip()
             task_id = self.tasks.enqueue(
                 goal=goal,
                 requester_id=context.user_id,
                 channel_id=context.channel_id,
                 thread_ts=context.thread_ts,
+                handoff_pr_number=handoff_pr_number,
             )
+            if handoff_pr_number:
+                return (
+                    f"Got it — I’m taking PR #{handoff_pr_number} onto the GX10 as `{task_id}`. "
+                    "I’ll check out that PR branch, execute it locally, repair anything I can prove is "
+                    "wrong, run the required gates, and push fixes back to the same PR."
+                )
             return (
                 f"Got it — I’ve started working on that as `{task_id}`. "
-                "I’ll inspect the repo on the device and reply in this thread. "
-                "If code changes are needed, I’ll validate them before I publish anything."
+                "I’ll inspect and execute on the GX10 itself. If code changes are needed, "
+                "I’ll validate them before I publish anything."
             )
         except Exception:
             logger.exception("Builder agent operation failed request_id=%s", context.request_id)
@@ -112,6 +136,8 @@ class BuilderAgent(BaseAgent):
             f"*Builder turn `{task_id}`*",
             f"• Status: *{task['status']}*",
         ]
+        if task.get("handoff_pr_number"):
+            lines.append(f"• Handoff PR: `#{task['handoff_pr_number']}`")
         if task.get("branch_name"):
             lines.append(f"• Branch: `{task['branch_name']}`")
         if task.get("pr_url"):
