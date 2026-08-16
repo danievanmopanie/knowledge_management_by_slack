@@ -186,7 +186,7 @@ def _render_exact_incident_brief(case, enriched, pattern: dict | None = None) ->
         else:
             lines.append(
                 f"Resolution pattern: *{resolution_pattern}*. This is currently supported by this incident alone, "
-                "so it is useful case evidence but not yet an organisation-wide proven fix."
+                "so treat it as case-specific evidence until additional trusted incidents support the same pattern."
             )
 
     return "\n".join(lines).strip()
