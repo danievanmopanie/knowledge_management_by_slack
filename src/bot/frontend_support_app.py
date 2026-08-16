@@ -158,13 +158,20 @@ def _answer_blocks(text: str, action_blocks: list[dict] | None) -> list[dict] | 
     return [*answer, *action_blocks]
 
 
-async def _notify_candidate(client, *, channel_id: str, user_id: str, text: str) -> None:
-    if not channel_id or not user_id:
+async def _notify_candidate_thread(
+    client,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    text: str,
+) -> None:
+    """Post visible handoff feedback into the originating support thread."""
+    if not channel_id or not thread_ts:
         return
     try:
-        await client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+        await client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=text)
     except Exception:
-        logger.exception("Could not send Knowledge Candidate confirmation")
+        logger.exception("Could not send Knowledge Candidate thread confirmation")
 
 
 async def _text(event: dict) -> str:
@@ -285,6 +292,15 @@ async def open_knowledge_candidate(ack, body, client):
             message_ts=str(payload.get("message_ts") or ""),
         ),
     )
+    await _notify_candidate_thread(
+        client,
+        channel_id=str(payload.get("channel_id") or ""),
+        thread_ts=str(payload.get("thread_ts") or ""),
+        text=(
+            f"I opened a pre-filled knowledge candidate draft for *{seed['incident_number']}*. "
+            "Review or add context in the modal, then submit it. Nothing is published or searchable yet."
+        ),
+    )
 
 
 @app.action(ids.FRONTEND_FLAG_KNOWLEDGE_GAP)
@@ -303,14 +319,16 @@ async def flag_knowledge_gap(ack, body, client):
         source_thread_ts=str(payload.get("thread_ts") or ""),
         source_message_ts=str(payload.get("message_ts") or ""),
     )
-    await _notify_candidate(
+    await _notify_candidate_thread(
         client,
         channel_id=str(payload.get("channel_id") or ""),
-        user_id=str((body.get("user") or {}).get("id") or ""),
+        thread_ts=str(payload.get("thread_ts") or ""),
         text=(
-            f"{candidate.candidate_id} was added to the #create-knowledge backlog."
+            f"✅ *{candidate.candidate_id}* was added to the `#create-knowledge` backlog for someone to claim, enrich and review. "
+            "It is not searchable knowledge yet."
             if created
-            else f"{candidate.candidate_id} is already the active knowledge candidate for {candidate.incident_number}."
+            else f"ℹ️ *{candidate.candidate_id}* is already the active knowledge candidate for *{candidate.incident_number}*. "
+            "The existing candidate will continue through the `#create-knowledge` workflow."
         ),
     )
 
@@ -333,14 +351,16 @@ async def submit_knowledge_candidate(ack, body, view, client):
         source_thread_ts=str(metadata.get("thread_ts") or ""),
         source_message_ts=str(metadata.get("message_ts") or ""),
     )
-    await _notify_candidate(
+    await _notify_candidate_thread(
         client,
         channel_id=str(metadata.get("channel_id") or ""),
-        user_id=str((body.get("user") or {}).get("id") or ""),
+        thread_ts=str(metadata.get("thread_ts") or ""),
         text=(
-            f"{candidate.candidate_id} was sent to #create-knowledge for enrichment and review."
+            f"✅ *{candidate.candidate_id}* was sent to `#create-knowledge` for enrichment and review. "
+            "Someone can now claim it, complete the missing operational detail and move it through review before publication."
             if created
-            else f"{candidate.candidate_id} is already the active candidate for {candidate.incident_number}."
+            else f"ℹ️ *{candidate.candidate_id}* is already the active candidate for *{candidate.incident_number}*. "
+            "Your handoff is already being tracked in `#create-knowledge`."
         ),
     )
 
