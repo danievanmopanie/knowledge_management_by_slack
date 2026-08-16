@@ -14,6 +14,8 @@ from src.agents.frontend_support.collaboration import MessageKind
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.blockkit.actions import attach_confirm_cancel
 from src.bot.frontend_actions import build_resolution_capture_blocks
+from src.bot.frontend_edit_interactivity import propose_knowledge_edit_prompt
+from src.bot.frontend_edit_interactivity import register as register_frontend_edit_interactivity
 from src.bot.frontend_interactivity import get_service as get_frontend_service
 from src.bot.frontend_interactivity import register as register_frontend_interactivity
 from src.bot.interactivity import register as register_interactivity
@@ -32,6 +34,7 @@ app = AsyncApp(
 
 register_interactivity(app)
 register_frontend_interactivity(app)
+register_frontend_edit_interactivity(app)
 
 BUILDER_STATUS_PREFIX = "[Builder status]"
 _BUILDER_CONTROL_RE = re.compile(r"^(status|cancel)\s+\S+\s*$", re.I)
@@ -227,6 +230,15 @@ async def _handle_frontend_message(event: dict, say, context: RequestContext, te
             text=prompt,
             thread_ts=root_ts,
             blocks=build_resolution_capture_blocks(context.channel_id, root_ts),
+        )
+        return True
+
+    if decision.prompt_for_knowledge_edit:
+        await propose_knowledge_edit_prompt(
+            client=app.client,
+            channel_id=context.channel_id,
+            thread_ts=root_ts,
+            edit_note=decision.edit_note,
         )
         return True
 
