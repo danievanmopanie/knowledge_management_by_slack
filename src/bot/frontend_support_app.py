@@ -50,7 +50,6 @@ STREAM_MIN_NEW_CHARS = 70
 
 
 def _normalise_message_event(event: dict) -> dict | None:
-    """Return the effective human message for normal and edited Slack events."""
     subtype = event.get("subtype")
     if subtype == "message_deleted" or subtype == "bot_message":
         return None
@@ -100,7 +99,11 @@ def _candidate_seed(incident_number: str) -> dict[str, str]:
             "resolution_pattern": "",
             "recorded_root_cause": "",
         }
-    root = str(getattr(enriched, "root_cause", "") or getattr(enriched, "root_cause_pattern", "") or "").strip()
+    root = str(
+        getattr(enriched, "root_cause", "")
+        or getattr(enriched, "root_cause_pattern", "")
+        or ""
+    ).strip()
     pattern = str(getattr(enriched, "pattern_label", "") or "").strip()
     symptom = str(getattr(enriched, "symptom", "") or "").strip()
     return {
@@ -114,7 +117,13 @@ def _candidate_seed(incident_number: str) -> dict[str, str]:
     }
 
 
-def _candidate_blocks(query: str, *, channel_id: str, thread_ts: str, message_ts: str = "") -> list[dict] | None:
+def _candidate_blocks(
+    query: str,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    message_ts: str = "",
+) -> list[dict] | None:
     numbers = extract_incident_numbers(query)
     if len(numbers) != 1 or not looks_like_exact_incident_lookup(query):
         return None
@@ -124,6 +133,29 @@ def _candidate_blocks(query: str, *, channel_id: str, thread_ts: str, message_ts
         thread_ts=thread_ts,
         message_ts=message_ts,
     )
+
+
+def _answer_blocks(text: str, action_blocks: list[dict] | None) -> list[dict] | None:
+    """Keep the final answer visible when adding Block Kit controls."""
+    if not action_blocks:
+        return None
+    chunks: list[str] = []
+    remaining = str(text or "").strip()
+    while remaining:
+        if len(remaining) <= 2800:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, 2800)
+        if cut < 1200:
+            cut = 2800
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    answer = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+        for chunk in chunks
+        if chunk
+    ]
+    return [*answer, *action_blocks]
 
 
 async def _notify_candidate(client, *, channel_id: str, user_id: str, text: str) -> None:
@@ -163,7 +195,6 @@ async def _route_with_timing(
 
 
 async def _start_progress(client, *, channel_id: str, thread_ts: str) -> str | None:
-    """Post an immediate acknowledgement so technicians know work has started."""
     try:
         result = await client.chat_postMessage(
             channel=channel_id,
@@ -184,22 +215,24 @@ async def _finish_progress(
     text: str,
     blocks: list[dict] | None = None,
 ) -> None:
-    """Replace the acknowledgement with clarification UI or the final answer."""
     if not message_ts:
         return
     try:
+        render_blocks = _answer_blocks(text, blocks) if blocks and any(
+            str(block.get("block_id") or "").startswith("frontend_knowledge_candidate_")
+            for block in blocks
+        ) else (blocks or [])
         await client.chat_update(
             channel=channel_id,
             ts=message_ts,
             text=text,
-            blocks=blocks or [],
+            blocks=render_blocks,
         )
     except Exception:
         logger.exception("Could not update Frontend Support progress message")
 
 
 def _stream_callback(client, *, channel_id: str, message_ts: str | None):
-    """Return a throttled callback that streams accumulated LLM text into one Slack message."""
     if not message_ts:
         return None
     last_update = 0.0
@@ -477,7 +510,11 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
             blocks=knowledge_blocks,
         )
     else:
-        await say(text=response, blocks=knowledge_blocks, thread_ts=root_ts)
+        await say(
+            text=response,
+            blocks=_answer_blocks(response, knowledge_blocks),
+            thread_ts=root_ts,
+        )
     if should_prompt_incident:
         await say(
             text="Link the ServiceNow incident so this support thread stays referenceable.",
@@ -507,7 +544,6 @@ async def handle_message(event, say, client):
 
 @app.event("app_mention")
 async def handle_mention(event, say, client):
-    """Resolve an explicit help request against its complete support thread."""
     context = _context(event)
     cleaned = clean_mention_text(event.get("text", ""))
     root_ts = event.get("thread_ts") or event.get("ts", "")
@@ -613,7 +649,11 @@ async def handle_mention(event, say, client):
             blocks=knowledge_blocks,
         )
     else:
-        await say(text=response, blocks=knowledge_blocks, thread_ts=root_ts or context.thread_ts)
+        await say(
+            text=response,
+            blocks=_answer_blocks(response, knowledge_blocks),
+            thread_ts=root_ts or context.thread_ts,
+        )
 
 
 async def _run_socket_mode() -> None:
