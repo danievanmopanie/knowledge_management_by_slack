@@ -10,6 +10,7 @@ into organisational truth here.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 from src.core.config import settings
@@ -17,6 +18,15 @@ from src.knowledge.organisational_knowledge import (
     EnrichedIncidentKnowledge,
     OrganisationalKnowledgeRetriever,
 )
+
+
+@dataclass(frozen=True)
+class TrustedPatternMatch:
+    pattern: dict[str, Any]
+    candidate_hits: tuple[tuple[EnrichedIncidentKnowledge, float], ...]
+    cohesion: float
+    mean_similarity: float
+    evidence_strength: str
 
 
 class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
@@ -34,7 +44,6 @@ class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
         avg_confidence: float,
         cohesion: float,
     ) -> str:
-        """Rate evidence using relevance, support, trust and neighbourhood cohesion."""
         if (
             incident_count >= 5
             and candidate_hits >= 3
@@ -55,7 +64,6 @@ class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
 
     @staticmethod
     def _family_for_incident(pattern: dict[str, Any], incident_number: str) -> str:
-        """Return the trusted normalised resolution family supporting one incident."""
         for row in pattern.get("resolution_counts") or []:
             if incident_number in (row.get("incidents") or []):
                 return str(row.get("label") or "").strip()
@@ -65,7 +73,6 @@ class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
         self,
         selected: list[tuple[EnrichedIncidentKnowledge, float]],
     ) -> tuple[str, list[tuple[EnrichedIncidentKnowledge, float]], float]:
-        """Pick one canonical pattern from a tight high-similarity neighbourhood."""
         if not selected:
             return "", [], 0.0
 
@@ -83,35 +90,28 @@ class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
         for item, score in vote_pool:
             if not item.pattern_key:
                 continue
-            # Similarity drives pattern selection. A small hit bonus makes a
-            # repeated coherent pattern beat a one-off neighbour at similar score.
             weighted[item.pattern_key] += score
             hits[item.pattern_key] += 1
 
         if not weighted:
             return "", [], 0.0
 
-        winner = max(
-            weighted,
-            key=lambda key: (weighted[key], hits[key], key),
-        )
+        winner = max(weighted, key=lambda key: (weighted[key], hits[key], key))
         winner_hits = [pair for pair in vote_pool if pair[0].pattern_key == winner]
         cohesion = len(winner_hits) / len(vote_pool)
         return winner, winner_hits, cohesion
 
-    def collective_context(
+    def resolve_pattern(
         self,
         query: str,
         *,
         candidate_k: int = 40,
         max_incidents: int = 24,
         min_similarity: float | None = None,
-        max_chars: int = 9000,
-    ) -> str:
-        """Resolve a symptom query to one trusted materialised organisational pattern."""
+    ) -> TrustedPatternMatch | None:
         query = " ".join(str(query or "").split())
         if not query:
-            return ""
+            return None
 
         threshold = (
             float(settings.knowledge_min_similarity)
@@ -125,7 +125,7 @@ class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
                 where={"knowledge_kind": "symptom"},
             )
         except Exception:
-            return ""
+            return None
 
         best_scores: dict[str, float] = {}
         for doc in docs:
@@ -142,90 +142,199 @@ class TrustedPatternKnowledgeRetriever(OrganisationalKnowledgeRetriever):
             item = self.store.get(number)
             if item is None:
                 continue
-            # The trusted vector index should already enforce this, but re-check
-            # parent confidence at the serving boundary as defence in depth.
             if item.confidence < float(settings.knowledge_min_extraction_confidence):
                 continue
             selected.append((item, score))
         if not selected:
-            return ""
+            return None
 
         pattern_key, candidate_hits, cohesion = self._select_dominant_pattern(selected)
         if not pattern_key or not candidate_hits:
-            return ""
+            return None
 
         pattern = self.store.get_pattern(pattern_key)
         if pattern is None:
-            return ""
+            return None
 
-        incident_count = int(pattern.get("incident_count") or 0)
-        avg_confidence = float(pattern.get("avg_confidence") or 0.0)
         mean_similarity = sum(score for _, score in candidate_hits) / len(candidate_hits)
         quality = self._pattern_evidence_strength(
-            incident_count=incident_count,
+            incident_count=int(pattern.get("incident_count") or 0),
             candidate_hits=len(candidate_hits),
             mean_similarity=mean_similarity,
-            avg_confidence=avg_confidence,
+            avg_confidence=float(pattern.get("avg_confidence") or 0.0),
             cohesion=cohesion,
         )
-        supporting = list(pattern.get("incident_numbers") or [])
+        return TrustedPatternMatch(
+            pattern=pattern,
+            candidate_hits=tuple(candidate_hits),
+            cohesion=cohesion,
+            mean_similarity=mean_similarity,
+            evidence_strength=quality,
+        )
 
+    def _render_context(self, match: TrustedPatternMatch, *, max_chars: int = 9000) -> str:
+        pattern = match.pattern
+        supporting = list(pattern.get("incident_numbers") or [])
         lines = [
             "### Organisational pattern evidence",
             "Semantic retrieval selected the canonical pattern; counts below come only from the trusted materialised pattern store.",
-            "When describing frequency to a technician, preserve these small-sample counts as 'x of y incidents'; do not convert them into percentages or probabilities.",
-            f"Canonical issue pattern: {pattern.get('label') or pattern_key}",
-            f"Trusted supporting incidents: {incident_count}",
+            "Preserve small-sample frequencies as x of y incidents; do not convert them into percentages or probabilities.",
+            f"Canonical issue pattern: {pattern.get('label') or pattern.get('pattern_key')}",
+            f"Trusted supporting incidents: {int(pattern.get('incident_count') or 0)}",
             f"Incidents with reusable resolution knowledge: {int(pattern.get('resolved_count') or 0)}",
-            f"High-relevance candidate hits for this pattern: {len(candidate_hits)}",
-            f"Mean similarity of those hits: {mean_similarity:.2f}",
-            f"Pattern cohesion in the high-relevance neighbourhood: {cohesion:.2f}",
-            f"Mean trusted extraction confidence: {avg_confidence:.2f}",
-            f"Evidence strength: {quality}",
+            f"High-relevance candidate hits for this pattern: {len(match.candidate_hits)}",
+            f"Mean similarity of those hits: {match.mean_similarity:.2f}",
+            f"Pattern cohesion in the high-relevance neighbourhood: {match.cohesion:.2f}",
+            f"Mean trusted extraction confidence: {float(pattern.get('avg_confidence') or 0.0):.2f}",
+            f"Evidence strength: {match.evidence_strength}",
         ]
         if supporting:
             lines.append("Supporting incidents: " + ", ".join(supporting[:20]))
 
-        lines.extend(
-            self._render_counter(
-                "Trusted resolution families:",
-                pattern.get("resolution_counts") or [],
-            )
-        )
-        lines.extend(
-            self._render_counter(
-                "Trusted successful actions:",
-                pattern.get("successful_action_counts") or [],
-            )
-        )
-        lines.extend(
-            self._render_counter(
-                "Trusted failed actions / no-fix paths:",
-                pattern.get("failed_action_counts") or [],
-            )
-        )
-        lines.extend(
-            self._render_counter(
-                "Observed trusted root causes:",
-                pattern.get("root_cause_counts") or [],
-            )
-        )
+        lines.extend(self._render_counter("Trusted resolution families:", pattern.get("resolution_counts") or []))
+        lines.extend(self._render_counter("Trusted successful actions:", pattern.get("successful_action_counts") or []))
+        lines.extend(self._render_counter("Trusted failed actions / no-fix paths:", pattern.get("failed_action_counts") or []))
+        lines.extend(self._render_counter("Observed trusted root causes:", pattern.get("root_cause_counts") or []))
         if not (pattern.get("root_cause_counts") or []):
             lines.append("Observed trusted root causes: none repeated in the current evidence.")
         if not (pattern.get("failed_action_counts") or []):
             lines.append("Trusted failed actions / no-fix paths: none repeated in the current evidence.")
 
         lines.extend(["", "#### Closest trusted cases in the selected pattern"])
-        for item, score in candidate_hits[:5]:
+        for item, score in match.candidate_hits[:5]:
             family = self._family_for_incident(pattern, item.incident_number)
-            resolution_text = family or "[no reusable resolution recorded]"
             lines.append(
                 f"- {item.incident_number} (similarity {score:.2f}) — "
                 f"symptom: {item.symptom or item.pattern_label or '[not captured]'}; "
-                f"trusted resolution family: {resolution_text}"
+                f"trusted resolution family: {family or '[no reusable resolution recorded]'}"
             )
 
         text = "\n".join(lines).strip()
-        if len(text) <= max_chars:
-            return text
-        return text[:max_chars].rstrip() + "\n[Organisational pattern context truncated]"
+        return text if len(text) <= max_chars else text[:max_chars].rstrip() + "\n[Organisational pattern context truncated]"
+
+    @staticmethod
+    def _incident_refs(row: dict[str, Any]) -> str:
+        incidents = [str(value) for value in (row.get("incidents") or []) if str(value).strip()]
+        return ", ".join(incidents)
+
+    def _render_deterministic_response(self, match: TrustedPatternMatch) -> str:
+        pattern = match.pattern
+        label = str(pattern.get("label") or pattern.get("pattern_key") or "the selected issue pattern")
+        incident_count = int(pattern.get("incident_count") or 0)
+        resolutions = list(pattern.get("resolution_counts") or [])
+        failed = list(pattern.get("failed_action_counts") or [])
+        roots = list(pattern.get("root_cause_counts") or [])
+
+        lines = [
+            f"We have *{incident_count} trusted incidents* matching *{label}*.",
+            "",
+            "*What has worked before*",
+        ]
+        if resolutions:
+            for row in resolutions[:4]:
+                refs = self._incident_refs(row)
+                suffix = f" — {refs}" if refs else ""
+                lines.append(
+                    f"• *{row.get('label')}* — {int(row.get('count') or 0)} of {incident_count} trusted incidents{suffix}"
+                )
+        else:
+            lines.append("• No reusable resolution has been established for this pattern yet.")
+
+        if resolutions:
+            top = resolutions[0]
+            second_count = int(resolutions[1].get("count") or 0) if len(resolutions) > 1 else -1
+            top_count = int(top.get("count") or 0)
+            lines.extend(["", "*Best-supported next step*"])
+            if top_count > second_count:
+                lines.append(
+                    f"First verify whether the current incident is consistent with the leading recorded path: "
+                    f"*{top.get('label')}*. It appears in {top_count} of {incident_count} trusted incidents. "
+                    "Do not assume it applies until the current incident evidence supports that path."
+                )
+            else:
+                lines.append(
+                    "There is no single leading resolution path in the current trusted evidence. "
+                    "Use the recorded paths above as evidence-backed branches rather than assuming one applies."
+                )
+
+        lines.extend(["", "*Root-cause evidence*"])
+        if roots:
+            repeated = [row for row in roots if int(row.get("count") or 0) > 1]
+            if repeated:
+                for row in repeated[:4]:
+                    refs = self._incident_refs(row)
+                    suffix = f" — {refs}" if refs else ""
+                    lines.append(f"• {row.get('label')} — {int(row.get('count') or 0)} incidents{suffix}")
+            else:
+                labels = "; ".join(str(row.get("label")) for row in roots[:4] if row.get("label"))
+                lines.append(
+                    "Individual cases record different root causes"
+                    + (f" ({labels})" if labels else "")
+                    + ", so the current evidence does not support one universal root cause."
+                )
+        else:
+            lines.append("No repeated root cause has been established in the trusted evidence.")
+
+        lines.extend(["", "*Failed paths*"])
+        if failed:
+            for row in failed[:4]:
+                refs = self._incident_refs(row)
+                suffix = f" — {refs}" if refs else ""
+                lines.append(f"• {row.get('label')} — {int(row.get('count') or 0)} incident(s){suffix}")
+        else:
+            lines.append("No repeated failed troubleshooting path has been established for this pattern.")
+
+        return "\n".join(lines).strip()
+
+    def collective_bundle(
+        self,
+        query: str,
+        *,
+        candidate_k: int = 40,
+        max_incidents: int = 24,
+        min_similarity: float | None = None,
+        max_chars: int = 9000,
+    ) -> tuple[str, str]:
+        match = self.resolve_pattern(
+            query,
+            candidate_k=candidate_k,
+            max_incidents=max_incidents,
+            min_similarity=min_similarity,
+        )
+        if match is None:
+            return "", ""
+        return self._render_context(match, max_chars=max_chars), self._render_deterministic_response(match)
+
+    def collective_context(
+        self,
+        query: str,
+        *,
+        candidate_k: int = 40,
+        max_incidents: int = 24,
+        min_similarity: float | None = None,
+        max_chars: int = 9000,
+    ) -> str:
+        context, _response = self.collective_bundle(
+            query,
+            candidate_k=candidate_k,
+            max_incidents=max_incidents,
+            min_similarity=min_similarity,
+            max_chars=max_chars,
+        )
+        return context
+
+    def deterministic_response(
+        self,
+        query: str,
+        *,
+        candidate_k: int = 40,
+        max_incidents: int = 24,
+        min_similarity: float | None = None,
+    ) -> str:
+        _context, response = self.collective_bundle(
+            query,
+            candidate_k=candidate_k,
+            max_incidents=max_incidents,
+            min_similarity=min_similarity,
+        )
+        return response
