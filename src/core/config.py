@@ -105,7 +105,9 @@ class Settings(BaseSettings):
 
     # Local code validation gate. {python} resolves to the worker's interpreter.
     # A PR is never pushed when this command fails when require_tests_pass=True.
-    builder_test_command: str = "{python} -m pytest -q"
+    builder_test_command: str = (
+        "{python} -m ruff check src tests scripts && {python} -m pytest -q"
+    )
     builder_test_timeout_seconds: int = 1200
     builder_max_repair_attempts: int = 2
     builder_require_tests_pass: bool = True
