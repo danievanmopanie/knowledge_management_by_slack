@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -20,12 +21,17 @@ from src.agents.frontend_support.conversation import (
 )
 from src.agents.frontend_support.trigger_feedback import append_trigger_feedback
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
+from src.bot.blockkit import ids
 from src.bot.frontend_actions import build_incident_number_blocks, build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service, register as register_frontend_interactivity
+from src.bot.knowledge_candidate_blocks import frontend_candidate_actions, frontend_candidate_modal
 from src.bot.router import route_frontend_support
 from src.core.config import settings
 from src.core.context import RequestContext
 from src.core.errors import safe_error_message
+from src.knowledge.incident_casefile import extract_incident_numbers, looks_like_exact_incident_lookup
+from src.knowledge.knowledge_candidates import KnowledgeCandidateStore
+from src.knowledge.organisational_knowledge import OrganisationalKnowledgeStore
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,8 @@ APP_TOKEN = os.getenv("FRONTEND_SUPPORT_SLACK_APP_TOKEN", "").strip()
 app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 register_frontend_interactivity(app)
 clarifications = ClarificationEngine()
+candidate_store = KnowledgeCandidateStore()
+enriched_store = OrganisationalKnowledgeStore()
 
 BUSY_TEXT = "Working on this — checking the thread and relevant support history…"
 STREAM_UPDATE_INTERVAL_SECONDS = 0.9
@@ -64,6 +72,67 @@ def _context(event: dict) -> RequestContext:
         files=event.get("files", []),
         roles=("general_support_fallback",),
     )
+
+
+def _action_payload(body: dict) -> dict:
+    try:
+        return json.loads(str(((body.get("actions") or [{}])[0]).get("value") or "{}"))
+    except (TypeError, ValueError):
+        return {}
+
+
+def _view_value(view: dict, block_id: str) -> str:
+    state = ((view.get("state") or {}).get("values") or {}).get(block_id) or {}
+    item = state.get("value") or next(iter(state.values()), {})
+    return str(item.get("value") or "").strip()
+
+
+def _candidate_seed(incident_number: str) -> dict[str, str]:
+    number = str(incident_number or "").strip().upper()
+    enriched = enriched_store.get(number)
+    if enriched is None:
+        return {
+            "incident_number": number,
+            "title": f"Knowledge for {number}",
+            "issue_pattern": "",
+            "symptom": "",
+            "recorded_resolution": "",
+            "resolution_pattern": "",
+            "recorded_root_cause": "",
+        }
+    root = str(getattr(enriched, "root_cause", "") or getattr(enriched, "root_cause_pattern", "") or "").strip()
+    pattern = str(getattr(enriched, "pattern_label", "") or "").strip()
+    symptom = str(getattr(enriched, "symptom", "") or "").strip()
+    return {
+        "incident_number": number,
+        "title": pattern or symptom or f"Knowledge for {number}",
+        "issue_pattern": pattern,
+        "symptom": symptom,
+        "recorded_resolution": str(getattr(enriched, "resolution", "") or "").strip(),
+        "resolution_pattern": str(getattr(enriched, "resolution_pattern", "") or "").strip(),
+        "recorded_root_cause": root,
+    }
+
+
+def _candidate_blocks(query: str, *, channel_id: str, thread_ts: str, message_ts: str = "") -> list[dict] | None:
+    numbers = extract_incident_numbers(query)
+    if len(numbers) != 1 or not looks_like_exact_incident_lookup(query):
+        return None
+    return frontend_candidate_actions(
+        incident_number=numbers[0],
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        message_ts=message_ts,
+    )
+
+
+async def _notify_candidate(client, *, channel_id: str, user_id: str, text: str) -> None:
+    if not channel_id or not user_id:
+        return
+    try:
+        await client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+    except Exception:
+        logger.exception("Could not send Knowledge Candidate confirmation")
 
 
 async def _text(event: dict) -> str:
@@ -167,6 +236,80 @@ def _stream_callback(client, *, channel_id: str, message_ts: str | None):
                 logger.exception("Could not stream Frontend Support partial response")
 
     return update
+
+
+@app.action(ids.FRONTEND_CREATE_KNOWLEDGE_CANDIDATE)
+async def open_knowledge_candidate(ack, body, client):
+    await ack()
+    payload = _action_payload(body)
+    seed = _candidate_seed(payload.get("incident_number", ""))
+    await client.views_open(
+        trigger_id=body.get("trigger_id"),
+        view=frontend_candidate_modal(
+            **seed,
+            channel_id=str(payload.get("channel_id") or ""),
+            thread_ts=str(payload.get("thread_ts") or ""),
+            message_ts=str(payload.get("message_ts") or ""),
+        ),
+    )
+
+
+@app.action(ids.FRONTEND_FLAG_KNOWLEDGE_GAP)
+async def flag_knowledge_gap(ack, body, client):
+    await ack()
+    payload = _action_payload(body)
+    seed = _candidate_seed(payload.get("incident_number", ""))
+    candidate, created = candidate_store.create(
+        **seed,
+        knowledge_gap=(
+            "Incident evidence is useful but incomplete as reusable knowledge. Confirm when the fix applies, "
+            "document the exact procedure, validation, prerequisites/risks, and root cause only if supported."
+        ),
+        requested_by=str((body.get("user") or {}).get("id") or ""),
+        source_channel_id=str(payload.get("channel_id") or ""),
+        source_thread_ts=str(payload.get("thread_ts") or ""),
+        source_message_ts=str(payload.get("message_ts") or ""),
+    )
+    await _notify_candidate(
+        client,
+        channel_id=str(payload.get("channel_id") or ""),
+        user_id=str((body.get("user") or {}).get("id") or ""),
+        text=(
+            f"{candidate.candidate_id} was added to the #create-knowledge backlog."
+            if created
+            else f"{candidate.candidate_id} is already the active knowledge candidate for {candidate.incident_number}."
+        ),
+    )
+
+
+@app.view(ids.MODAL_FRONTEND_KNOWLEDGE_CANDIDATE)
+async def submit_knowledge_candidate(ack, body, view, client):
+    await ack()
+    try:
+        metadata = json.loads(view.get("private_metadata") or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    seed = _candidate_seed(metadata.get("incident_number", ""))
+    candidate, created = candidate_store.create(
+        **seed,
+        title=_view_value(view, "title") or seed["title"],
+        knowledge_gap=_view_value(view, "knowledge_gap"),
+        notes=_view_value(view, "notes"),
+        requested_by=str((body.get("user") or {}).get("id") or ""),
+        source_channel_id=str(metadata.get("channel_id") or ""),
+        source_thread_ts=str(metadata.get("thread_ts") or ""),
+        source_message_ts=str(metadata.get("message_ts") or ""),
+    )
+    await _notify_candidate(
+        client,
+        channel_id=str(metadata.get("channel_id") or ""),
+        user_id=str((body.get("user") or {}).get("id") or ""),
+        text=(
+            f"{candidate.candidate_id} was sent to #create-knowledge for enrichment and review."
+            if created
+            else f"{candidate.candidate_id} is already the active candidate for {candidate.incident_number}."
+        ),
+    )
 
 
 async def _private(event: dict, say, context: RequestContext, text: str) -> bool:
@@ -319,15 +462,22 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
     should_prompt_incident = bool(
         decision.prompt_for_incident and response != INSUFFICIENT_EVIDENCE_RESPONSE
     )
+    knowledge_blocks = _candidate_blocks(
+        query,
+        channel_id=context.channel_id,
+        thread_ts=root_ts,
+        message_ts=progress_ts or "",
+    )
     if progress_ts:
         await _finish_progress(
             client,
             channel_id=context.channel_id,
             message_ts=progress_ts,
             text=response,
+            blocks=knowledge_blocks,
         )
     else:
-        await say(text=response, thread_ts=root_ts)
+        await say(text=response, blocks=knowledge_blocks, thread_ts=root_ts)
     if should_prompt_incident:
         await say(
             text="Link the ServiceNow incident so this support thread stays referenceable.",
@@ -448,15 +598,22 @@ async def handle_mention(event, say, client):
     except Exception:
         logger.exception("Frontend Support mention failed")
         response = safe_error_message(context.request_id)
+    knowledge_blocks = _candidate_blocks(
+        query,
+        channel_id=context.channel_id,
+        thread_ts=root_ts or context.thread_ts or "",
+        message_ts=progress_ts or "",
+    )
     if progress_ts:
         await _finish_progress(
             client,
             channel_id=context.channel_id,
             message_ts=progress_ts,
             text=response,
+            blocks=knowledge_blocks,
         )
     else:
-        await say(text=response, thread_ts=root_ts or context.thread_ts)
+        await say(text=response, blocks=knowledge_blocks, thread_ts=root_ts or context.thread_ts)
 
 
 async def _run_socket_mode() -> None:
