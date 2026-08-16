@@ -1,4 +1,4 @@
-"""Builder Agent – queues Aider-driven coding tasks from Slack for a background worker."""
+"""Builder Agent – natural Slack interface for the on-device coding harness."""
 
 from __future__ import annotations
 
@@ -15,26 +15,43 @@ logger = logging.getLogger(__name__)
 
 HELP = """*Builder Agent*
 
-Post a coding task and the device worker will implement it, run the local test
-suite, repair failures, and only then push a branch and open a pull request.
+Talk to me naturally, like a coding assistant. No `build:` prefix is required.
 
-• `build: <describe the change you want>`
+Examples:
+• `Have a look at why the frontend tests are failing.`
+• `Add a health endpoint and cover it with tests.`
+• `What does the builder worker do today?`
+• `Change that so a red local build never opens a PR.`
+
+I inspect the repo on the device. If your request only needs an explanation, I
+reply without creating a PR. If it changes code, I validate and repair locally
+before publishing the PR.
+
+Deterministic escape hatches remain available:
 • `status <task-id>`
 • `cancel <task-id>` (only while still queued)
 """
 
-BUILD_RE = re.compile(r"^build:?\s+(?P<goal>.+)$", re.I | re.S)
 STATUS_RE = re.compile(r"^status\s+(?P<task_id>\S+)$", re.I)
 CANCEL_RE = re.compile(r"^cancel\s+(?P<task_id>\S+)$", re.I)
+# Backward compatibility only. Natural language is the primary interface.
+LEGACY_BUILD_RE = re.compile(r"^build:?\s+(?P<goal>.+)$", re.I | re.S)
+
+HARNESS_INSTRUCTION = """You are the repository-aware Builder coding harness running on the user's device.
+Treat the latest Slack request as natural language; never require magic command words.
+Use the supplied conversation context when it exists.
+If the user is asking a question or requesting inspection/explanation only, inspect the repository and answer without editing files.
+If the user asks for a code/config/test/documentation change, implement it completely in the worktree.
+Do not invent repository facts that you can inspect directly.
+"""
 
 
 class BuilderAgent(BaseAgent):
-    """Slack-facing coordinator for the Builder Agent task queue.
+    """Slack-facing coordinator for natural Builder conversations.
 
-    Only ever enqueues tasks into BuilderTaskStore and returns immediately —
-    never runs Aider itself, so the Bolt event loop is never blocked. A
-    separate long-running worker process (src/worker/builder_worker.py)
-    executes queued tasks.
+    The Slack event loop never runs the coding harness itself. Every substantive
+    conversational turn is queued for the on-device worker so repo inspection,
+    code editing and validation remain isolated from Bolt event handling.
     """
 
     name = "builder"
@@ -54,27 +71,27 @@ class BuilderAgent(BaseAgent):
             )
 
         try:
-            if match := BUILD_RE.match(text):
-                goal = match.group("goal").strip()
-                if not goal:
-                    return "Please describe the change after `build:`."
-                task_id = self.tasks.enqueue(
-                    goal=goal,
-                    requester_id=context.user_id,
-                    channel_id=context.channel_id,
-                    thread_ts=context.thread_ts,
-                )
-                return (
-                    f"Queued build task `{task_id}`.\n"
-                    "The device worker will implement it, validate it locally, and repair "
-                    "test failures before it is allowed to publish a PR. "
-                    f"Check progress with `status {task_id}`."
-                )
             if match := STATUS_RE.match(text):
                 return self._status(match.group("task_id"))
             if match := CANCEL_RE.match(text):
                 return self._cancel(match.group("task_id"))
-            return HELP
+
+            # Preserve old muscle memory without making it the contract.
+            if match := LEGACY_BUILD_RE.match(text):
+                text = match.group("goal").strip()
+
+            goal = f"{HARNESS_INSTRUCTION}\n\n{text}".strip()
+            task_id = self.tasks.enqueue(
+                goal=goal,
+                requester_id=context.user_id,
+                channel_id=context.channel_id,
+                thread_ts=context.thread_ts,
+            )
+            return (
+                f"Got it — I’ve started working on that as `{task_id}`. "
+                "I’ll inspect the repo on the device and reply in this thread. "
+                "If code changes are needed, I’ll validate them before I publish anything."
+            )
         except Exception:
             logger.exception("Builder agent operation failed request_id=%s", context.request_id)
             return safe_error_message(context.request_id)
@@ -90,11 +107,10 @@ class BuilderAgent(BaseAgent):
     def _status(self, task_id: str) -> str:
         task = self.tasks.get(task_id)
         if task is None:
-            return f"No build task found with id `{task_id}`."
+            return f"No Builder turn found with id `{task_id}`."
         lines = [
-            f"*Build task `{task_id}`*",
+            f"*Builder turn `{task_id}`*",
             f"• Status: *{task['status']}*",
-            f"• Goal: {task['goal']}",
         ]
         if task.get("branch_name"):
             lines.append(f"• Branch: `{task['branch_name']}`")
@@ -107,11 +123,11 @@ class BuilderAgent(BaseAgent):
     def _cancel(self, task_id: str) -> str:
         task = self.tasks.get(task_id)
         if task is None:
-            return f"No build task found with id `{task_id}`."
+            return f"No Builder turn found with id `{task_id}`."
         if task["status"] != "pending":
             return (
-                f"Build task `{task_id}` is already *{task['status']}* "
+                f"Builder turn `{task_id}` is already *{task['status']}* "
                 "and can no longer be cancelled."
             )
         self.tasks.mark_cancelled(task_id)
-        return f"Cancelled build task `{task_id}`."
+        return f"Cancelled Builder turn `{task_id}`."
