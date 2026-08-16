@@ -29,12 +29,17 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler 
 
 from src.agents.knowledge_ingest import KnowledgeIngestAgent  # noqa: E402
 from src.bot.blockkit import ids  # noqa: E402
+from src.bot.create_knowledge_candidates import (  # noqa: E402
+    candidate_outbox_loop,
+    register_candidate_workflow,
+)
 from src.bot.create_knowledge_progress import build_blocks, queued_blocks  # noqa: E402
 from src.bot.create_knowledge_staged import staged_incident_blocks, staged_upload_blocks  # noqa: E402
 from src.core.config import settings  # noqa: E402
 from src.core.context import RequestContext  # noqa: E402
 from src.core.errors import safe_error_message  # noqa: E402
 from src.knowledge.incident_ingest_jobs import IncidentIngestJobStore  # noqa: E402
+from src.knowledge.knowledge_candidates import KnowledgeCandidateStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,8 @@ APP_TOKEN = os.getenv("CREATE_KNOWLEDGE_SLACK_APP_TOKEN", "").strip()
 app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 agent = KnowledgeIngestAgent()
 job_store = IncidentIngestJobStore()
+candidate_store = KnowledgeCandidateStore()
+register_candidate_workflow(app, candidate_store)
 _JOB_ID_RE = re.compile(r"\bING-[A-Z0-9]+\b", re.I)
 
 
@@ -222,7 +229,16 @@ async def handle_mention(event, say):
 
 
 async def _run() -> None:
-    await AsyncSocketModeHandler(app, APP_TOKEN).start_async()
+    handler = AsyncSocketModeHandler(app, APP_TOKEN)
+    outbox_task = asyncio.create_task(candidate_outbox_loop(app.client, candidate_store))
+    try:
+        await handler.start_async()
+    finally:
+        outbox_task.cancel()
+        try:
+            await outbox_task
+        except asyncio.CancelledError:
+            pass
 
 
 def start() -> None:
