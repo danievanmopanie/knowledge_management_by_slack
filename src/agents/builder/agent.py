@@ -98,7 +98,7 @@ class BuilderAgent(BaseAgent):
 
             handoff_pr_number = extract_pr_number(text)
             goal = f"{HARNESS_INSTRUCTION}\n\n{text}".strip()
-            self.tasks.enqueue(
+            task_id = self.tasks.enqueue(
                 goal=goal,
                 requester_id=context.user_id,
                 channel_id=context.channel_id,
@@ -107,12 +107,12 @@ class BuilderAgent(BaseAgent):
             )
             if handoff_pr_number:
                 return (
-                    f"On it — I’m taking PR #{handoff_pr_number} onto the GX10 now. "
+                    f"On it — I’m taking PR #{handoff_pr_number} onto the GX10 now (`{task_id}`). "
                     "I’ll inspect the actual PR branch, run the required checks, repair only what I can prove is wrong, "
                     "and keep this thread updated while I work."
                 )
             return (
-                "On it — I’m working on that on the GX10 now. "
+                f"On it — I’m working on that on the GX10 now (`{task_id}`). "
                 "I’ll keep this thread updated while I inspect, execute and validate the result."
             )
         except Exception:
