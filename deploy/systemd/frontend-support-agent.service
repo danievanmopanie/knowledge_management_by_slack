@@ -1,0 +1,16 @@
+[Unit]
+Description=Standalone Frontend Support Slack Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=danieungerer
+WorkingDirectory=/home/danieungerer/knowledge_management_by_slack_frontend_runtime
+EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env
+ExecStart=/usr/bin/env VECTORSTORE_PATH=/home/danieungerer/knowledge_management_by_slack/data/vectorstore RAW_DOCS_PATH=/home/danieungerer/knowledge_management_by_slack/data/raw STAGING_PATH=/home/danieungerer/knowledge_management_by_slack/data/staging BACKUP_ROOT=/home/danieungerer/knowledge_management_by_slack/data/backups INCIDENTS_PATH=/home/danieungerer/knowledge_management_by_slack/data/incidents PLATFORM_DB_PATH=/home/danieungerer/knowledge_management_by_slack/data/platform.db /home/danieungerer/knowledge_management_by_slack_frontend_runtime/.venv/bin/python -m src.bot.frontend_support_app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
