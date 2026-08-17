@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from src.agents.builder import BuilderAgent
 from src.agents.frontend_support import FrontendSupportAgent
@@ -48,14 +49,19 @@ def _channel_to_agent(channel_id: str | None):
     return mapping.get(channel_id)
 
 
-async def route_frontend_support(message: str, context: RequestContext) -> str:
+async def route_frontend_support(
+    message: str,
+    context: RequestContext,
+    *,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
+) -> str:
     """Route directly to Frontend Support, including private Slack DM coaching."""
     logger.info(
         "Routing request_id=%s directly to frontend support for channel %s",
         context.request_id,
         context.channel_id,
     )
-    return await _frontend_support.handle(message, context)
+    return await _frontend_support.handle(message, context, on_chunk=on_chunk)
 
 
 async def route_message(message: str, context: RequestContext) -> str:
