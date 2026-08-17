@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from slack_sdk import WebClient
@@ -11,6 +12,52 @@ from slack_sdk.errors import SlackApiError
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
+_MARKDOWN_HEADING_RE = re.compile(r"(?m)^#{1,6}\s+(.+?)\s*$")
+_ESCAPED_MRKDWN_RE = re.compile(r"\\([*_#|`])")
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _convert_markdown_tables(text: str) -> str:
+    """Convert simple Markdown tables into compact Slack-native bullet lists."""
+    lines = text.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        if (
+            index + 1 < len(lines)
+            and "|" in lines[index]
+            and _TABLE_SEPARATOR_RE.match(lines[index + 1])
+        ):
+            headers = _table_cells(lines[index])
+            index += 2
+            rows: list[str] = []
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                values = _table_cells(lines[index])
+                parts = [
+                    f"*{header}:* {value}"
+                    for header, value in zip(headers, values)
+                    if header and value
+                ]
+                if parts:
+                    rows.append("• " + " · ".join(parts))
+                index += 1
+            output.extend(rows)
+            continue
+        output.append(lines[index])
+        index += 1
+    return "\n".join(output)
+
+
+def normalize_slack_mrkdwn(text: str) -> str:
+    """Make model-authored Markdown readable in Slack mrkdwn."""
+    cleaned = _ESCAPED_MRKDWN_RE.sub(r"\1", text or "")
+    cleaned = _MARKDOWN_HEADING_RE.sub(r"*\1*", cleaned)
+    cleaned = _convert_markdown_tables(cleaned)
+    return cleaned
 
 
 def publish_report_to_channel(
@@ -35,6 +82,7 @@ def publish_report_to_channel(
         )
 
     client = WebClient(token=settings.slack_bot_token)
+    text = normalize_slack_mrkdwn(text)
     if len(text) > 35000:
         text = text[:34900] + "\n\n_…report truncated_"
 
