@@ -1,9 +1,10 @@
 """Model-driven terminal/tool loop for the on-device Builder harness.
 
 The Builder model does not merely emit shell snippets for a human to copy. When
-this harness is enabled, the model can call a real shell tool on the GX10 and a
-code-editing tool backed by Aider. Tool outputs are returned to the model so it
-can inspect, edit, execute, diagnose and repeat within one Slack turn.
+this harness is enabled, the model can call a real shell tool on the GX10, a
+code-editing tool backed by Aider, and narrow read-only GitHub PR tools. Tool
+outputs are returned to the model so it can inspect, edit, execute, diagnose and
+repeat within one Slack turn.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from typing import Any
 import httpx
 
 from src.core.config import settings
+from src.integrations.github_client import GitHubClientError, get_pull_request, list_pull_requests
 from src.worker.aider_runner import run_aider
 
 logger = logging.getLogger(__name__)
@@ -82,9 +84,55 @@ _EDIT_CODE_TOOL: dict[str, Any] = {
     },
 }
 
-# These are defence-in-depth guards, not the primary security boundary. The
-# primary boundary is the dedicated unprivileged service account and filesystem
-# permissions. Commands are also executed with a scrubbed environment.
+_GET_PULL_REQUEST_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_pull_request",
+        "description": (
+            "Load authoritative metadata for one open pull request in the configured GitHub repository. "
+            "Use this whenever the user names a PR number before reasoning about branches or git history."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pr_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "GitHub pull request number in this repository.",
+                }
+            },
+            "required": ["pr_number"],
+        },
+    },
+}
+
+_LIST_PULL_REQUESTS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_pull_requests",
+        "description": (
+            "List authoritative pull requests in the configured GitHub repository. "
+            "Use this for requests such as 'check my PRs' or 'which PRs are open'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "description": "Pull request state filter; defaults to open.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum number of PRs to return; defaults to 20.",
+                },
+            },
+        },
+    },
+}
+
 _BLOCKED_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(^|[;&|]\s*)\s*(sudo|doas|pkexec)\b", re.I), "privilege escalation is disabled"),
     (re.compile(r"(^|[;&|]\s*)\s*su\s+", re.I), "switching users is disabled"),
@@ -105,12 +153,15 @@ _DOCKER_RUN_RE = re.compile(r"(^|[;&|]\s*)\s*docker\s+(run|create)\b", re.I)
 def _system_prompt(worktree_path: Path) -> str:
     return f"""You are the resident Builder engineering harness running locally on the user's GX10.
 
-You have REAL tools. Do not tell the user to copy/paste commands into a terminal. When evidence can be gathered on this device, use run_shell yourself. When repository files need to change, use edit_code, then inspect and execute the result yourself.
+You have REAL tools. Do not tell the user to copy/paste commands into a terminal. When evidence can be gathered on this device, use run_shell yourself. When repository files need to change, use edit_code, then inspect and execute the result yourself. When the request refers to GitHub pull requests, use the GitHub PR tools instead of inferring PR identity from local branch names.
 
 Current repository worktree: {worktree_path}
 
 Operating rules:
 - Treat the user's Slack request as the engineering goal, not as a shell command.
+- If the user names PR #N, call get_pull_request for N before using git history or guessing which branch it means.
+- If the user asks about their PRs generally, call list_pull_requests before answering.
+- GitHub PR tools are read-only and execute in the trusted worker process. Never try to obtain GitHub credentials through run_shell.
 - Inspect before guessing. Use run_shell for git diff/status/log, tests, Python, curl, local service checks, Docker compose/ps/logs/inspect/exec, and other non-interactive engineering commands.
 - Use edit_code for substantive file edits instead of fragile sed/cat rewrites.
 - After an edit, run relevant focused checks yourself. The worker will still run a deterministic final validation gate before publishing.
@@ -159,14 +210,11 @@ def _validate_shell_command(command: str) -> str | None:
 
 
 def run_shell(command: str, *, worktree_path: Path, timeout_seconds: int | None = None) -> str:
-    """Execute a real shell command on the GX10 and return bounded stdout/stderr."""
     if not settings.builder_terminal_enabled:
         return "BLOCKED: Builder terminal execution is disabled by configuration."
-
     blocked = _validate_shell_command(command)
     if blocked:
         return f"BLOCKED: {blocked}."
-
     timeout = timeout_seconds or settings.builder_terminal_command_timeout_seconds
     timeout = max(1, min(int(timeout), settings.builder_terminal_max_command_timeout_seconds))
     logger.info("Builder shell: %s (cwd=%s)", command, worktree_path)
@@ -185,7 +233,6 @@ def run_shell(command: str, *, worktree_path: Path, timeout_seconds: int | None 
         return _bounded(f"TIMEOUT after {timeout}s\n{captured}")
     except OSError as exc:
         return f"EXECUTION ERROR: {exc}"
-
     output = (
         f"exit_code={result.returncode}\n"
         f"stdout:\n{result.stdout or '(empty)'}\n"
@@ -212,6 +259,23 @@ def _edit_code(instruction: str, *, worktree_path: Path) -> str:
     return _bounded(combined)
 
 
+def _github_tool_result(name: str, arguments: dict[str, Any]) -> str:
+    try:
+        if name == "get_pull_request":
+            return json.dumps(get_pull_request(arguments.get("pr_number") or ""), sort_keys=True)
+        if name == "list_pull_requests":
+            return json.dumps(
+                list_pull_requests(
+                    state=str(arguments.get("state") or "open"),
+                    limit=int(arguments.get("limit") or 20),
+                ),
+                sort_keys=True,
+            )
+    except (GitHubClientError, TypeError, ValueError) as exc:
+        return f"GITHUB TOOL ERROR: {exc}"
+    return f"UNKNOWN TOOL: {name}"
+
+
 def _tool_result(tool_call: dict[str, Any], *, worktree_path: Path) -> str:
     function = tool_call.get("function") or {}
     name = function.get("name") or ""
@@ -219,7 +283,6 @@ def _tool_result(tool_call: dict[str, Any], *, worktree_path: Path) -> str:
         arguments = json.loads(function.get("arguments") or "{}")
     except json.JSONDecodeError as exc:
         return f"TOOL ARGUMENT ERROR: {exc}"
-
     if name == "run_shell":
         return run_shell(
             str(arguments.get("command") or ""),
@@ -231,11 +294,12 @@ def _tool_result(tool_call: dict[str, Any], *, worktree_path: Path) -> str:
         if not instruction:
             return "TOOL ARGUMENT ERROR: edit_code requires a non-empty instruction."
         return _edit_code(instruction, worktree_path=worktree_path)
+    if name in {"get_pull_request", "list_pull_requests"}:
+        return _github_tool_result(name, arguments)
     return f"UNKNOWN TOOL: {name}"
 
 
 def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessResult:
-    """Run a bounded multi-turn tool loop against the Builder-only Atlas model."""
     if not settings.builder_terminal_enabled:
         return TerminalHarnessResult(
             success=False,
@@ -243,14 +307,12 @@ def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessRe
             tool_calls=0,
             error="Builder terminal harness is disabled.",
         )
-
     endpoint = settings.builder_llm_base_url.rstrip("/") + "/chat/completions"
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _system_prompt(worktree_path)},
         {"role": "user", "content": goal},
     ]
     tool_calls = 0
-
     try:
         with httpx.Client(timeout=settings.builder_task_timeout_seconds) as client:
             for _step in range(settings.builder_terminal_max_steps):
@@ -263,7 +325,12 @@ def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessRe
                     json={
                         "model": settings.builder_llm_model,
                         "messages": messages,
-                        "tools": [_RUN_SHELL_TOOL, _EDIT_CODE_TOOL],
+                        "tools": [
+                            _RUN_SHELL_TOOL,
+                            _EDIT_CODE_TOOL,
+                            _GET_PULL_REQUEST_TOOL,
+                            _LIST_PULL_REQUESTS_TOOL,
+                        ],
                         "tool_choice": "auto",
                         "temperature": settings.builder_terminal_temperature,
                         "max_tokens": settings.builder_terminal_max_tokens,
@@ -282,7 +349,6 @@ def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessRe
                     return TerminalHarnessResult(False, "", tool_calls, "Atlas returned no choices.")
                 message = choices[0].get("message") or {}
                 calls = message.get("tool_calls") or []
-
                 if not calls:
                     answer = str(message.get("content") or "").strip()
                     return TerminalHarnessResult(
@@ -290,9 +356,6 @@ def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessRe
                         answer=answer or "Completed the on-device engineering turn.",
                         tool_calls=tool_calls,
                     )
-
-                # Preserve the assistant tool-call message exactly enough for
-                # OpenAI-compatible continuation semantics.
                 messages.append(
                     {
                         "role": "assistant",
@@ -312,12 +375,9 @@ def run_terminal_harness(*, goal: str, worktree_path: Path) -> TerminalHarnessRe
                     )
     except httpx.HTTPError as exc:
         return TerminalHarnessResult(False, "", tool_calls, f"Atlas tool-loop request failed: {exc}")
-
     return TerminalHarnessResult(
         success=False,
         answer="",
         tool_calls=tool_calls,
-        error=(
-            "Builder reached the configured terminal tool-step limit before producing a final answer."
-        ),
+        error="Builder reached the configured terminal tool-step limit before producing a final answer.",
     )

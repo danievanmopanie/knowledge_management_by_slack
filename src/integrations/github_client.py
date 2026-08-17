@@ -64,13 +64,60 @@ def create_pull_request(
     return {"html_url": data["html_url"], "number": str(data["number"])}
 
 
+def _normalize_pull_request(data: dict[str, Any]) -> dict[str, Any]:
+    head = data.get("head") or {}
+    base = data.get("base") or {}
+    return {
+        "number": str(data.get("number") or ""),
+        "html_url": data.get("html_url") or "",
+        "title": data.get("title") or "",
+        "body": data.get("body") or "",
+        "state": data.get("state") or "",
+        "draft": bool(data.get("draft")),
+        "merged": bool(data.get("merged")),
+        "mergeable": data.get("mergeable"),
+        "head_ref": head.get("ref") or "",
+        "head_sha": head.get("sha") or "",
+        "base_ref": base.get("ref") or "",
+        "base_sha": base.get("sha") or "",
+        "head_repo_full_name": (head.get("repo") or {}).get("full_name") or "",
+    }
+
+
+def list_pull_requests(
+    *,
+    state: str = "open",
+    limit: int = 20,
+    owner: str | None = None,
+    repo: str | None = None,
+) -> list[dict[str, Any]]:
+    """List pull requests in the configured repository for Builder inspection.
+
+    This runs in the trusted worker process, not the scrubbed child shell, so
+    GitHub credentials remain unavailable to model-generated shell commands.
+    """
+    if state not in {"open", "closed", "all"}:
+        raise GitHubClientError(f"Invalid pull request state: {state!r}")
+    owner, repo = _owner_repo(owner, repo)
+    bounded_limit = max(1, min(int(limit), 50))
+    url = f"{settings.github_api_base_url}/repos/{owner}/{repo}/pulls"
+    params = {"state": state, "per_page": bounded_limit, "sort": "updated", "direction": "desc"}
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(url, headers=_headers(), params=params)
+    if response.status_code >= 400:
+        raise GitHubClientError(
+            f"GitHub API error listing PRs: {response.status_code} {response.text[:500]}"
+        )
+    return [_normalize_pull_request(item) for item in response.json()[:bounded_limit]]
+
+
 def get_pull_request(
     pr_number: str | int,
     *,
     owner: str | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve an existing PR in the configured repository for GX10 handoff.
+    """Resolve an existing open PR in the configured repository for GX10 handoff.
 
     Builder mutates the existing PR head branch, so fork-based PRs are rejected
     for now rather than accidentally pushing a similarly named branch into the
@@ -99,20 +146,12 @@ def get_pull_request(
         )
     if data.get("state") != "open" or bool(data.get("merged")):
         raise GitHubClientError(f"PR #{number} is not open and cannot be actioned in place.")
-    head_ref = str(head.get("ref") or "").strip()
-    if not head_ref:
+    normalized = _normalize_pull_request(data)
+    if not normalized["head_ref"]:
         raise GitHubClientError(f"PR #{number} has no usable head branch.")
-    return {
-        "number": number,
-        "html_url": data.get("html_url") or "",
-        "title": data.get("title") or "",
-        "body": data.get("body") or "",
-        "state": data.get("state") or "",
-        "head_ref": head_ref,
-        "head_sha": head.get("sha") or "",
-        "base_ref": (data.get("base") or {}).get("ref") or "",
-        "head_repo_full_name": head_repo.get("full_name") or f"{owner}/{repo}",
-    }
+    if not normalized["head_repo_full_name"]:
+        normalized["head_repo_full_name"] = f"{owner}/{repo}"
+    return normalized
 
 
 def pull_request_is_open(
