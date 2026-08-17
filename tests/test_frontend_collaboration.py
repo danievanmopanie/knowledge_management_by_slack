@@ -307,3 +307,69 @@ def test_knowledge_gap_task_is_deduplicated_per_support_thread(tmp_path):
     assert "cleared the WAM token cache" in first["resolution"]
     assert "Working now" in first["resolution"]
     assert set(first["contributors"]) == {"U-REQUESTER", "U-JACOB"}
+
+
+def test_classify_detects_knowledge_edit_requests():
+    assert (
+        FrontendCollaborationService.classify("That KB article is outdated")
+        == MessageKind.KNOWLEDGE_EDIT_REQUEST
+    )
+    assert (
+        FrontendCollaborationService.classify(
+            "Update the knowledge article to mention the new driver"
+        )
+        == MessageKind.KNOWLEDGE_EDIT_REQUEST
+    )
+    assert (
+        FrontendCollaborationService.classify("Flag that article for review")
+        == MessageKind.KNOWLEDGE_EDIT_REQUEST
+    )
+    assert (
+        FrontendCollaborationService.classify("The article needs updating")
+        == MessageKind.KNOWLEDGE_EDIT_REQUEST
+    )
+
+
+def test_observe_flags_a_knowledge_edit_request(tmp_path):
+    service = _service(tmp_path)
+    service.observe(
+        channel_id="C-FRONT",
+        message_ts="500.1",
+        thread_ts=None,
+        user_id="U-REQUESTER",
+        text="Outlook keeps failing to sync mail on the laptop.",
+    )
+
+    decision = service.observe(
+        channel_id="C-FRONT",
+        message_ts="500.2",
+        thread_ts="500.1",
+        user_id="U-REQUESTER",
+        text="That KB article is outdated, it should also mention the profile rebuild step.",
+    )
+
+    assert decision.kind == MessageKind.KNOWLEDGE_EDIT_REQUEST
+    assert decision.prompt_for_knowledge_edit is True
+    assert "profile rebuild" in decision.edit_note
+
+
+def test_suppressed_thread_does_not_prompt_for_knowledge_edit(tmp_path):
+    service = _service(tmp_path)
+    service.observe(
+        channel_id="C-FRONT",
+        message_ts="500.1",
+        thread_ts=None,
+        user_id="U-REQUESTER",
+        text="Outlook keeps failing to sync mail on the laptop.",
+    )
+    service.store.set_suppressed("C-FRONT", "500.1", True)
+
+    decision = service.observe(
+        channel_id="C-FRONT",
+        message_ts="500.2",
+        thread_ts="500.1",
+        user_id="U-REQUESTER",
+        text="That KB article is outdated.",
+    )
+
+    assert decision.prompt_for_knowledge_edit is False

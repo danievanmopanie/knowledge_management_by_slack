@@ -67,6 +67,23 @@ class StagingStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def list_staged(self, *, uploader_id: str | None, channel_id: str) -> list[dict[str, Any]]:
+        """Return still-pending uploads for one uploader in one channel, oldest first.
+
+        Used by bulk "confirm all" so onboarding many existing knowledge articles at
+        once doesn't require confirming each staged file individually.
+        """
+        with connect(self.path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM staged_uploads
+                WHERE status='staged' AND channel_id=? AND uploader_id IS ?
+                ORDER BY created_at
+                """,
+                (channel_id, uploader_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def set_status(self, stage_id: str, status: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with connect(self.path) as conn:

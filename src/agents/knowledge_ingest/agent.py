@@ -41,6 +41,8 @@ class KnowledgeIngestAgent(BaseAgent):
         text = (message or "").strip()
         lower = text.lower()
 
+        if lower == "confirm all":
+            return self._confirm_all(context)
         if lower.startswith("confirm "):
             return self._confirm(text.split(maxsplit=1)[1].strip(), context)
         if lower.startswith("cancel "):
@@ -48,8 +50,11 @@ class KnowledgeIngestAgent(BaseAgent):
 
         if not context.files:
             return (
-                "Upload a supported file to stage it. Nothing becomes searchable until you confirm it.\n"
-                "After staging, use `confirm <stage-id>` or `cancel <stage-id>`."
+                "Upload one or more supported files to stage them. Nothing becomes searchable until "
+                "you confirm it.\n"
+                "After staging, use `confirm <stage-id>` / `cancel <stage-id>`, or `confirm all` to "
+                "commit every file you just staged in this channel — handy when onboarding a batch of "
+                "existing knowledge articles at once."
             )
 
         lines = ["*Upload staged — not yet searchable*"]
@@ -89,6 +94,15 @@ class KnowledgeIngestAgent(BaseAgent):
                     target_id=str(file_info.get("id") or name),
                 )
                 lines.append(f"• *{name}*: staging failed (reference `{context.request_id}`)")
+        return "\n".join(lines)
+
+    def _confirm_all(self, context: RequestContext) -> str:
+        staged = self.staging.list_staged(uploader_id=context.user_id, channel_id=context.channel_id)
+        if not staged:
+            return "You have no staged uploads waiting for confirmation in this channel."
+        lines = [f"*Confirming {len(staged)} staged upload(s)*"]
+        for item in staged:
+            lines.append(f"• *{item['file_name']}*: {self._confirm(item['stage_id'], context)}")
         return "\n".join(lines)
 
     def _confirm(self, stage_id: str, context: RequestContext) -> str:

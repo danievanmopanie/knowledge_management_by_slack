@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.agents.base import BaseAgent
 from src.core.context import RequestContext
 from src.core.errors import safe_error_message
+from src.knowledge.citation_memory import CitationMemory
 from src.knowledge.citations import evidence_labels, render_evidence_section, sanitize_citations
 from src.knowledge.retrieval_models import RetrievalQuery
 from src.knowledge.support_evidence import SupportEvidenceService
@@ -61,6 +62,7 @@ class FrontendSupportAgent(BaseAgent):
         self.retriever = self.evidence.retriever
         self.incident_rag = self.evidence.incident_rag
         self.llm = get_llm()
+        self.citations = CitationMemory()
 
     async def _private_general_guidance(
         self, message: str, context: RequestContext
@@ -115,6 +117,21 @@ class FrontendSupportAgent(BaseAgent):
             if _is_private_coaching(message, context):
                 return await self._private_general_guidance(message, context)
             return INSUFFICIENT_EVIDENCE_RESPONSE
+
+        # Remember which governed article this thread was just shown, so a later
+        # "that article is outdated" naturally resolves to it instead of requiring
+        # the technician to repeat the title.
+        citations = getattr(self, "citations", None)
+        if citations and context.thread_ts and package.governed_should_answer and package.governed_candidates:
+            top = package.governed_candidates[0]
+            document_id = str(top.metadata.get("document_id") or "")
+            if document_id:
+                citations.record(
+                    channel_id=context.channel_id,
+                    thread_ts=context.thread_ts,
+                    document_id=document_id,
+                    title=str(top.metadata.get("source") or document_id),
+                )
 
         prompt_context = package.to_prompt_context()
         messages = [

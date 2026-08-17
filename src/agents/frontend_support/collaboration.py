@@ -42,6 +42,23 @@ RESUME_PATTERNS = (
     re.compile(r"\b(?:bot|assistant|ai)[, ]+(?:help|jump\s+back\s+in)\b", re.I),
     re.compile(r"\bneed\s+the\s+(?:bot|assistant|ai)\s+again\b", re.I),
 )
+KNOWLEDGE_EDIT_PATTERNS = (
+    re.compile(
+        r"\b(?:that|this|the)\s+(?:kb|knowledge)\s*(?:base\s+)?(?:article|page|doc(?:ument)?)?"
+        r"\s+(?:is\s+)?(?:wrong|outdated|out\s+of\s+date|incorrect|stale)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:update|edit|fix|revise|correct)\s+the\s+(?:kb|knowledge)\s*(?:base\s+)?"
+        r"(?:article|page|doc(?:ument)?)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\bflag\s+(?:that|this|the)\s+(?:kb|knowledge|article)\S*\s+for\s+(?:review|an?\s+update)\b",
+        re.I,
+    ),
+    re.compile(r"\barticle\s+needs?\s+(?:an?\s+)?updat\w*\b", re.I),
+)
 TECHNICAL_HINTS = (
     "error",
     "issue",
@@ -107,6 +124,7 @@ class MessageKind(StrEnum):
     TROUBLESHOOTING = "troubleshooting"
     INCIDENT_REFERENCE = "incident_reference"
     POSSIBLE_RESOLUTION = "possible_resolution"
+    KNOWLEDGE_EDIT_REQUEST = "knowledge_edit_request"
     ASSISTANT_SUPPRESS = "assistant_suppress"
     ASSISTANT_RESUME = "assistant_resume"
     OTHER = "other"
@@ -118,6 +136,8 @@ class CollaborationDecision:
     invoke_agent: bool = False
     prompt_for_incident: bool = False
     prompt_for_capture: bool = False
+    prompt_for_knowledge_edit: bool = False
+    edit_note: str = ""
     incident_number: str | None = None
     agent_query: str = ""
     assistant_suppressed: bool = False
@@ -509,6 +529,8 @@ class FrontendCollaborationService:
             return MessageKind.ASSISTANT_SUPPRESS
         if any(pattern.search(clean) for pattern in RESOLUTION_PATTERNS):
             return MessageKind.POSSIBLE_RESOLUTION
+        if any(pattern.search(clean) for pattern in KNOWLEDGE_EDIT_PATTERNS):
+            return MessageKind.KNOWLEDGE_EDIT_REQUEST
         if INCIDENT_RE.search(clean) and len(clean.split()) <= 8:
             return MessageKind.INCIDENT_REFERENCE
         if any(hint in lowered for hint in TROUBLESHOOTING_HINTS):
@@ -588,6 +610,15 @@ class FrontendCollaborationService:
             return CollaborationDecision(
                 kind=kind,
                 prompt_for_capture=True,
+                incident_number=state.incident_number,
+                assistant_suppressed=state.assistant_suppressed,
+            )
+
+        if kind == MessageKind.KNOWLEDGE_EDIT_REQUEST and not state.assistant_suppressed:
+            return CollaborationDecision(
+                kind=kind,
+                prompt_for_knowledge_edit=True,
+                edit_note=text,
                 incident_number=state.incident_number,
                 assistant_suppressed=state.assistant_suppressed,
             )
