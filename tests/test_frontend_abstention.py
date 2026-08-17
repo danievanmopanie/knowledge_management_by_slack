@@ -22,7 +22,7 @@ class EmptyRetriever:
 
 
 class EmptyIncidentRAG:
-    def build_context(self, message, k=5):
+    def build_context(self, message, k=5, **kwargs):
         return ""
 
 

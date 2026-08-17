@@ -1,0 +1,11 @@
+[Unit]
+Description=Review Frontend Support missed trigger feedback every two days
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=2d
+Persistent=true
+Unit=frontend-trigger-review.service
+
+[Install]
+WantedBy=timers.target
