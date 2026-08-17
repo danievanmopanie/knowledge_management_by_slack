@@ -1,4 +1,5 @@
 from src.bot.blockkit.builder import builder_status_blocks
+from src.bot.builder_app import format_builder_reply
 from src.reporting import publisher
 from src.reporting.publisher import normalize_slack_mrkdwn
 
@@ -16,6 +17,10 @@ def test_read_only_answer_card_hides_internal_branch_and_turn():
     assert "bld_123" not in rendered
     assert "Builder runs on-device" not in rendered
     assert "Done" in rendered
+    assert blocks[0] == {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*💬 Done*"},
+    }
 
 
 def test_slack_mrkdwn_unescapes_model_output_and_converts_heading():
@@ -35,6 +40,12 @@ def test_slack_mrkdwn_unescapes_list_markers():
 
     assert "\\-" not in cleaned
     assert cleaned == "- first item\n- second item"
+
+
+def test_builder_ingress_normalizes_markdown_before_say():
+    cleaned = format_builder_reply(r"**Summary:**\n\- **2 open PRs**")
+
+    assert cleaned == "*Summary:*\n- *2 open PRs*"
 
 
 def test_slack_mrkdwn_converts_markdown_table_to_bullets():
