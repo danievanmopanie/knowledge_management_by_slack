@@ -1,5 +1,7 @@
 """Tests for the Builder's real GX10 terminal/tool harness."""
 
+import shlex
+import sys
 from pathlib import Path
 
 from src.core.config import settings
@@ -28,8 +30,9 @@ def test_run_shell_scrubs_github_token_from_child_environment(monkeypatch, tmp_p
     _terminal_settings(monkeypatch)
     monkeypatch.setenv("GITHUB_TOKEN", "do-not-leak")
 
+    python = shlex.quote(sys.executable)
     output = run_shell(
-        "python -c \"import os; print(os.getenv('GITHUB_TOKEN'))\"",
+        f"{python} -c \"import os; print(os.getenv('GITHUB_TOKEN'))\"",
         worktree_path=tmp_path,
     )
 
