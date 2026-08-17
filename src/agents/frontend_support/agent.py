@@ -61,7 +61,9 @@ def _is_private_coaching(message: str, context: RequestContext) -> bool:
 
 def _allows_general_guidance(message: str, context: RequestContext) -> bool:
     """Allow LLM fallback only in an explicitly opted-in support lane."""
-    return _is_private_coaching(message, context) or "frontend_general_guidance" in context.roles
+    return _is_private_coaching(message, context) or bool(
+        {"general_support_fallback", "frontend_general_guidance"}.intersection(context.roles)
+    )
 
 
 class FrontendSupportAgent(BaseAgent):
