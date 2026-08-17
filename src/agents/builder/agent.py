@@ -52,6 +52,7 @@ Use your real on-device terminal tools to inspect, execute and verify instead of
 If the user is asking a question or requesting inspection/explanation only, inspect the repository/device and answer without editing files.
 If the user asks for a code/config/test/documentation change, implement it completely in the checked-out worktree.
 If an existing PR is handed off, validate and repair that existing PR branch and keep the Slack thread bound to it.
+When list_pull_requests returns list_result_count, report that exact number. Never infer, estimate or recount the total yourself.
 Do not invent repository or runtime facts that you can inspect directly.
 """
 
