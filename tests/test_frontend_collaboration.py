@@ -80,6 +80,52 @@ def test_only_requester_supplied_incident_number_binds_to_thread(tmp_path):
     assert service.store.get_thread("C-FRONT", "100.1").incident_number == "INC0012345"
 
 
+def test_off_topic_reply_invokes_agent_when_a_clarifying_question_is_pending(tmp_path):
+    service = _service(tmp_path)
+    service.observe(
+        channel_id="C-FRONT",
+        message_ts="100.1",
+        thread_ts=None,
+        user_id="U-REQUESTER",
+        text="A laptop is not working properly today.",
+    )
+    service.store.set_awaiting_clarification("C-FRONT", "100.1", True)
+
+    decision = service.observe(
+        channel_id="C-FRONT",
+        message_ts="100.2",
+        thread_ts="100.1",
+        user_id="U-REQUESTER",
+        text="A Dell Latitude 5420",
+    )
+
+    assert decision.invoke_agent is True
+    assert service.store.get_thread("C-FRONT", "100.1").awaiting_clarification is False
+
+
+def test_awaiting_clarification_does_not_override_suppression(tmp_path):
+    service = _service(tmp_path)
+    service.observe(
+        channel_id="C-FRONT",
+        message_ts="100.1",
+        thread_ts=None,
+        user_id="U-REQUESTER",
+        text="A laptop is not working properly today.",
+    )
+    service.store.set_suppressed("C-FRONT", "100.1", True)
+    service.store.set_awaiting_clarification("C-FRONT", "100.1", True)
+
+    decision = service.observe(
+        channel_id="C-FRONT",
+        message_ts="100.2",
+        thread_ts="100.1",
+        user_id="U-REQUESTER",
+        text="A Dell Latitude 5420",
+    )
+
+    assert decision.invoke_agent is False
+
+
 def test_resolution_detects_resolver_and_allows_requester_or_resolver_to_confirm(tmp_path):
     service = _service(tmp_path)
     service.observe(

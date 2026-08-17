@@ -9,7 +9,11 @@ import re
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from src.agents.frontend_support.agent import INSUFFICIENT_EVIDENCE_RESPONSE
+from src.agents.frontend_support.agent import (
+    INSUFFICIENT_EVIDENCE_RESPONSE,
+    is_clarifying_question,
+    strip_clarification_marker,
+)
 from src.agents.frontend_support.collaboration import MessageKind
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.blockkit.actions import attach_confirm_cancel
@@ -246,6 +250,13 @@ async def _handle_frontend_message(event: dict, say, context: RequestContext, te
 
     if response == INSUFFICIENT_EVIDENCE_RESPONSE and decision.kind == MessageKind.TROUBLESHOOTING:
         return True
+
+    # Remember whether this reply is a clarifying question so a follow-up in the
+    # thread routes back to the assistant even if it doesn't read as "technical".
+    service.store.set_awaiting_clarification(
+        context.channel_id, root_ts, is_clarifying_question(response)
+    )
+    response = strip_clarification_marker(response)
 
     if decision.prompt_for_incident and response != INSUFFICIENT_EVIDENCE_RESPONSE:
         response = (
