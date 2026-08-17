@@ -35,9 +35,19 @@ app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 register_frontend_interactivity(app)
 clarifications = ClarificationEngine()
 
-BUSY_TEXT = "Working on this — checking the thread and relevant support history…"
+BUSY_TEXT = "⏳ Working on this — checking the thread and relevant support history…"
+WAITING_TEXT = "⏸️ *Waiting for your reply.*"
+DONE_TEXT = "✅ *Done — you can continue from here.*"
 STREAM_UPDATE_INTERVAL_SECONDS = 0.9
 STREAM_MIN_NEW_CHARS = 70
+
+
+def _with_status(text: str, status: str) -> str:
+    """Append a clear terminal/waiting state without duplicating an existing marker."""
+    body = text.rstrip()
+    if body.endswith(status):
+        return body
+    return f"{body}\n\n{status}" if body else status
 
 
 def _normalise_message_event(event: dict) -> dict | None:
@@ -93,14 +103,18 @@ async def _route_with_timing(
         )
 
 
-async def _start_progress(client, *, channel_id: str, thread_ts: str) -> str | None:
+async def _start_progress(
+    client,
+    *,
+    channel_id: str,
+    thread_ts: str | None = None,
+) -> str | None:
     """Post an immediate acknowledgement so technicians know work has started."""
     try:
-        result = await client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=BUSY_TEXT,
-        )
+        payload = {"channel": channel_id, "text": BUSY_TEXT}
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+        result = await client.chat_postMessage(**payload)
         return result.get("ts")
     except Exception:
         logger.exception("Could not post Frontend Support progress indicator")
@@ -169,7 +183,7 @@ def _stream_callback(client, *, channel_id: str, message_ts: str | None):
     return update
 
 
-async def _private(event: dict, say, context: RequestContext, text: str) -> bool:
+async def _private(event: dict, say, client, context: RequestContext, text: str) -> bool:
     """Handle one-to-one technician coaching without exposing the conversation publicly."""
     if event.get("channel_type") != "im" or not text or not event.get("user"):
         return False
@@ -185,12 +199,32 @@ async def _private(event: dict, say, context: RequestContext, text: str) -> bool
         thread_ts=context.thread_ts,
         roles=("private_coach", "general_support_fallback"),
     )
+    progress_ts = await _start_progress(client, channel_id=context.channel_id)
+    stream = _stream_callback(
+        client,
+        channel_id=context.channel_id,
+        message_ts=progress_ts,
+    )
     try:
-        response = await _route_with_timing(query, private_context, lane="private")
+        response = await _route_with_timing(
+            query,
+            private_context,
+            lane="private",
+            on_chunk=stream,
+        )
     except Exception:
         logger.exception("Private Frontend Support request failed")
         response = safe_error_message(context.request_id)
-    await say(text=response)
+    final_text = _with_status(response, DONE_TEXT)
+    if progress_ts:
+        await _finish_progress(
+            client,
+            channel_id=context.channel_id,
+            message_ts=progress_ts,
+            text=final_text,
+        )
+    else:
+        await say(text=final_text)
     return True
 
 
@@ -275,9 +309,10 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
     question = clarifications.next_question(context.channel_id, root_ts, query)
     if question is not None:
         round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
-        clarification_text = (
+        clarification_text = _with_status(
             "I need one detail before I search the incident history "
-            f"(clarification {round_number}/3): {question.question}"
+            f"(clarification {round_number}/3): {question.question}",
+            WAITING_TEXT,
         )
         if progress_ts:
             await _finish_progress(
@@ -328,15 +363,16 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
             "so the learning stays referenceable._"
         )
 
+    final_text = _with_status(response, DONE_TEXT)
     if progress_ts:
         await _finish_progress(
             client,
             channel_id=context.channel_id,
             message_ts=progress_ts,
-            text=response,
+            text=final_text,
         )
     else:
-        await say(text=response, thread_ts=root_ts)
+        await say(text=final_text, thread_ts=root_ts)
     return True
 
 
@@ -354,7 +390,7 @@ async def handle_message(event, say, client):
     except VoiceTranscriptionError as exc:
         await say(text=f"I couldn't transcribe that voice note locally: {exc}")
         return
-    if await _private(effective_event, say, context, text):
+    if await _private(effective_event, say, client, context, text):
         return
     await _public(effective_event, say, client, context, text)
 
@@ -395,9 +431,10 @@ async def handle_mention(event, say, client):
     question = clarifications.next_question(context.channel_id, root_ts, query) if root_ts else None
     if question is not None:
         round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
-        clarification_text = (
+        clarification_text = _with_status(
             "I need one detail before I search the incident history "
-            f"(clarification {round_number}/3): {question.question}"
+            f"(clarification {round_number}/3): {question.question}",
+            WAITING_TEXT,
         )
         if progress_ts:
             await _finish_progress(
@@ -437,15 +474,16 @@ async def handle_mention(event, say, client):
         logger.exception("Frontend Support mention failed")
         response = safe_error_message(context.request_id)
 
+    final_text = _with_status(response, DONE_TEXT)
     if progress_ts:
         await _finish_progress(
             client,
             channel_id=context.channel_id,
             message_ts=progress_ts,
-            text=response,
+            text=final_text,
         )
     else:
-        await say(text=response, thread_ts=root_ts or context.thread_ts)
+        await say(text=final_text, thread_ts=root_ts or context.thread_ts)
 
 
 async def _run_socket_mode() -> None:
