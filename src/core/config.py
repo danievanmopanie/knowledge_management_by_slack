@@ -80,9 +80,6 @@ class Settings(BaseSettings):
     report_stale_hours: int = 24
 
     # Project-wide background activity UX
-    # Long-running user-triggered work must remain visibly alive. Runtimes should
-    # update one durable status surface in place at this cadence while a phase
-    # is active, without exposing internal reasoning or noisy logs.
     background_heartbeat_seconds: int = 30
 
     # App
@@ -100,19 +97,17 @@ class Settings(BaseSettings):
     # Builder Agent – natural on-device engineering harness
     builder_agent_allowed_user_ids: str = ""
     builder_trusted_slack_sender_ids: str = ""
+    builder_slack_bot_token: str = ""
+    builder_slack_app_token: str = ""
     builder_repo_path: Path = Path("./data/builder/repo")
     builder_workdir: Path = Path("./data/builder/worktrees")
 
-    # Keep Builder inference independent from the rest of the Slack agents so
-    # Atlas can be introduced as a canary without moving support/extraction.
     builder_aider_model: str = "openai/aeon-builder"
     builder_llm_model: str = "aeon-builder"
     builder_llm_base_url: str = "http://127.0.0.1:8888/v1"
     builder_llm_api_key: str = "atlas-local"
     builder_model_checkpoint: str = "AEON-7/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-BF16"
 
-    # Real terminal/tool loop. Commands execute on the GX10 as the Builder
-    # service account with a scrubbed environment; no sudo bypass is provided.
     builder_terminal_enabled: bool = True
     builder_terminal_max_steps: int = 16
     builder_terminal_command_timeout_seconds: int = 180
@@ -122,8 +117,6 @@ class Settings(BaseSettings):
     builder_terminal_temperature: float = 0.1
     builder_terminal_allow_docker_run: bool = False
 
-    # Local code validation gate. {python} resolves to the worker's interpreter.
-    # A PR is never pushed when this command fails when require_tests_pass=True.
     builder_test_command: str = (
         "{python} -m ruff check src tests scripts && {python} -m pytest -q"
     )
