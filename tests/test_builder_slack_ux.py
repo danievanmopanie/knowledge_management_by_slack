@@ -25,7 +25,8 @@ def test_slack_mrkdwn_unescapes_model_output_and_converts_heading():
     assert "\\###" not in cleaned
     assert "\\*" not in cleaned
     assert "*Open PRs*" in cleaned
-    assert "**3 PRs**" in cleaned
+    assert "*3 PRs*" in cleaned
+    assert "**3 PRs**" not in cleaned
 
 
 def test_slack_mrkdwn_converts_markdown_table_to_bullets():
