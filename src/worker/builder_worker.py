@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from src.agents.builder.task_store import BuilderTaskStore
 from src.bot.blockkit.builder import builder_status_blocks
@@ -17,6 +17,7 @@ from src.integrations.github_client import (
     pull_request_is_open,
 )
 from src.reporting.publisher import publish_report_to_channel
+from src.ux.background_activity import ActivitySnapshot, BackgroundActivity
 from src.worker.aider_runner import AiderResult, run_aider
 from src.worker.terminal_harness import run_terminal_harness
 from src.worker.validation import ValidationResult, run_validation
@@ -32,6 +33,7 @@ from src.worker.workspace import (
 
 logger = logging.getLogger(__name__)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_T = TypeVar("_T")
 
 
 def run_forever() -> None:
@@ -46,7 +48,6 @@ def run_forever() -> None:
 
 
 def _open_continuation(task: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Return the branch/PR to continue when the previous thread PR is open."""
     branch = task.get("continuation_branch")
     pr_url = task.get("continuation_pr_url")
     if not branch or not pr_url:
@@ -59,10 +60,7 @@ def _open_continuation(task: dict[str, Any]) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _resolve_target(
-    task: dict[str, Any],
-) -> tuple[str | None, str | None, dict[str, Any] | None]:
-    """Resolve explicit external PR handoff first, then implicit thread continuation."""
+def _resolve_target(task: dict[str, Any]) -> tuple[str | None, str | None, dict[str, Any] | None]:
     if task.get("handoff_pr_number"):
         pr = get_pull_request(task["handoff_pr_number"])
         return pr["head_ref"], pr["html_url"], pr
@@ -92,7 +90,6 @@ def _goal_with_pr_context(goal: str, pr: dict[str, Any] | None) -> str:
 
 
 def _execute_primary_harness(*, goal: str, worktree: Worktree) -> str:
-    """Run the real terminal tool loop, falling back to legacy Aider only if disabled."""
     if settings.builder_terminal_enabled:
         result = run_terminal_harness(goal=goal, worktree_path=worktree.path)
         if not result.success:
@@ -109,6 +106,46 @@ def _execute_primary_harness(*, goal: str, worktree: Worktree) -> str:
     return _aider_answer(initial)
 
 
+def _run_with_heartbeat(
+    store: BuilderTaskStore,
+    task: dict[str, Any],
+    worktree: Worktree,
+    *,
+    status: str,
+    summary: str,
+    operation: Callable[[], _T],
+    validation: str | None = None,
+    repair_attempt: str | None = None,
+    pr_url: str | None = None,
+) -> _T:
+    """Run a blocking phase while keeping one Slack progress card visibly alive."""
+
+    def publish(snapshot: ActivitySnapshot) -> None:
+        _publish_status(
+            store,
+            task,
+            status=status,
+            summary=snapshot.summary,
+            branch_name=worktree.branch_name,
+            validation=validation,
+            repair_attempt=repair_attempt,
+            pr_url=pr_url,
+            elapsed_seconds=snapshot.elapsed_seconds,
+            idle_seconds=snapshot.idle_seconds,
+            heartbeat=snapshot.heartbeat,
+        )
+
+    activity = BackgroundActivity(
+        publish,
+        heartbeat_seconds=settings.background_heartbeat_seconds,
+    )
+    activity.start(status, summary)
+    try:
+        return operation()
+    finally:
+        activity.stop()
+
+
 def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
     task_id = task["task_id"]
     logger.info("Claimed builder turn %s", task_id)
@@ -121,42 +158,45 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
         explicit_handoff = handoff_pr is not None
         worktree = prepare_worktree(task_id, continuation_branch=target_branch)
         store.mark_running(task_id, branch_name=worktree.branch_name)
-        _publish_status(
+
+        goal = _goal_with_pr_context(task["goal"], handoff_pr)
+        answer = _run_with_heartbeat(
             store,
             task,
+            worktree,
             status="running",
             summary=(
-                f"I’ve checked out PR #{handoff_pr['number']} on the GX10 and I’m executing it locally."
+                f"I’ve checked out PR #{handoff_pr['number']} on the GX10 and I’m inspecting and executing it locally."
                 if explicit_handoff
                 else (
-                    "I’m continuing the open pull request from this Slack thread on the GX10."
+                    "I’m continuing the open pull request from this Slack thread and executing your latest request on the GX10."
                     if target_pr_url
                     else "I’m inspecting the repository and executing your request on the GX10."
                 )
             ),
-            branch_name=worktree.branch_name,
+            operation=lambda: _execute_primary_harness(goal=goal, worktree=worktree),
             pr_url=target_pr_url,
         )
-
-        goal = _goal_with_pr_context(task["goal"], handoff_pr)
-        answer = _execute_primary_harness(goal=goal, worktree=worktree)
         changed = has_repository_changes(worktree)
 
-        # Explicit PR handoff is a proof request, not merely a conversational
-        # inspection. Always run the deterministic repository gate on the GX10,
-        # even when the PR needed no edits during the model-driven tool loop.
         if explicit_handoff:
-            validation, repair_attempts = _validate_and_repair(store, task, worktree)
-            if not validation.success and settings.builder_require_tests_pass:
-                raise RuntimeError(_validation_failure_message(validation, repair_attempts))
+            validation_result, repair_attempts = _validate_and_repair(store, task, worktree)
+            if not validation_result.success and settings.builder_require_tests_pass:
+                raise RuntimeError(_validation_failure_message(validation_result, repair_attempts))
 
             changed = has_repository_changes(worktree)
             if changed:
-                latest_request = _latest_request(task["goal"])
-                commit_pending_changes(
-                    worktree,
-                    message=f"Builder Agent: {latest_request[:72]}",
+                _publish_status(
+                    store,
+                    task,
+                    status="running",
+                    summary="The code is green. I’m committing and pushing the proven repair back to the handed-off PR.",
+                    branch_name=worktree.branch_name,
+                    validation="✅ passed",
+                    pr_url=target_pr_url,
                 )
+                latest_request = _latest_request(task["goal"])
+                commit_pending_changes(worktree, message=f"Builder Agent: {latest_request[:72]}")
                 push_branch(worktree)
 
             store.mark_succeeded(task_id, pr_url=target_pr_url, result_text=answer)
@@ -165,32 +205,21 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
                 task,
                 status="completed",
                 summary=(
-                    "The handed-off PR is green on the GX10 and any repairs were pushed back "
-                    "to the same pull request."
+                    "The handed-off PR is green on the GX10 and any repairs were pushed back to the same pull request."
                     if changed
                     else "The handed-off PR is green on the GX10; no repair commit was required."
                 ),
                 branch_name=worktree.branch_name,
-                validation="✅ passed" if validation.success else "not required",
+                validation="✅ passed" if validation_result.success else "not required",
                 repair_attempt=str(repair_attempts),
                 pr_url=target_pr_url,
             )
             if answer:
-                publish_report_to_channel(
-                    answer,
-                    channel_id=task["channel_id"],
-                    thread_ts=task.get("thread_ts"),
-                )
+                publish_report_to_channel(answer, channel_id=task["channel_id"], thread_ts=task.get("thread_ts"))
             return
 
-        # Natural harness behaviour for ordinary conversation: questions and
-        # runtime inspections do not manufacture a PR when no files changed.
         if not changed:
-            store.mark_succeeded(
-                task_id,
-                pr_url=target_pr_url,
-                result_text=answer,
-            )
+            store.mark_succeeded(task_id, pr_url=target_pr_url, result_text=answer)
             _publish_status(
                 store,
                 task,
@@ -199,27 +228,31 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
                 branch_name=worktree.branch_name,
                 pr_url=target_pr_url,
             )
-            publish_report_to_channel(
-                answer,
-                channel_id=task["channel_id"],
-                thread_ts=task.get("thread_ts"),
-            )
+            publish_report_to_channel(answer, channel_id=task["channel_id"], thread_ts=task.get("thread_ts"))
             return
 
-        validation, repair_attempts = _validate_and_repair(store, task, worktree)
-        if not validation.success and settings.builder_require_tests_pass:
-            raise RuntimeError(_validation_failure_message(validation, repair_attempts))
+        validation_result, repair_attempts = _validate_and_repair(store, task, worktree)
+        if not validation_result.success and settings.builder_require_tests_pass:
+            raise RuntimeError(_validation_failure_message(validation_result, repair_attempts))
 
+        _publish_status(
+            store,
+            task,
+            status="running",
+            summary="The local gates are green. I’m committing and publishing the change now.",
+            branch_name=worktree.branch_name,
+            validation="✅ passed",
+            repair_attempt=str(repair_attempts),
+            pr_url=target_pr_url,
+        )
         latest_request = _latest_request(task["goal"])
         commit_pending_changes(worktree, message=f"Builder Agent: {latest_request[:72]}")
         push_branch(worktree)
-        validation_label = "passed" if validation.success else "not required"
+        validation_label = "passed" if validation_result.success else "not required"
 
         if target_pr_url:
             pr_url = target_pr_url
-            completion_summary = (
-                "Your follow-up is locally green and has been pushed to the existing pull request."
-            )
+            completion_summary = "Your follow-up is locally green and has been pushed to the existing pull request."
         else:
             pr = create_pull_request(
                 branch_name=worktree.branch_name,
@@ -230,16 +263,14 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
                     f"Turn: `{task_id}`\n\n"
                     "Local validation:\n"
                     f"- Status: **{validation_label}**\n"
-                    f"- Command: `{validation.command or '(disabled)'}`\n"
+                    f"- Command: `{validation_result.command or '(disabled)'}`\n"
                     f"- Repair attempts: {repair_attempts}\n\n"
                     f"Builder model checkpoint: `{settings.builder_model_checkpoint}`\n"
                     f"Inference endpoint: `{settings.builder_llm_base_url}`"
                 ),
             )
             pr_url = pr["html_url"]
-            completion_summary = (
-                "The repository change is locally green and has been published for review."
-            )
+            completion_summary = "The repository change is locally green and has been published for review."
 
         store.mark_succeeded(task_id, pr_url=pr_url, result_text=answer)
         _publish_status(
@@ -248,16 +279,12 @@ def _run_task(store: BuilderTaskStore, task: dict[str, Any]) -> None:
             status="completed",
             summary=completion_summary,
             branch_name=worktree.branch_name,
-            validation="✅ passed" if validation.success else "not required",
+            validation="✅ passed" if validation_result.success else "not required",
             repair_attempt=str(repair_attempts),
             pr_url=pr_url,
         )
         if answer:
-            publish_report_to_channel(
-                answer,
-                channel_id=task["channel_id"],
-                thread_ts=task.get("thread_ts"),
-            )
+            publish_report_to_channel(answer, channel_id=task["channel_id"], thread_ts=task.get("thread_ts"))
 
     except (WorkspaceError, GitHubClientError, RuntimeError) as exc:
         logger.exception("Builder turn %s failed", task_id)
@@ -291,26 +318,44 @@ def _validate_and_repair(
     task: dict[str, Any],
     worktree: Worktree,
 ) -> tuple[ValidationResult, int]:
-    """Run local validation and let the coding model repair failures in-place."""
-    validation = run_validation(worktree_path=worktree.path)
+    validation = _run_with_heartbeat(
+        store,
+        task,
+        worktree,
+        status="running",
+        summary="I’m running the configured local validation gates. This can take a few minutes.",
+        operation=lambda: run_validation(worktree_path=worktree.path),
+        validation="⏳ running",
+        pr_url=task.get("continuation_pr_url"),
+    )
     repair_attempts = 0
 
     while not validation.success and repair_attempts < settings.builder_max_repair_attempts:
         repair_attempts += 1
-        _publish_status(
+        repair_goal = _repair_prompt(task["goal"], validation, repair_attempts)
+        repair = _run_with_heartbeat(
             store,
             task,
+            worktree,
             status="repairing",
-            summary="The local gates found a problem, so I’m fixing it before anything is pushed.",
-            branch_name=worktree.branch_name,
+            summary="The local gates found a problem. I’m repairing it before anything is pushed.",
+            operation=lambda: run_aider(goal=repair_goal, worktree_path=worktree.path),
             validation="❌ failed",
             repair_attempt=f"{repair_attempts}/{settings.builder_max_repair_attempts}",
             pr_url=task.get("continuation_pr_url"),
         )
-        repair_goal = _repair_prompt(task["goal"], validation, repair_attempts)
-        repair = run_aider(goal=repair_goal, worktree_path=worktree.path)
         _require_aider_success(repair, phase=f"repair attempt {repair_attempts}")
-        validation = run_validation(worktree_path=worktree.path)
+        validation = _run_with_heartbeat(
+            store,
+            task,
+            worktree,
+            status="running",
+            summary="The repair is applied. I’m rerunning the local validation gates.",
+            operation=lambda: run_validation(worktree_path=worktree.path),
+            validation="⏳ rerunning",
+            repair_attempt=f"{repair_attempts}/{settings.builder_max_repair_attempts}",
+            pr_url=task.get("continuation_pr_url"),
+        )
 
     if validation.success:
         _publish_status(
@@ -328,9 +373,8 @@ def _validate_and_repair(
 
 def _repair_prompt(goal: str, validation: ValidationResult, attempt: int) -> str:
     return (
-        "The requested implementation is not yet ready to publish. Fix the code in this "
-        "worktree so the required validation passes. Do not remove, skip, weaken, or xfail "
-        "tests merely to make the suite green, and do not undo the original requested change.\n\n"
+        "The requested implementation is not yet ready to publish. Fix the code in this worktree so the required validation passes. "
+        "Do not remove, skip, weaken, or xfail tests merely to make the suite green, and do not undo the original requested change.\n\n"
         f"Original conversational request:\n{goal}\n\n"
         f"Repair attempt: {attempt}\n"
         f"Validation command: {validation.command}\n"
@@ -348,7 +392,6 @@ def _latest_request(goal: str) -> str:
 
 
 def _aider_answer(result: AiderResult) -> str:
-    """Return a compact conversational answer from Aider's captured output."""
     text = _ANSI_RE.sub("", (result.stdout or result.stderr or "").strip())
     if not text:
         return "I inspected the repository and didn’t find anything else I needed to change."
@@ -380,6 +423,9 @@ def _publish_status(
     validation: str | None = None,
     repair_attempt: str | None = None,
     pr_url: str | None = None,
+    elapsed_seconds: int | None = None,
+    idle_seconds: int | None = None,
+    heartbeat: bool = False,
 ) -> None:
     """Create or update one persistent Block Kit card for this Builder turn."""
     try:
@@ -398,6 +444,9 @@ def _publish_status(
                 validation=validation,
                 repair_attempt=repair_attempt,
                 pr_url=pr_url,
+                elapsed_seconds=elapsed_seconds,
+                idle_seconds=idle_seconds,
+                heartbeat=heartbeat,
             ),
             update_message_ts=message_ts,
         )
