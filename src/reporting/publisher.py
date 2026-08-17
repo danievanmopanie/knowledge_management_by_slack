@@ -16,6 +16,7 @@ _MARKDOWN_HEADING_RE = re.compile(r"(?m)^#{1,6}\s+(.+?)\s*$")
 _ESCAPED_MRKDWN_RE = re.compile(r"\\([*_#|`-])")
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
+_BUILDER_LABEL_SPACING_RE = re.compile(r"(?m)(\*[^*\n]+:\*)[ \t]{2,}")
 
 
 def _table_cells(line: str) -> list[str]:
@@ -63,6 +64,13 @@ def normalize_slack_mrkdwn(text: str) -> str:
     return cleaned
 
 
+def normalize_builder_final_answer(text: str) -> str:
+    """Normalize double-escaped model output only for Builder's plain final replies."""
+    cleaned = normalize_slack_mrkdwn(text)
+    cleaned = normalize_slack_mrkdwn(cleaned)
+    return _BUILDER_LABEL_SPACING_RE.sub(r"\1 ", cleaned)
+
+
 def _slack_token_for_channel(channel: str) -> str:
     """Use Builder's dedicated Slack identity only for the Builder channel."""
     if channel == settings.channel_builder_agent and settings.builder_slack_bot_token:
@@ -92,7 +100,10 @@ def publish_report_to_channel(
         )
 
     client = WebClient(token=_slack_token_for_channel(channel))
-    text = normalize_slack_mrkdwn(text)
+    if channel == settings.channel_builder_agent and blocks is None:
+        text = normalize_builder_final_answer(text)
+    else:
+        text = normalize_slack_mrkdwn(text)
     if len(text) > 35000:
         text = text[:34900] + "\n\n_…report truncated_"
 
