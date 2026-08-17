@@ -29,6 +29,13 @@ def test_slack_mrkdwn_unescapes_model_output_and_converts_heading():
     assert "**3 PRs**" not in cleaned
 
 
+def test_slack_mrkdwn_unescapes_list_markers():
+    cleaned = normalize_slack_mrkdwn(r"\- first item\n\- second item")
+
+    assert "\\-" not in cleaned
+    assert cleaned == "- first item\n- second item"
+
+
 def test_slack_mrkdwn_converts_markdown_table_to_bullets():
     raw = """| # | Title | State |
 |---|---|---|

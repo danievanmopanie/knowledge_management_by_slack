@@ -3,7 +3,7 @@
 import pytest
 
 from src.core.config import settings
-from src.integrations.github_client import GitHubClientError, get_pull_request
+from src.integrations.github_client import GitHubClientError, get_pull_request, list_pull_requests
 
 
 class _FakeResponse:
@@ -26,7 +26,7 @@ class _FakeClient:
     def __exit__(self, *_args):
         return False
 
-    def get(self, _url, headers):
+    def get(self, _url, headers, params=None):
         assert headers["Authorization"] == "Bearer test-token"
         return self.response
 
@@ -38,10 +38,10 @@ def _settings(monkeypatch):
     monkeypatch.setattr(settings, "github_api_base_url", "https://api.github.test")
 
 
-def _payload(head_repo="danievanmopanie/knowledge_management_by_slack"):
+def _payload(number=83, head_repo="danievanmopanie/knowledge_management_by_slack"):
     return {
-        "number": 83,
-        "html_url": "https://github.com/danievanmopanie/knowledge_management_by_slack/pull/83",
+        "number": number,
+        "html_url": f"https://github.com/danievanmopanie/knowledge_management_by_slack/pull/{number}",
         "title": "Improve Builder",
         "body": "Do the thing",
         "state": "open",
@@ -68,6 +68,17 @@ def test_get_pull_request_resolves_same_repo_head_branch(monkeypatch):
     assert pr["html_url"].endswith("/pull/83")
 
 
+def test_list_pull_requests_exposes_exact_result_count(monkeypatch):
+    _settings(monkeypatch)
+    fake = _FakeClient(_FakeResponse([_payload(79), _payload(76), _payload(74)]))
+    monkeypatch.setattr("src.integrations.github_client.httpx.Client", lambda **kwargs: fake)
+
+    prs = list_pull_requests(state="open", limit=20)
+
+    assert len(prs) == 3
+    assert {pr["list_result_count"] for pr in prs} == {3}
+
+
 def test_get_pull_request_rejects_closed_pr(monkeypatch):
     _settings(monkeypatch)
     payload = _payload()
@@ -81,7 +92,7 @@ def test_get_pull_request_rejects_closed_pr(monkeypatch):
 
 def test_get_pull_request_rejects_fork_branch_for_mutation(monkeypatch):
     _settings(monkeypatch)
-    fake = _FakeClient(_FakeResponse(_payload("someone-else/fork")))
+    fake = _FakeClient(_FakeResponse(_payload(head_repo="someone-else/fork")))
     monkeypatch.setattr("src.integrations.github_client.httpx.Client", lambda **kwargs: fake)
 
     with pytest.raises(GitHubClientError, match="fork"):

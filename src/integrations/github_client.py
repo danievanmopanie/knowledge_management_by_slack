@@ -91,11 +91,7 @@ def list_pull_requests(
     owner: str | None = None,
     repo: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List pull requests in the configured repository for Builder inspection.
-
-    This runs in the trusted worker process, not the scrubbed child shell, so
-    GitHub credentials remain unavailable to model-generated shell commands.
-    """
+    """List pull requests with an explicit deterministic result count."""
     if state not in {"open", "closed", "all"}:
         raise GitHubClientError(f"Invalid pull request state: {state!r}")
     owner, repo = _owner_repo(owner, repo)
@@ -108,7 +104,11 @@ def list_pull_requests(
         raise GitHubClientError(
             f"GitHub API error listing PRs: {response.status_code} {response.text[:500]}"
         )
-    return [_normalize_pull_request(item) for item in response.json()[:bounded_limit]]
+    items = [_normalize_pull_request(item) for item in response.json()[:bounded_limit]]
+    result_count = len(items)
+    for item in items:
+        item["list_result_count"] = result_count
+    return items
 
 
 def get_pull_request(
@@ -117,12 +117,7 @@ def get_pull_request(
     owner: str | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve an existing open PR in the configured repository for GX10 handoff.
-
-    Builder mutates the existing PR head branch, so fork-based PRs are rejected
-    for now rather than accidentally pushing a similarly named branch into the
-    configured origin repository.
-    """
+    """Resolve an existing open PR in the configured repository for GX10 handoff."""
     owner, repo = _owner_repo(owner, repo)
     number = str(pr_number).strip()
     if not number.isdigit():
@@ -160,12 +155,7 @@ def pull_request_is_open(
     owner: str | None = None,
     repo: str | None = None,
 ) -> bool:
-    """Return whether a Builder PR is still open and therefore safe to continue.
-
-    A Slack Builder thread acts as one coding session only while the previously
-    published PR remains open. Once that PR is merged/closed, the next turn
-    starts a fresh branch from main instead of mutating historical work.
-    """
+    """Return whether a Builder PR is still open and therefore safe to continue."""
     match = _PR_NUMBER_RE.search(pr_url or "")
     if not match:
         return False

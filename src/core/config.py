@@ -99,6 +99,7 @@ class Settings(BaseSettings):
 
     # Builder Agent – natural on-device engineering harness
     builder_agent_allowed_user_ids: str = ""
+    builder_trusted_slack_sender_ids: str = ""
     builder_repo_path: Path = Path("./data/builder/repo")
     builder_workdir: Path = Path("./data/builder/worktrees")
 
