@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=danieungerer
-WorkingDirectory=/home/danieungerer/knowledge_management_by_slack
-EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env
-ExecStart=/home/danieungerer/knowledge_management_by_slack/.venv/bin/python -m src.bot.frontend_support_app
+WorkingDirectory=/home/danieungerer/knowledge_management_by_slack_frontend_runtime
+EnvironmentFile=/home/danieungerer/knowledge_management_by_slack_frontend_runtime/.env
+ExecStart=/home/danieungerer/knowledge_management_by_slack_frontend_runtime/.venv/bin/python -m src.bot.frontend_support_app
 Restart=always
 RestartSec=5
 
