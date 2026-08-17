@@ -1,0 +1,21 @@
+[Unit]
+Description=Knowledge Management by Slack – dedicated natural Builder Slack agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=danieungerer
+Group=danieungerer
+WorkingDirectory=/home/danieungerer/knowledge_management_by_slack_builder_runtime
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/danieungerer/knowledge_management_by_slack_builder_runtime/.env
+ExecStart=/home/danieungerer/knowledge_management_by_slack_builder_runtime/.venv/bin/python -m src.bot.builder_app
+Restart=always
+RestartSec=10
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
