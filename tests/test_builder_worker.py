@@ -78,7 +78,8 @@ def test_validation_failure_is_sent_back_for_repair(monkeypatch, tmp_path: Path)
     assert len(repair_goals) == 1
     assert "FAILED test_widget" in repair_goals[0]
     assert "Do not remove, skip, weaken, or xfail tests" in repair_goals[0]
-    assert statuses[0]["status"] == "repairing"
+    # BackgroundActivity now emits an initial running heartbeat before repair.
+    assert any(status["status"] == "repairing" for status in statuses)
     assert statuses[-1]["status"] == "validated"
 
 
