@@ -13,7 +13,7 @@ from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 _MARKDOWN_HEADING_RE = re.compile(r"(?m)^#{1,6}\s+(.+?)\s*$")
-_ESCAPED_MRKDWN_RE = re.compile(r"\\([*_#|`])")
+_ESCAPED_MRKDWN_RE = re.compile(r"\\([*_#|`-])")
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
 
