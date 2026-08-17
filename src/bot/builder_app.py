@@ -14,6 +14,7 @@ from src.agents.builder import BuilderAgent
 from src.core.config import settings
 from src.core.context import RequestContext
 from src.core.errors import safe_error_message
+from src.reporting.publisher import normalize_slack_mrkdwn
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,11 @@ def clean_text(text: str) -> str:
     return _MENTION_RE.sub("", text or "").strip()
 
 
+def format_builder_reply(text: str) -> str:
+    """Normalize model-authored Markdown before Slack renders it."""
+    return normalize_slack_mrkdwn(text)
+
+
 async def _thread_prompt(event: dict, latest_text: str) -> str:
     root_ts = event.get("thread_ts")
     if not root_ts:
@@ -137,7 +143,7 @@ async def handle_builder_event(event: dict, say) -> None:
     except Exception:
         logger.exception("Builder ingress failed request_id=%s", context.request_id)
         response = safe_error_message(context.request_id)
-    await say(text=response, thread_ts=root_ts)
+    await say(text=format_builder_reply(response), thread_ts=root_ts)
 
 
 @app.event("message")
