@@ -14,7 +14,8 @@ def test_builder_status_card_is_compact_and_actionable():
         pr_url="https://github.com/example/repo/pull/1",
     )
 
-    assert blocks[0]["type"] == "header"
+    assert blocks[0]["type"] == "section"
+    assert blocks[0]["text"]["type"] == "mrkdwn"
     assert "Ready for review" in blocks[0]["text"]["text"]
     actions = [block for block in blocks if block["type"] == "actions"]
     assert len(actions) == 1
