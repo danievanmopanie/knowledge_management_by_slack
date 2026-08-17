@@ -10,7 +10,7 @@ _STATUS_COPY = {
     "running": ("🛠️", "Working on it"),
     "repairing": ("🧪", "Fixing validation failures"),
     "validated": ("✅", "Local validation passed"),
-    "answered": ("💬", "Answered from the repository"),
+    "answered": ("💬", "Done"),
     "completed": ("✅", "Ready for review"),
     "failed": ("❌", "Builder stopped"),
     "cancelled": ("⏹️", "Builder cancelled"),
@@ -59,18 +59,19 @@ def builder_status_blocks(
         },
     ]
 
-    fields: list[dict[str, str]] = [
-        {"type": "mrkdwn", "text": f"*Turn*\n`{task_id}`"},
-    ]
-    if branch_name:
-        fields.append({"type": "mrkdwn", "text": f"*Branch*\n`{branch_name}`"})
+    fields: list[dict[str, str]] = []
+    if status != "answered":
+        fields.append({"type": "mrkdwn", "text": f"*Turn*\n`{task_id}`"})
+        if branch_name:
+            fields.append({"type": "mrkdwn", "text": f"*Branch*\n`{branch_name}`"})
     if elapsed_seconds is not None:
         fields.append({"type": "mrkdwn", "text": f"*Elapsed*\n{_duration(elapsed_seconds)}"})
     if validation:
         fields.append({"type": "mrkdwn", "text": f"*Validation*\n{validation}"})
     if repair_attempt:
         fields.append({"type": "mrkdwn", "text": f"*Repair*\n{repair_attempt}"})
-    blocks.append({"type": "section", "fields": fields[:10]})
+    if fields:
+        blocks.append({"type": "section", "fields": fields[:10]})
 
     if heartbeat:
         blocks.append(
@@ -103,15 +104,16 @@ def builder_status_blocks(
             }
         )
 
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "_Builder runs on-device. This card stays live while work is active; code is only published after the configured local gates pass._",
-                }
-            ],
-        }
-    )
+    if status != "answered":
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_Builder runs on-device. This card stays live while work is active; code is only published after the configured local gates pass._",
+                    }
+                ],
+            }
+        )
     return blocks
