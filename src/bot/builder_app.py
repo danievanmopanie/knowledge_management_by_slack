@@ -17,7 +17,10 @@ from src.core.errors import safe_error_message
 
 logger = logging.getLogger(__name__)
 
-app = AsyncApp(token=settings.slack_bot_token, signing_secret=settings.slack_signing_secret)
+app = AsyncApp(
+    token=settings.builder_slack_bot_token or settings.slack_bot_token,
+    signing_secret=settings.slack_signing_secret,
+)
 agent = BuilderAgent()
 
 _SEEN_LIMIT = 4096
@@ -148,7 +151,7 @@ async def on_mention(event, say):
 
 
 async def _start_async() -> None:
-    handler = AsyncSocketModeHandler(app, settings.slack_app_token)
+    handler = AsyncSocketModeHandler(app, settings.builder_slack_app_token)
     await handler.start_async()
 
 
@@ -161,6 +164,12 @@ def start() -> None:
         raise RuntimeError("CHANNEL_BUILDER_AGENT is required for the dedicated Builder runtime")
     if not settings.builder_agent_allowed_user_ids:
         raise RuntimeError("BUILDER_AGENT_ALLOWED_USER_IDS must contain at least one human user")
+    if not settings.builder_slack_bot_token:
+        raise RuntimeError("BUILDER_SLACK_BOT_TOKEN is required for the dedicated Builder runtime")
+    if not settings.builder_slack_app_token:
+        raise RuntimeError("BUILDER_SLACK_APP_TOKEN is required for the dedicated Builder runtime")
+    if settings.builder_slack_app_token == settings.slack_app_token:
+        raise RuntimeError("BUILDER_SLACK_APP_TOKEN must be different from the generic SLACK_APP_TOKEN")
     logger.info(
         "Starting dedicated Builder Slack runtime channel=%s trusted_external_senders=%s",
         settings.channel_builder_agent,
