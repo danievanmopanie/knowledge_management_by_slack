@@ -18,7 +18,6 @@ from src.agents.frontend_support.conversation import (
     compose_thread_query,
     looks_like_support,
 )
-from src.agents.frontend_support.trigger_feedback import append_trigger_feedback
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.frontend_actions import build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service, register as register_frontend_interactivity
@@ -44,7 +43,7 @@ STREAM_MIN_NEW_CHARS = 70
 def _normalise_message_event(event: dict) -> dict | None:
     """Return the effective human message for normal and edited Slack events."""
     subtype = event.get("subtype")
-    if subtype == "message_deleted" or subtype == "bot_message":
+    if subtype in {"message_deleted", "bot_message"}:
         return None
     if subtype == "message_changed":
         message = dict(event.get("message") or {})
@@ -67,6 +66,7 @@ def _context(event: dict) -> RequestContext:
 
 
 async def _text(event: dict) -> str:
+    """Combine typed text with a locally transcribed first voice note when present."""
     typed = (event.get("text") or "").strip()
     transcript = await transcribe_first_voice_note(event.get("files", []))
     if typed and transcript:
@@ -170,6 +170,7 @@ def _stream_callback(client, *, channel_id: str, message_ts: str | None):
 
 
 async def _private(event: dict, say, context: RequestContext, text: str) -> bool:
+    """Handle one-to-one technician coaching without exposing the conversation publicly."""
     if event.get("channel_type") != "im" or not text or not event.get("user"):
         return False
     query = get_service().observe_private(
@@ -194,8 +195,10 @@ async def _private(event: dict, say, context: RequestContext, text: str) -> bool
 
 
 async def _public(event: dict, say, client, context: RequestContext, text: str) -> bool:
+    """Observe the channel continuously, but invoke only when the thread needs support."""
     if context.channel_id != settings.channel_frontend_support or not text or not event.get("user"):
         return False
+
     message_ts = event.get("ts", "")
     root_ts = event.get("thread_ts") or message_ts
     if not message_ts or not root_ts:
@@ -235,6 +238,7 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
     if decision.kind == MessageKind.ASSISTANT_RESUME:
         await say(text="I'm back in. Carry on — I'll help where I can add value.", thread_ts=root_ts)
         return True
+
     if decision.prompt_for_capture:
         state = service.store.get_thread(context.channel_id, root_ts)
         if not state.incident_number:
@@ -261,7 +265,6 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
         channel_id=context.channel_id,
         thread_ts=root_ts,
     )
-
     query = compose_thread_query(
         service,
         channel_id=context.channel_id,
@@ -273,7 +276,7 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
     if question is not None:
         round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
         clarification_text = (
-            f"I need one detail before I search the incident history "
+            "I need one detail before I search the incident history "
             f"(clarification {round_number}/3): {question.question}"
         )
         if progress_ts:
@@ -313,10 +316,18 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
     except Exception:
         logger.exception("Frontend Support proactive response failed")
         response = safe_error_message(context.request_id)
+
     if response == INSUFFICIENT_EVIDENCE_RESPONSE and decision.kind == MessageKind.TROUBLESHOOTING:
-        response = "I checked the available support history but don't have a reliable next step yet. Add any new symptom or result and I'll keep working with the thread."
+        response = (
+            "I checked the available support history but don't have a reliable next step yet. "
+            "Add any new symptom or result and I'll keep working with the thread."
+        )
     if decision.prompt_for_incident and response != INSUFFICIENT_EVIDENCE_RESPONSE:
-        response += "\n\n_If this is a ServiceNow incident, add the INC number when convenient so the learning stays referenceable._"
+        response += (
+            "\n\n_If this is a ServiceNow incident, add the INC number when convenient "
+            "so the learning stays referenceable._"
+        )
+
     if progress_ts:
         await _finish_progress(
             client,
@@ -334,6 +345,7 @@ async def handle_message(event, say, client):
     effective_event = _normalise_message_event(event)
     if effective_event is None:
         return
+    # Slack also emits app_mention for mention-bearing messages; let that handler own them.
     if "<@" in (effective_event.get("text") or ""):
         return
     context = _context(effective_event)
@@ -349,7 +361,7 @@ async def handle_message(event, say, client):
 
 @app.event("app_mention")
 async def handle_mention(event, say, client):
-    """Resolve an explicit help request against its complete support thread."""
+    """Resolve an explicit help request against the complete stored support thread."""
     context = _context(event)
     cleaned = clean_mention_text(event.get("text", ""))
     root_ts = event.get("thread_ts") or event.get("ts", "")
@@ -363,22 +375,6 @@ async def handle_mention(event, say, client):
             user_id=event["user"],
             text=cleaned or "help with this",
         )
-        try:
-            state = service.store.get_thread(context.channel_id, root_ts)
-            thread_events = service.store.recent_events(context.channel_id, root_ts, limit=20)
-            append_trigger_feedback(
-                channel_id=context.channel_id,
-                thread_ts=root_ts,
-                mention_ts=event.get("ts", ""),
-                user_id=event["user"],
-                mention_text=cleaned or "help with this",
-                root_text=state.root_message,
-                thread_events=thread_events,
-                root_already_looked_like_support=looks_like_support(state.root_message),
-            )
-            logger.info("Captured explicit mention for trigger feedback thread=%s", root_ts)
-        except Exception:
-            logger.exception("Failed to capture trigger feedback thread=%s", root_ts)
         query = compose_thread_query(
             service,
             channel_id=context.channel_id,
@@ -400,7 +396,7 @@ async def handle_mention(event, say, client):
     if question is not None:
         round_number = clarifications.store.ask(context.channel_id, root_ts, question.key)
         clarification_text = (
-            f"I need one detail before I search the incident history "
+            "I need one detail before I search the incident history "
             f"(clarification {round_number}/3): {question.question}"
         )
         if progress_ts:
@@ -440,6 +436,7 @@ async def handle_mention(event, say, client):
     except Exception:
         logger.exception("Frontend Support mention failed")
         response = safe_error_message(context.request_id)
+
     if progress_ts:
         await _finish_progress(
             client,
