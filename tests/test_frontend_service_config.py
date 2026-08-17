@@ -9,6 +9,7 @@ def test_frontend_service_uses_dedicated_code_checkout_and_shared_knowledge_data
 
     assert "WorkingDirectory=/home/danieungerer/knowledge_management_by_slack_frontend_runtime" in text
     assert "EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env" in text
+    assert "ExecStart=/usr/bin/env " in text
     assert (
         "VECTORSTORE_PATH=/home/danieungerer/knowledge_management_by_slack/data/vectorstore"
         in text
@@ -16,7 +17,7 @@ def test_frontend_service_uses_dedicated_code_checkout_and_shared_knowledge_data
     assert "INCIDENTS_PATH=/home/danieungerer/knowledge_management_by_slack/data/incidents" in text
     assert "PLATFORM_DB_PATH=/home/danieungerer/knowledge_management_by_slack/data/platform.db" in text
     assert (
-        "ExecStart=/home/danieungerer/knowledge_management_by_slack_frontend_runtime/.venv/bin/python "
+        "/home/danieungerer/knowledge_management_by_slack_frontend_runtime/.venv/bin/python "
         "-m src.bot.frontend_support_app"
         in text
     )
