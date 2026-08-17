@@ -63,6 +63,13 @@ def normalize_slack_mrkdwn(text: str) -> str:
     return cleaned
 
 
+def _slack_token_for_channel(channel: str) -> str:
+    """Use Builder's dedicated Slack identity only for the Builder channel."""
+    if channel == settings.channel_builder_agent and settings.builder_slack_bot_token:
+        return settings.builder_slack_bot_token
+    return settings.slack_bot_token
+
+
 def publish_report_to_channel(
     text: str,
     channel_id: str | None = None,
@@ -84,7 +91,7 @@ def publish_report_to_channel(
             "or pass channel_id explicitly."
         )
 
-    client = WebClient(token=settings.slack_bot_token)
+    client = WebClient(token=_slack_token_for_channel(channel))
     text = normalize_slack_mrkdwn(text)
     if len(text) > 35000:
         text = text[:34900] + "\n\n_…report truncated_"
