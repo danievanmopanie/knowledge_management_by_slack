@@ -14,6 +14,7 @@ from src.core.config import settings
 logger = logging.getLogger(__name__)
 _MARKDOWN_HEADING_RE = re.compile(r"(?m)^#{1,6}\s+(.+?)\s*$")
 _ESCAPED_MRKDWN_RE = re.compile(r"\\([*_#|`])")
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
 
 
@@ -54,8 +55,10 @@ def _convert_markdown_tables(text: str) -> str:
 
 def normalize_slack_mrkdwn(text: str) -> str:
     """Make model-authored Markdown readable in Slack mrkdwn."""
-    cleaned = _ESCAPED_MRKDWN_RE.sub(r"\1", text or "")
+    cleaned = (text or "").replace("\\n", "\n")
+    cleaned = _ESCAPED_MRKDWN_RE.sub(r"\1", cleaned)
     cleaned = _MARKDOWN_HEADING_RE.sub(r"*\1*", cleaned)
+    cleaned = _MARKDOWN_BOLD_RE.sub(r"*\1*", cleaned)
     cleaned = _convert_markdown_tables(cleaned)
     return cleaned
 
