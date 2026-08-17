@@ -50,8 +50,8 @@ def builder_status_blocks(
     icon, title = _STATUS_COPY.get(status, ("🤖", "Builder"))
     blocks: list[dict[str, Any]] = [
         {
-            "type": "header",
-            "text": {"type": "plain_text", "text": f"{icon} {title}", "emoji": True},
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{icon} {title}*"},
         },
         {
             "type": "section",
