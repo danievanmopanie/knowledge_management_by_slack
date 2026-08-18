@@ -43,6 +43,13 @@ async def render_revision_task(client, task: dict) -> None:
     owner = governance.get_owner(document_id)
     pending = governance.pending_reviews_for_article(document_id, version_id=version_id)
     completed = governance.completed_reviews_for_article(document_id, version_id=version_id, limit=10)
+    current_text = ""
+    if str(task.get("status") or "") == "review":
+        try:
+            current_text = reconstruct_document_text(document_id)
+        except Exception:
+            logger.exception("Could not reconstruct current article for revision diff %s", task.get("request_id"))
+
     await client.chat_update(
         channel=channel_id,
         ts=message_ts,
@@ -52,6 +59,7 @@ async def render_revision_task(client, task: dict) -> None:
             owner_user_id=str((owner or {}).get("owner_user_id") or "") or None,
             pending_reviews=pending,
             completed_reviews=completed,
+            current_text=current_text,
         ),
     )
 
