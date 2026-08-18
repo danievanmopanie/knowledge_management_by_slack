@@ -13,17 +13,21 @@ context-scoped caching avoids repeating identical work during active incidents.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from src.core.config import settings
 from src.core.context import RequestContext
 from src.knowledge.incident_rag import IncidentRAG
 from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery
 from src.knowledge.retriever import HybridRetriever
 from src.knowledge.support_graph import SupportKnowledgeGraph
+
+logger = logging.getLogger(__name__)
 
 CONVERSATIONAL_LIMIT = 3
 PROMPT_CONTEXT_MAX_CHARS = 4500
@@ -72,6 +76,20 @@ def _context_scope(context: RequestContext) -> tuple:
         context.user_id or "",
         tuple(sorted(context.roles or ())),
     )
+
+
+def _incident_relevance(doc) -> float:
+    """Return the cosine-similarity score attached by the incident vector store."""
+    try:
+        return float((doc.metadata or {}).get("score") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _filter_incident_docs(docs: list) -> list:
+    """Keep only incident matches strong enough to become technician-facing evidence."""
+    threshold = settings.frontend_incident_min_relevance
+    return [doc for doc in docs if _incident_relevance(doc) >= threshold]
 
 
 def _incident_context_from_docs(docs: list, *, max_chars: int = INCIDENT_CONTEXT_MAX_CHARS) -> str:
@@ -156,12 +174,35 @@ class SupportEvidenceService:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
             incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
             governed = governed_future.result()
-            incident_docs = incident_future.result()
+            raw_incident_docs = incident_future.result()
+
+        governed_allowed = bool(
+            governed.should_answer
+            and governed.confidence_score >= settings.frontend_governed_min_confidence
+        )
+        incident_docs = _filter_incident_docs(raw_incident_docs)
+
+        if governed.should_answer and not governed_allowed:
+            logger.info(
+                "Frontend evidence gate dropped governed context confidence=%.3f threshold=%.3f",
+                governed.confidence_score,
+                settings.frontend_governed_min_confidence,
+            )
+        if len(incident_docs) != len(raw_incident_docs):
+            logger.info(
+                "Frontend evidence gate kept %s/%s incident matches threshold=%.3f scores=%s",
+                len(incident_docs),
+                len(raw_incident_docs),
+                settings.frontend_incident_min_relevance,
+                [round(_incident_relevance(doc), 3) for doc in raw_incident_docs],
+            )
 
         incident_sources: set[str] = set()
         graph_lines: list[str] = []
         seen_graph: set[tuple[str, str]] = set()
 
+        # Graph expansion must only occur from incidents that survived the relevance gate;
+        # otherwise a weak vector match can pull unrelated entities back into the prompt.
         for doc in incident_docs:
             meta = doc.metadata or {}
             number = str(meta.get("number") or "").strip()
@@ -187,12 +228,12 @@ class SupportEvidenceService:
 
         package = SupportEvidencePackage(
             query=query,
-            governed_candidates=governed.candidates,
-            governed_context=governed.to_context_string() if governed.should_answer else "",
+            governed_candidates=governed.candidates if governed_allowed else [],
+            governed_context=governed.to_context_string() if governed_allowed else "",
             incident_context=_incident_context_from_docs(incident_docs),
             graph_context=graph_context,
             incident_sources=incident_sources,
-            governed_should_answer=governed.should_answer,
+            governed_should_answer=governed_allowed,
             confidence_score=governed.confidence_score,
         )
         self._put_cached(cache_key, package)
