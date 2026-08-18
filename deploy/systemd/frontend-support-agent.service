@@ -1,14 +1,20 @@
 [Unit]
 Description=Standalone Frontend Support Slack Agent
-After=network-online.target
+After=network-online.target kms-atlas-builder.service
 Wants=network-online.target
+Requires=kms-atlas-builder.service
 
 [Service]
 Type=simple
 User=danieungerer
 WorkingDirectory=/home/danieungerer/knowledge_management_by_slack_frontend_runtime
 EnvironmentFile=/home/danieungerer/knowledge_management_by_slack/.env
-ExecStart=/usr/bin/env VECTORSTORE_PATH=/home/danieungerer/knowledge_management_by_slack/data/vectorstore RAW_DOCS_PATH=/home/danieungerer/knowledge_management_by_slack/data/raw STAGING_PATH=/home/danieungerer/knowledge_management_by_slack/data/staging BACKUP_ROOT=/home/danieungerer/knowledge_management_by_slack/data/backups INCIDENTS_PATH=/home/danieungerer/knowledge_management_by_slack/data/incidents PLATFORM_DB_PATH=/home/danieungerer/knowledge_management_by_slack/data/platform.db /home/danieungerer/knowledge_management_by_slack_frontend_runtime/.venv/bin/python -m src.bot.frontend_support_app
+# Atlas can be active while its model is still loading after boot. Do not open the Slack
+# listener until the OpenAI-compatible endpoint is actually ready to serve requests.
+ExecStartPre=/usr/bin/bash -c 'for i in {1..120}; do /usr/bin/curl --fail --silent --max-time 3 http://127.0.0.1:8888/v1/models >/dev/null && exit 0; /usr/bin/sleep 5; done; echo "Atlas endpoint did not become ready within 10 minutes" >&2; exit 1'
+# Frontend Support shares the resident Atlas/AEON response model with Builder. Embeddings
+# remain on Ollama through EMBEDDING_BASE_URL, avoiding a second large chat model in memory.
+ExecStart=/usr/bin/env LLM_BASE_URL=http://127.0.0.1:8888/v1 LLM_API_KEY=atlas-local LLM_MODEL=aeon-builder VECTORSTORE_PATH=/home/danieungerer/knowledge_management_by_slack/data/vectorstore RAW_DOCS_PATH=/home/danieungerer/knowledge_management_by_slack/data/raw STAGING_PATH=/home/danieungerer/knowledge_management_by_slack/data/staging BACKUP_ROOT=/home/danieungerer/knowledge_management_by_slack/data/backups INCIDENTS_PATH=/home/danieungerer/knowledge_management_by_slack/data/incidents PLATFORM_DB_PATH=/home/danieungerer/knowledge_management_by_slack/data/platform.db /home/danieungerer/knowledge_management_by_slack_frontend_runtime/.venv/bin/python -m src.bot.frontend_support_app
 Restart=always
 RestartSec=5
 

@@ -23,6 +23,21 @@ def test_frontend_service_uses_dedicated_code_checkout_and_shared_knowledge_data
     )
 
 
+def test_frontend_service_waits_for_atlas_and_reuses_resident_chat_model():
+    text = SERVICE.read_text(encoding="utf-8")
+
+    assert "After=network-online.target kms-atlas-builder.service" in text
+    assert "Requires=kms-atlas-builder.service" in text
+    assert "ExecStartPre=" in text
+    assert "http://127.0.0.1:8888/v1/models" in text
+    assert "LLM_BASE_URL=http://127.0.0.1:8888/v1" in text
+    assert "LLM_API_KEY=atlas-local" in text
+    assert "LLM_MODEL=aeon-builder" in text
+    # Embedding configuration is intentionally not overridden: small embedding models
+    # remain on Ollama while technician-facing chat shares the already-resident Atlas model.
+    assert "EMBEDDING_BASE_URL=" not in text
+
+
 def test_env_example_documents_dedicated_frontend_support_tokens():
     text = Path(".env.example").read_text(encoding="utf-8")
 
