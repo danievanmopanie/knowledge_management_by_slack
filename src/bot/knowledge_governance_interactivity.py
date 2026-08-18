@@ -430,6 +430,8 @@ def register(app: AsyncApp) -> None:
                 reviewer_user_id=reviewer_id,
                 requested_by_user_id=actor_id,
                 review_note=review_note,
+                shared_channel_id=channel_id,
+                shared_message_ts=message_ts,
             )
         except Exception:
             logger.exception("Could not create article technical review")
@@ -481,7 +483,10 @@ def register(app: AsyncApp) -> None:
             return
         await client.views_open(
             trigger_id=body["trigger_id"],
-            view=build_review_response_modal(review=review, title=_title(str(review["document_id"]))),
+            view=build_review_response_modal(
+                review=review,
+                title=_title(str(review["document_id"])),
+            ),
         )
 
     @app.view(REVIEW_RESPONSE_MODAL)
@@ -543,9 +548,12 @@ def register(app: AsyncApp) -> None:
                 ],
             )
 
-        # The review was requested from a shared governance card. Find its current
-        # message from the task's origin by scanning only the configured knowledge
-        # channel messages is deliberately avoided; the next owner action refreshes
-        # the card, and edit-card refreshes also reconcile governance state.
-        # For review tasks initiated from an owner DM we preserve instant personal
-        # notification without introducing channel-history polling here.
+        shared_channel_id = str(completed.get("shared_channel_id") or "")
+        shared_message_ts = str(completed.get("shared_message_ts") or "")
+        if shared_channel_id and shared_message_ts:
+            await _refresh_shared_card(
+                client,
+                channel_id=shared_channel_id,
+                message_ts=shared_message_ts,
+                document_id=document_id,
+            )
