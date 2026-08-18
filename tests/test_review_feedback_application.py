@@ -70,7 +70,8 @@ def test_feedback_drafting_is_explicit_and_preserves_existing_draft(tmp_path):
     text = "\n".join(
         str(((block.get("text") or {}).get("text") or "")) for block in blocks
     )
-    assert "Applying completed technical review feedback" in text
+    assert "Applying technical review feedback" in text
+    assert "not published" in text
 
 
 class _FakeLLM:
