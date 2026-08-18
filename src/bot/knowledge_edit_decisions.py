@@ -11,6 +11,7 @@ from src.bot.frontend_edit_actions import (
     APPLY_REVIEW_FEEDBACK,
     APPROVE_KNOWLEDGE_EDIT,
     DISMISS_KNOWLEDGE_EDIT,
+    VIEW_FULL_KNOWLEDGE_DRAFT,
 )
 from src.bot.knowledge_edit_drafting import (
     get_edit_store,
@@ -24,6 +25,8 @@ from src.knowledge.governed_ingest import commit_knowledge
 logger = logging.getLogger(__name__)
 
 _catalog: KnowledgeCatalog | None = None
+_MODAL_CHUNK = 2800
+_MODAL_MAX_CHUNKS = 35
 
 
 def get_catalog() -> KnowledgeCatalog:
@@ -45,6 +48,51 @@ def _publishing_authority(task: dict) -> str:
     return str((owner or {}).get("owner_user_id") or task.get("requested_by") or "")
 
 
+def build_full_draft_modal(task: dict) -> dict:
+    """Render the proposed article read-only without filling the shared channel."""
+    proposed = str(task.get("proposed_text") or "").strip() or "Draft unavailable."
+    chunks = [proposed[i : i + _MODAL_CHUNK] for i in range(0, len(proposed), _MODAL_CHUNK)]
+    truncated = len(chunks) > _MODAL_MAX_CHUNKS
+    chunks = chunks[:_MODAL_MAX_CHUNKS]
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{task['document_title']}*\nProposed governed revision `{task['request_id']}`",
+            },
+        },
+        {"type": "divider"},
+    ]
+    for index, chunk in enumerate(chunks, 1):
+        blocks.append(
+            {
+                "type": "section",
+                "block_id": f"full_draft:{index}",
+                "text": {"type": "mrkdwn", "text": chunk},
+            }
+        )
+    if truncated:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_This draft exceeds Slack's safe modal size; the shared change preview remains complete for the changed lines shown._",
+                    }
+                ],
+            }
+        )
+    return {
+        "type": "modal",
+        "callback_id": "knowledge_edit_full_draft_modal",
+        "title": {"type": "plain_text", "text": "Full draft"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
+    }
+
+
 async def _not_authorised(client, body: dict, authority_id: str) -> None:
     channel_id = str((body.get("channel") or {}).get("id") or "")
     actor_id = str((body.get("user") or {}).get("id") or "")
@@ -61,6 +109,20 @@ async def _not_authorised(client, body: dict, authority_id: str) -> None:
 
 
 def register(app: AsyncApp) -> None:
+    @app.action(VIEW_FULL_KNOWLEDGE_DRAFT)
+    async def view_full_draft(ack, body, client):
+        await ack()
+        request_id = _request_id(body)
+        if request_id is None:
+            return
+        task = get_edit_store().get(request_id)
+        if task is None or task.get("status") != "review":
+            return
+        await client.views_open(
+            trigger_id=body["trigger_id"],
+            view=build_full_draft_modal(task),
+        )
+
     @app.action(APPLY_REVIEW_FEEDBACK)
     async def apply_feedback(ack, body, client):
         await ack()
