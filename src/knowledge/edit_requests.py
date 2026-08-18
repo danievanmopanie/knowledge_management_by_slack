@@ -1,8 +1,8 @@
 """Durable knowledge-edit tasks for existing governed articles.
 
 Creating a task is intentionally cheap: the request is persisted immediately in
-``drafting`` state and can be rendered in Slack before any LLM work starts.  The
-same task is later updated with the drafted revision.
+``drafting`` state and can be rendered in Slack before any LLM work starts. The
+same task is later updated with the drafted revision and final review decision.
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ class EditRequestStore:
                     shared_channel_id TEXT,
                     shared_message_ts TEXT,
                     published_document_id TEXT,
+                    published_version_id TEXT,
+                    decided_by TEXT,
                     error_message TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -42,10 +44,16 @@ class EditRequestStore:
             columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(frontend_knowledge_edit_requests)")
             }
-            if "error_message" not in columns:
-                conn.execute(
-                    "ALTER TABLE frontend_knowledge_edit_requests ADD COLUMN error_message TEXT NOT NULL DEFAULT ''"
-                )
+            migrations = {
+                "error_message": "TEXT NOT NULL DEFAULT ''",
+                "published_version_id": "TEXT",
+                "decided_by": "TEXT",
+            }
+            for column, ddl in migrations.items():
+                if column not in columns:
+                    conn.execute(
+                        f"ALTER TABLE frontend_knowledge_edit_requests ADD COLUMN {column} {ddl}"
+                    )
 
     def create_drafting(
         self,
@@ -127,24 +135,43 @@ class EditRequestStore:
                 (error_message.strip()[:1200], request_id),
             )
 
-    def mark_published(self, request_id: int, *, published_document_id: str) -> None:
+    def mark_stale(self, request_id: int, *, decided_by: str) -> None:
         with connect(self.path) as conn:
             conn.execute(
                 """
                 UPDATE frontend_knowledge_edit_requests
-                SET status='published', published_document_id=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=?
+                SET status='stale', decided_by=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='review'
                 """,
-                (published_document_id, request_id),
+                (decided_by, request_id),
             )
 
-    def dismiss(self, request_id: int) -> None:
+    def mark_published(
+        self,
+        request_id: int,
+        *,
+        published_document_id: str,
+        published_version_id: str,
+        decided_by: str,
+    ) -> None:
         with connect(self.path) as conn:
             conn.execute(
                 """
                 UPDATE frontend_knowledge_edit_requests
-                SET status='dismissed', updated_at=CURRENT_TIMESTAMP
-                WHERE id=?
+                SET status='published', published_document_id=?, published_version_id=?,
+                    decided_by=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='review'
                 """,
-                (request_id,),
+                (published_document_id, published_version_id, decided_by, request_id),
+            )
+
+    def dismiss(self, request_id: int, *, decided_by: str = "") -> None:
+        with connect(self.path) as conn:
+            conn.execute(
+                """
+                UPDATE frontend_knowledge_edit_requests
+                SET status='dismissed', decided_by=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status IN ('drafting', 'review', 'draft_failed', 'stale')
+                """,
+                (decided_by or None, request_id),
             )
