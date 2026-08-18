@@ -150,6 +150,58 @@ def test_frontend_drops_weak_governed_and_incident_evidence_before_prompt():
     assert package.incident_sources == {"incident:INC-AUDIO"}
 
 
+class CaptureRetriever:
+    def __init__(self):
+        self.texts = []
+
+    def search(self, query):
+        self.texts.append(query.text)
+        return GovernedResult()
+
+
+class CaptureIncidentRAG:
+    graph_store = object()
+
+    def __init__(self):
+        self.texts = []
+
+    def similar_incidents(self, query, k=5):
+        self.texts.append(query)
+        return []
+
+
+def test_private_coaching_retrieves_on_latest_technician_turn_not_wrapper():
+    retriever = CaptureRetriever()
+    incidents = CaptureIncidentRAG()
+    service = SupportEvidenceService(
+        retriever=retriever,
+        incident_rag=incidents,
+        support_graph=EmptyGraph(),
+    )
+    context = RequestContext.from_slack(
+        channel_id="D1",
+        user_id="U1",
+        roles=("private_coach", "general_support_fallback"),
+    )
+    query = "\n".join(
+        [
+            "PRIVATE COACHING SESSION.",
+            "This is a one-on-one troubleshooting space for the technician.",
+            "Recent private conversation:",
+            "- technician [technical_question]: Earlier my VPN was slow",
+            "- technician [technical_question]: My laptop suddenly has no sound",
+            "Coach without judgement and use internal incident history.",
+        ]
+    )
+
+    package = service.build(query, context)
+
+    expected = "My laptop suddenly has no sound"
+    assert retriever.texts == [expected]
+    assert incidents.texts == [expected]
+    assert package.query == query
+
+
 class Chunk:
     def __init__(self, content):
         self.content = content
