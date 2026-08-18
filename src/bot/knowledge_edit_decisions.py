@@ -7,8 +7,16 @@ import logging
 
 from slack_bolt.async_app import AsyncApp
 
-from src.bot.frontend_edit_actions import APPROVE_KNOWLEDGE_EDIT, DISMISS_KNOWLEDGE_EDIT
-from src.bot.knowledge_edit_drafting import get_edit_store, render_revision_task
+from src.bot.frontend_edit_actions import (
+    APPLY_REVIEW_FEEDBACK,
+    APPROVE_KNOWLEDGE_EDIT,
+    DISMISS_KNOWLEDGE_EDIT,
+)
+from src.bot.knowledge_edit_drafting import (
+    get_edit_store,
+    render_revision_task,
+    schedule_feedback_draft,
+)
 from src.bot.knowledge_governance_interactivity import get_store as get_governance_store
 from src.knowledge.catalog import KnowledgeCatalog, StaleKnowledgeVersionError
 from src.knowledge.governed_ingest import commit_knowledge
@@ -53,6 +61,62 @@ async def _not_authorised(client, body: dict, authority_id: str) -> None:
 
 
 def register(app: AsyncApp) -> None:
+    @app.action(APPLY_REVIEW_FEEDBACK)
+    async def apply_feedback(ack, body, client):
+        await ack()
+        request_id = _request_id(body)
+        if request_id is None:
+            return
+
+        store = get_edit_store()
+        task = store.get(request_id)
+        if task is None or task.get("status") != "review":
+            return
+
+        actor_id = str((body.get("user") or {}).get("id") or "")
+        authority_id = _publishing_authority(task)
+        if not actor_id or actor_id != authority_id:
+            await _not_authorised(client, body, authority_id)
+            return
+
+        active = get_catalog().active_version(str(task["document_id"]))
+        active_version_id = str((active or {}).get("version_id") or "")
+        if active_version_id != str(task.get("base_version_id") or ""):
+            store.mark_stale(request_id, decided_by=actor_id)
+            stale = store.get(request_id)
+            if stale is not None:
+                await render_revision_task(client, stale)
+            return
+
+        governance = get_governance_store()
+        completed = governance.completed_reviews_for_article(
+            str(task["document_id"]),
+            version_id=str(task.get("base_version_id") or "") or None,
+            limit=20,
+        )
+        applied = {int(item) for item in task.get("applied_review_ids") or []}
+        review_ids = [
+            int(item["id"])
+            for item in completed
+            if int(item.get("id") or 0) not in applied and str(item.get("response_note") or "").strip()
+        ]
+        if not review_ids:
+            channel_id = str((body.get("channel") or {}).get("id") or "")
+            if channel_id:
+                await client.chat_postEphemeral(
+                    channel=channel_id,
+                    user=actor_id,
+                    text="There is no new completed technical review feedback to apply.",
+                )
+            return
+
+        if not store.start_feedback_draft(request_id, review_ids=review_ids):
+            return
+        drafting = store.get(request_id)
+        if drafting is not None:
+            await render_revision_task(client, drafting)
+        schedule_feedback_draft(client, request_id)
+
     @app.action(APPROVE_KNOWLEDGE_EDIT)
     async def approve_publish(ack, body, client):
         await ack()
