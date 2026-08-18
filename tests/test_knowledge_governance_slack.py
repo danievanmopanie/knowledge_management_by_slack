@@ -4,28 +4,35 @@ import pytest
 
 from src.bot.knowledge_governance_interactivity import (
     ASSIGN_OWNER,
+    PROVIDE_REVIEW,
     REQUEST_REVIEW,
     REVIEWER_ACTION,
     REVIEWER_BLOCK,
+    REVIEW_RESPONSE_ACTION,
+    REVIEW_RESPONSE_BLOCK,
     _is_channel_member,
     build_governance_blocks,
     build_owner_dm_blocks,
+    build_review_dm_blocks,
     build_review_modal,
+    build_review_response_modal,
 )
 from src.knowledge.article_governance import ArticleGovernanceStore
 
 
-def test_shared_governance_card_uses_native_owner_picker_and_pending_review_state():
+def test_shared_governance_card_uses_native_owner_picker_and_review_state():
     blocks = build_governance_blocks(
         document_id="doc_1",
         owner_user_id="U_OWNER",
         pending_reviews=[{"reviewer_user_id": "U_REVIEWER"}],
+        completed_reviews=[{"reviewer_user_id": "U_DONE"}],
     )
 
     status = blocks[1]["text"]["text"]
     picker = blocks[2]["elements"][0]
     assert "<@U_OWNER>" in status
     assert "<@U_REVIEWER>" in status
+    assert "<@U_DONE>" in status
     assert picker["type"] == "users_select"
     assert picker["action_id"] == ASSIGN_OWNER
     assert picker["initial_user"] == "U_OWNER"
@@ -64,6 +71,31 @@ def test_review_modal_uses_slack_user_picker_and_optional_technical_note():
     assert note["optional"] is True
 
 
+def test_reviewer_dm_has_direct_input_action_and_response_modal():
+    review = {
+        "id": 7,
+        "document_id": "doc_1",
+        "version_id": "v4",
+        "reviewer_user_id": "U_REVIEWER",
+        "requested_by_user_id": "U_OWNER",
+        "review_note": "Validate the restart sequence",
+    }
+    blocks = build_review_dm_blocks(title="Laptop Audio Troubleshooting", review=review)
+    button = blocks[1]["elements"][0]
+    assert button["action_id"] == PROVIDE_REVIEW
+    assert json.loads(button["value"])["review_id"] == 7
+
+    modal = build_review_response_modal(
+        review=review,
+        title="Laptop Audio Troubleshooting",
+    )
+    response = modal["blocks"][1]["element"]
+    assert modal["blocks"][1]["block_id"] == REVIEW_RESPONSE_BLOCK
+    assert response["action_id"] == REVIEW_RESPONSE_ACTION
+    assert response["multiline"] is True
+    assert modal["submit"]["text"] == "Submit input"
+
+
 class _MemberClient:
     def __init__(self):
         self.calls = 0
@@ -96,7 +128,11 @@ def test_completed_reviewer_can_be_requested_again_for_same_article_version(tmp_
         reviewer_user_id="U_REVIEWER",
         requested_by_user_id="U_OWNER",
     )
-    store.complete_review(first["id"])
+    store.complete_review(
+        first["id"],
+        reviewer_user_id="U_REVIEWER",
+        response_note="Validated.",
+    )
 
     second = store.request_review(
         document_id="doc_1",
