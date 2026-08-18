@@ -33,6 +33,7 @@ class ArticleGovernanceStore:
                     reviewer_user_id TEXT NOT NULL,
                     requested_by_user_id TEXT NOT NULL,
                     review_note TEXT NOT NULL DEFAULT '',
+                    response_note TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'requested',
                     requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     completed_at TEXT
@@ -48,6 +49,15 @@ class ArticleGovernanceStore:
                     ON knowledge_article_reviews(document_id, version_id, status);
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(knowledge_article_reviews)")
+            }
+            if "response_note" not in columns:
+                conn.execute(
+                    "ALTER TABLE knowledge_article_reviews "
+                    "ADD COLUMN response_note TEXT NOT NULL DEFAULT ''"
+                )
 
     def assign_owner(
         self,
@@ -121,16 +131,29 @@ class ArticleGovernanceStore:
             ).fetchone()
         return dict(row) if row else None
 
-    def complete_review(self, review_id: int) -> None:
+    def complete_review(
+        self,
+        review_id: int,
+        *,
+        reviewer_user_id: str,
+        response_note: str,
+    ) -> dict[str, Any] | None:
+        """Complete a pending review only when the submitting user owns that task."""
+        response = response_note.strip()
+        if not response:
+            raise ValueError("Technical review input is required")
         with connect(self.path) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE knowledge_article_reviews
-                SET status='completed', completed_at=CURRENT_TIMESTAMP
-                WHERE id=? AND status='requested'
+                SET status='completed', response_note=?, completed_at=CURRENT_TIMESTAMP
+                WHERE id=? AND reviewer_user_id=? AND status='requested'
                 """,
-                (review_id,),
+                (response[:4000], review_id, reviewer_user_id),
             )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_review(review_id)
 
     def pending_reviews_for(self, reviewer_user_id: str) -> list[dict[str, Any]]:
         with connect(self.path) as conn:
@@ -168,5 +191,33 @@ class ArticleGovernanceStore:
                     ORDER BY requested_at, id
                     """,
                     (document_id,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def completed_reviews_for_article(
+        self,
+        document_id: str,
+        *,
+        version_id: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        with connect(self.path) as conn:
+            if version_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM knowledge_article_reviews
+                    WHERE document_id=? AND version_id=? AND status='completed'
+                    ORDER BY completed_at DESC, id DESC LIMIT ?
+                    """,
+                    (document_id, version_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM knowledge_article_reviews
+                    WHERE document_id=? AND status='completed'
+                    ORDER BY completed_at DESC, id DESC LIMIT ?
+                    """,
+                    (document_id, limit),
                 ).fetchall()
         return [dict(row) for row in rows]
