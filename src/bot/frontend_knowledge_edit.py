@@ -86,7 +86,7 @@ def has_actionable_edit_detail(text: str) -> bool:
 
 def _choice_blocks(*, citations: list[dict], edit_note: str, channel_id: str, thread_ts: str) -> list[dict]:
     elements: list[dict] = []
-    for citation in citations[:3]:
+    for index, citation in enumerate(citations[:3]):
         value = json.dumps(
             {
                 "document_id": citation["document_id"],
@@ -99,7 +99,7 @@ def _choice_blocks(*, citations: list[dict], edit_note: str, channel_id: str, th
         elements.append(
             {
                 "type": "button",
-                "action_id": FLAG_ARTICLE_EDIT,
+                "action_id": f"{FLAG_ARTICLE_EDIT}:{index}",
                 "text": {"type": "plain_text", "text": str(citation["title"])[:75]},
                 "value": value,
             }
@@ -178,7 +178,7 @@ async def offer_knowledge_edit(
 def register(app: AsyncApp) -> None:
     register_knowledge_edit_decisions(app)
 
-    @app.action(FLAG_ARTICLE_EDIT)
+    @app.action(re.compile(rf"^{re.escape(FLAG_ARTICLE_EDIT)}:\d+$"))
     async def flag_article_edit(ack, body, client):
         await ack()
         payload = json.loads(body["actions"][0]["value"])
