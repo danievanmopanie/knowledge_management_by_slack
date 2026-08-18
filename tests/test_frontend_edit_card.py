@@ -1,8 +1,11 @@
 from src.bot.frontend_edit_actions import (
     APPROVE_KNOWLEDGE_EDIT,
     DISMISS_KNOWLEDGE_EDIT,
+    VIEW_FULL_KNOWLEDGE_DRAFT,
     build_knowledge_edit_card,
+    compact_revision_diff,
 )
+from src.bot.knowledge_edit_decisions import build_full_draft_modal
 from src.knowledge.edit_requests import EditRequestStore
 
 
@@ -58,13 +61,15 @@ def test_drafting_card_has_governance_controls_before_llm_finishes(tmp_path):
     assert owner_picker["placeholder"]["text"] == "Assign article owner"
 
 
-def test_same_card_switches_to_revision_preview_and_decision_controls_when_ready(tmp_path):
+def test_ready_card_shows_changed_lines_and_full_draft_action(tmp_path):
     store, task = _task(tmp_path)
-    store.set_draft(task["id"], "# Laptop Audio\n\nRestart Windows Audio after driver reinstall.")
+    current = "# Laptop Audio\n\nReinstall the audio driver.\n\nCheck volume."
+    proposed = "# Laptop Audio\n\nReinstall the audio driver.\nRestart Windows Audio.\n\nCheck volume."
+    store.set_draft(task["id"], proposed)
     ready = store.get(task["id"])
     assert ready is not None
 
-    blocks = build_knowledge_edit_card(ready)
+    blocks = build_knowledge_edit_card(ready, current_text=current)
     text = "\n".join(
         str(((block.get("text") or {}).get("text") or "")) for block in blocks
     )
@@ -76,11 +81,41 @@ def test_same_card_switches_to_revision_preview_and_decision_controls_when_ready
     }
 
     assert ready["status"] == "review"
-    assert "Proposed revision preview" in text
-    assert "Restart Windows Audio" in text
-    assert "Drafting focused revision" not in text
+    assert "What changed" in text
+    assert "+ Restart Windows Audio." in text
+    assert "Proposed revision preview" not in text
+    assert VIEW_FULL_KNOWLEDGE_DRAFT in action_ids
     assert APPROVE_KNOWLEDGE_EDIT in action_ids
     assert DISMISS_KNOWLEDGE_EDIT in action_ids
+
+
+def test_compact_diff_omits_unchanged_lines():
+    diff = compact_revision_diff(
+        "Heading\nKeep this\nOld step\nAlso keep this",
+        "Heading\nKeep this\nNew step\nAlso keep this",
+    )
+    assert "- Old step" in diff
+    assert "+ New step" in diff
+    assert "Keep this" not in diff
+    assert "Also keep this" not in diff
+
+
+def test_full_draft_modal_contains_complete_normal_sized_draft(tmp_path):
+    store, task = _task(tmp_path)
+    proposed = "# Laptop Audio\n\n" + ("Detailed technical procedure.\n" * 120)
+    store.set_draft(task["id"], proposed)
+    ready = store.get(task["id"])
+    assert ready is not None
+
+    modal = build_full_draft_modal(ready)
+    rendered = "".join(
+        str(((block.get("text") or {}).get("text") or ""))
+        for block in modal["blocks"]
+        if block.get("type") == "section"
+    )
+    assert "# Laptop Audio" in rendered
+    assert rendered.count("Detailed technical procedure.") == 120
+    assert modal["title"]["text"] == "Full draft"
 
 
 def test_stale_and_published_cards_remove_decision_controls(tmp_path):
@@ -101,6 +136,7 @@ def test_stale_and_published_cards_remove_decision_controls(tmp_path):
     }
     assert "Stale draft" in stale_text
     assert APPROVE_KNOWLEDGE_EDIT not in stale_actions
+    assert VIEW_FULL_KNOWLEDGE_DRAFT not in stale_actions
 
     store.dismiss(task["id"], decided_by="U_OWNER")
     dismissed = store.get(task["id"])
