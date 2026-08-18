@@ -35,12 +35,17 @@ class ArticleGovernanceStore:
                     review_note TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'requested',
                     requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    completed_at TEXT,
-                    UNIQUE(document_id, version_id, reviewer_user_id, status)
+                    completed_at TEXT
                 );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_review_one_pending
+                    ON knowledge_article_reviews(document_id, version_id, reviewer_user_id)
+                    WHERE status='requested';
 
                 CREATE INDEX IF NOT EXISTS idx_knowledge_reviews_reviewer_status
                     ON knowledge_article_reviews(reviewer_user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_reviews_document_status
+                    ON knowledge_article_reviews(document_id, version_id, status);
                 """
             )
 
@@ -137,4 +142,31 @@ class ArticleGovernanceStore:
                 """,
                 (reviewer_user_id,),
             ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_reviews_for_article(
+        self,
+        document_id: str,
+        *,
+        version_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with connect(self.path) as conn:
+            if version_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM knowledge_article_reviews
+                    WHERE document_id=? AND version_id=? AND status='requested'
+                    ORDER BY requested_at, id
+                    """,
+                    (document_id, version_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM knowledge_article_reviews
+                    WHERE document_id=? AND status='requested'
+                    ORDER BY requested_at, id
+                    """,
+                    (document_id,),
+                ).fetchall()
         return [dict(row) for row in rows]
