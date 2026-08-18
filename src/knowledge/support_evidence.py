@@ -34,6 +34,7 @@ PROMPT_CONTEXT_MAX_CHARS = 4500
 INCIDENT_CONTEXT_MAX_CHARS = 2600
 EVIDENCE_CACHE_TTL_SECONDS = 300
 EVIDENCE_CACHE_MAX_ENTRIES = 128
+_PRIVATE_EVENT_RE = re.compile(r"^- technician \[[^\]]+\]:\s*(.+)$", re.MULTILINE)
 
 
 @dataclass
@@ -67,6 +68,22 @@ class SupportEvidencePackage:
 
 def _normalise_query(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _retrieval_text(query: str) -> str:
+    """Use the latest technician utterance for private-vector search, not coaching boilerplate.
+
+    Private coaching deliberately gives the LLM the full recent DM conversation. That text also
+    contains control instructions and older turns, which makes a poor embedding query. Retrieval
+    should instead follow the latest technician symptom while the complete conversation remains
+    available to generation through ``SupportEvidencePackage.query`` / the caller's message.
+    """
+    if not query.lstrip().startswith("PRIVATE COACHING SESSION."):
+        return query
+    matches = _PRIVATE_EVENT_RE.findall(query)
+    if not matches:
+        return query
+    return matches[-1].strip() or query
 
 
 def _context_scope(context: RequestContext) -> tuple:
@@ -166,13 +183,25 @@ class SupportEvidenceService:
         if cached is not None:
             return cached
 
-        retrieval_query = RetrievalQuery(text=query, context=context, limit=limit, graph_depth=1)
+        retrieval_text = _retrieval_text(query)
+        if retrieval_text != query:
+            logger.info(
+                "Frontend private retrieval uses latest technician turn chars=%s full_context_chars=%s",
+                len(retrieval_text),
+                len(query),
+            )
+        retrieval_query = RetrievalQuery(
+            text=retrieval_text,
+            context=context,
+            limit=limit,
+            graph_depth=1,
+        )
 
         # These searches are independent and usually dominate retrieval latency.
         # Run them concurrently, then enrich only the already-returned incident hits.
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="frontend-evidence") as pool:
             governed_future = pool.submit(self.retriever.search, retrieval_query)
-            incident_future = pool.submit(self.incident_rag.similar_incidents, query, limit)
+            incident_future = pool.submit(self.incident_rag.similar_incidents, retrieval_text, limit)
             governed = governed_future.result()
             raw_incident_docs = incident_future.result()
 
