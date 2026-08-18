@@ -89,11 +89,18 @@ def test_reviewer_dm_has_direct_input_action_and_response_modal():
         review=review,
         title="Laptop Audio Troubleshooting",
     )
-    response = modal["blocks"][1]["element"]
-    assert modal["blocks"][1]["block_id"] == REVIEW_RESPONSE_BLOCK
+    response_block = modal["blocks"][1]
+    response = response_block["element"]
+    assert response_block["block_id"] == REVIEW_RESPONSE_BLOCK
     assert response["action_id"] == REVIEW_RESPONSE_ACTION
     assert response["multiline"] is True
-    assert modal["submit"]["text"] == "Submit input"
+    assert response["max_length"] < 3000
+    assert response["max_length"] == 2500
+    assert response_block["label"]["text"] == "Technical review input"
+    assert modal["title"]["text"] == "Technical review"
+    assert modal["submit"]["text"] == "Submit review"
+    assert "does not publish the article" in modal["blocks"][0]["text"]["text"]
+    assert "Validate the restart sequence" in modal["blocks"][0]["text"]["text"]
 
 
 class _MemberClient:
