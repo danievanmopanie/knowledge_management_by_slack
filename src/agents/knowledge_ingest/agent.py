@@ -18,6 +18,8 @@ from src.reporting.incidents import load_incidents_from_csv
 
 logger = logging.getLogger(__name__)
 
+CONFIRM_ALL_MAX = 5
+
 
 def _looks_like_incident_csv(path: Path) -> bool:
     if path.suffix.lower() != ".csv":
@@ -41,6 +43,8 @@ class KnowledgeIngestAgent(BaseAgent):
         text = (message or "").strip()
         lower = text.lower()
 
+        if lower == "confirm all":
+            return self._confirm_all(context)
         if lower.startswith("confirm "):
             return self._confirm(text.split(maxsplit=1)[1].strip(), context)
         if lower.startswith("cancel "):
@@ -49,7 +53,7 @@ class KnowledgeIngestAgent(BaseAgent):
         if not context.files:
             return (
                 "Upload a supported file to stage it. Nothing becomes searchable until you confirm it.\n"
-                "After staging, use `confirm <stage-id>` or `cancel <stage-id>`."
+                "After staging, use `confirm <stage-id>`, `confirm all` (up to 5), or `cancel <stage-id>`."
             )
 
         lines = ["*Upload staged — not yet searchable*"]
@@ -89,6 +93,35 @@ class KnowledgeIngestAgent(BaseAgent):
                     target_id=str(file_info.get("id") or name),
                 )
                 lines.append(f"• *{name}*: staging failed (reference `{context.request_id}`)")
+        return "\n".join(lines)
+
+    def _confirm_all(self, context: RequestContext) -> str:
+        staged = self.staging.list_staged(
+            uploader_id=context.user_id,
+            channel_id=context.channel_id,
+        )
+        if not staged:
+            return "You have no staged uploads in this channel to confirm."
+        if len(staged) > CONFIRM_ALL_MAX:
+            stage_ids = ", ".join(f"`{item['stage_id']}`" for item in staged[:CONFIRM_ALL_MAX])
+            return (
+                f"You have {len(staged)} staged uploads here. `confirm all` is capped at "
+                f"{CONFIRM_ALL_MAX} to keep Slack responsive. Confirm individual stage IDs "
+                f"(for example {stage_ids}) or use the bulk-import CLI for a larger knowledge set."
+            )
+
+        results = [self._confirm(str(item["stage_id"]), context) for item in staged]
+        confirmed = sum(
+            1
+            for item in staged
+            if (self.staging.get(str(item["stage_id"])) or {}).get("status") == "confirmed"
+        )
+        failed = len(staged) - confirmed
+        lines = [
+            f"Confirming {len(staged)} staged upload(s) in this channel: "
+            f"{confirmed} confirmed, {failed} failed."
+        ]
+        lines.extend(f"• {result}" for result in results)
         return "\n".join(lines)
 
     def _confirm(self, stage_id: str, context: RequestContext) -> str:
