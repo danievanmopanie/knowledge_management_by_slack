@@ -33,11 +33,19 @@ class EditRequestStore:
                     shared_channel_id TEXT,
                     shared_message_ts TEXT,
                     published_document_id TEXT,
+                    error_message TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(frontend_knowledge_edit_requests)")
+            }
+            if "error_message" not in columns:
+                conn.execute(
+                    "ALTER TABLE frontend_knowledge_edit_requests ADD COLUMN error_message TEXT NOT NULL DEFAULT ''"
+                )
 
     def create_drafting(
         self,
@@ -102,10 +110,21 @@ class EditRequestStore:
             conn.execute(
                 """
                 UPDATE frontend_knowledge_edit_requests
-                SET proposed_text=?, status='review', updated_at=CURRENT_TIMESTAMP
+                SET proposed_text=?, status='review', error_message='', updated_at=CURRENT_TIMESTAMP
                 WHERE id=? AND status='drafting'
                 """,
                 (proposed_text.strip(), request_id),
+            )
+
+    def mark_failed(self, request_id: int, *, error_message: str) -> None:
+        with connect(self.path) as conn:
+            conn.execute(
+                """
+                UPDATE frontend_knowledge_edit_requests
+                SET status='draft_failed', error_message=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='drafting'
+                """,
+                (error_message.strip()[:1200], request_id),
             )
 
     def mark_published(self, request_id: int, *, published_document_id: str) -> None:
