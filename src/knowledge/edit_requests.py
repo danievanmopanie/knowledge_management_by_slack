@@ -1,8 +1,9 @@
 """Durable knowledge-edit tasks for existing governed articles.
 
-Creating a task is intentionally cheap: the request is persisted immediately in
-``drafting`` state and can be rendered in Slack before any LLM work starts. The
-same task is later updated with the drafted revision and final review decision.
+Creating a task is intentionally cheap: the request is persisted immediately and
+can be rendered in Slack before any LLM work starts. The owner then explicitly
+chooses AI drafting or manual editing. The same task is later updated with the
+proposed revision and final review decision.
 """
 
 from __future__ import annotations
@@ -60,6 +61,66 @@ class EditRequestStore:
                         f"ALTER TABLE frontend_knowledge_edit_requests ADD COLUMN {column} {ddl}"
                     )
 
+    def _create(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        document_id: str,
+        document_title: str,
+        base_version_id: str,
+        edit_note: str,
+        requested_by: str,
+        status: str,
+    ) -> dict[str, Any]:
+        with connect(self.path) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO frontend_knowledge_edit_requests
+                    (source_channel_id, source_thread_ts, document_id,
+                     document_title, base_version_id, edit_note, requested_by, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    channel_id,
+                    thread_ts,
+                    document_id,
+                    document_title,
+                    base_version_id,
+                    edit_note.strip(),
+                    requested_by,
+                    status,
+                ),
+            )
+            request_id = int(cursor.lastrowid)
+        task = self.get(request_id)
+        if task is None:
+            raise RuntimeError("Knowledge edit request was not persisted")
+        return task
+
+    def create_pending(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        document_id: str,
+        document_title: str,
+        base_version_id: str,
+        edit_note: str,
+        requested_by: str,
+    ) -> dict[str, Any]:
+        """Persist a correction without starting an LLM call."""
+        return self._create(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            document_id=document_id,
+            document_title=document_title,
+            base_version_id=base_version_id,
+            edit_note=edit_note,
+            requested_by=requested_by,
+            status="awaiting_action",
+        )
+
     def create_drafting(
         self,
         *,
@@ -71,29 +132,17 @@ class EditRequestStore:
         edit_note: str,
         requested_by: str,
     ) -> dict[str, Any]:
-        with connect(self.path) as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO frontend_knowledge_edit_requests
-                    (source_channel_id, source_thread_ts, document_id,
-                     document_title, base_version_id, edit_note, requested_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    channel_id,
-                    thread_ts,
-                    document_id,
-                    document_title,
-                    base_version_id,
-                    edit_note.strip(),
-                    requested_by,
-                ),
-            )
-            request_id = int(cursor.lastrowid)
-        task = self.get(request_id)
-        if task is None:
-            raise RuntimeError("Knowledge edit request was not persisted")
-        return task
+        """Backward-compatible helper for callers that intentionally start AI drafting."""
+        return self._create(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            document_id=document_id,
+            document_title=document_title,
+            base_version_id=base_version_id,
+            edit_note=edit_note,
+            requested_by=requested_by,
+            status="drafting",
+        )
 
     def get(self, request_id: int) -> dict[str, Any] | None:
         with connect(self.path) as conn:
@@ -124,6 +173,19 @@ class EditRequestStore:
                 (channel_id, message_ts, request_id),
             )
 
+    def start_ai_draft(self, request_id: int) -> bool:
+        """Start Atlas drafting only after an explicit user action."""
+        with connect(self.path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE frontend_knowledge_edit_requests
+                SET status='drafting', error_message='', updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status IN ('awaiting_action', 'draft_failed')
+                """,
+                (request_id,),
+            )
+        return cursor.rowcount == 1
+
     def set_draft(self, request_id: int, proposed_text: str) -> None:
         with connect(self.path) as conn:
             conn.execute(
@@ -134,6 +196,22 @@ class EditRequestStore:
                 """,
                 (proposed_text.strip(), request_id),
             )
+
+    def set_manual_draft(self, request_id: int, proposed_text: str) -> bool:
+        """Persist a human-edited proposal without involving an LLM."""
+        clean = proposed_text.strip()
+        if not clean:
+            return False
+        with connect(self.path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE frontend_knowledge_edit_requests
+                SET proposed_text=?, status='review', error_message='', updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status IN ('awaiting_action', 'review', 'draft_failed')
+                """,
+                (clean, request_id),
+            )
+        return cursor.rowcount == 1
 
     def start_feedback_draft(self, request_id: int, *, review_ids: list[int]) -> bool:
         """Move a reviewable task into explicit owner-triggered feedback drafting."""
@@ -195,7 +273,7 @@ class EditRequestStore:
                 """
                 UPDATE frontend_knowledge_edit_requests
                 SET status='stale', decided_by=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND status='review'
+                WHERE id=? AND status IN ('awaiting_action', 'review', 'draft_failed')
                 """,
                 (decided_by, request_id),
             )
@@ -225,7 +303,7 @@ class EditRequestStore:
                 """
                 UPDATE frontend_knowledge_edit_requests
                 SET status='dismissed', decided_by=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND status IN ('drafting', 'feedback_drafting', 'review', 'draft_failed', 'stale')
+                WHERE id=? AND status IN ('awaiting_action', 'drafting', 'feedback_drafting', 'review', 'draft_failed', 'stale')
                 """,
                 (decided_by or None, request_id),
             )
