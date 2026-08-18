@@ -11,6 +11,8 @@ from src.knowledge.citation_memory import CitationMemory
 def test_edit_intent_is_fast_and_specific():
     assert looks_like_knowledge_edit("That knowledge article is outdated")
     assert looks_like_knowledge_edit("Update the KB article: restart Windows Audio after reinstalling the driver")
+    assert looks_like_knowledge_edit("This knowledge is incomplete. Do not invent replication steps when the exact approved procedure is not documented. The article should say that the replication procedure must be confirmed by the resolver before technicians execute it.")
+    assert looks_like_knowledge_edit("The article is incomplete and needs a confirmed procedure")
     assert not looks_like_knowledge_edit("My laptop audio is not working")
 
 
