@@ -13,6 +13,7 @@ import re
 from slack_bolt.async_app import AsyncApp
 
 from src.bot.frontend_edit_actions import build_knowledge_edit_card
+from src.bot.knowledge_edit_decisions import register as register_knowledge_edit_decisions
 from src.bot.knowledge_edit_drafting import schedule_revision_draft
 from src.bot.knowledge_governance_interactivity import get_store as get_governance_store
 from src.core.config import settings
@@ -174,6 +175,8 @@ async def offer_knowledge_edit(
 
 
 def register(app: AsyncApp) -> None:
+    register_knowledge_edit_decisions(app)
+
     @app.action(FLAG_ARTICLE_EDIT)
     async def flag_article_edit(ack, body, client):
         await ack()
