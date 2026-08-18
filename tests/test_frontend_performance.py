@@ -122,7 +122,7 @@ class MixedIncidentRAG:
         return [
             Document(
                 page_content="Unrelated docking station replacement",
-                metadata={"number": "INC-WEAK", "score": 0.49, "state": "Closed"},
+                metadata={"number": "INC-WEAK", "score": 0.655, "state": "Closed"},
             ),
             Document(
                 page_content="Laptop audio disappeared; Windows Audio service was restarted",
