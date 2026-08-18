@@ -1,8 +1,8 @@
 """Fast Slack ownership/review controls for governed knowledge articles.
 
-All routing in this module is deterministic. Selecting an owner or reviewer
-persists immediately, sends a targeted DM, and refreshes the shared governance
-section. No LLM is involved.
+All routing in this module is deterministic. Selecting an owner or reviewer,
+submitting technical input, sending DMs and refreshing shared governance state
+happen without an LLM.
 """
 
 from __future__ import annotations
@@ -24,6 +24,10 @@ REVIEWER_BLOCK = "knowledge_governance_reviewer"
 REVIEWER_ACTION = "knowledge_governance_reviewer_select"
 REVIEW_NOTE_BLOCK = "knowledge_governance_review_note"
 REVIEW_NOTE_ACTION = "knowledge_governance_review_note_input"
+PROVIDE_REVIEW = "knowledge_governance_provide_review"
+REVIEW_RESPONSE_MODAL = "knowledge_governance_review_response_modal"
+REVIEW_RESPONSE_BLOCK = "knowledge_governance_review_response"
+REVIEW_RESPONSE_ACTION = "knowledge_governance_review_response_input"
 _BLOCK_PREFIX = "knowledge_governance:"
 
 _store: ArticleGovernanceStore | None = None
@@ -59,15 +63,20 @@ def build_governance_blocks(
     document_id: str,
     owner_user_id: str | None = None,
     pending_reviews: list[dict] | None = None,
+    completed_reviews: list[dict] | None = None,
 ) -> list[dict]:
     """Compact shared-channel governance section for an article card."""
     owner_text = f"<@{owner_user_id}>" if owner_user_id else "_Unassigned_"
     pending = pending_reviews or []
+    completed = completed_reviews or []
     if pending:
-        reviewers = ", ".join(f"<@{item['reviewer_user_id']}>" for item in pending)
-        review_text = reviewers
+        review_text = ", ".join(f"<@{item['reviewer_user_id']}>" for item in pending)
     else:
         review_text = "_None_"
+    if completed:
+        completed_text = ", ".join(f"<@{item['reviewer_user_id']}>" for item in completed)
+    else:
+        completed_text = "_None_"
 
     return [
         {"type": "divider", "block_id": f"{_BLOCK_PREFIX}divider"},
@@ -76,7 +85,11 @@ def build_governance_blocks(
             "block_id": f"{_BLOCK_PREFIX}status",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Owner:* {owner_text}\n*Technical review pending:* {review_text}",
+                "text": (
+                    f"*Owner:* {owner_text}\n"
+                    f"*Technical review pending:* {review_text}\n"
+                    f"*Technical review completed:* {completed_text}"
+                ),
             },
         },
         {
@@ -138,6 +151,13 @@ def build_owner_dm_blocks(
 def build_review_dm_blocks(*, title: str, review: dict) -> list[dict]:
     note = str(review.get("review_note") or "").strip()
     details = f"\n*Requested input:* {note}" if note else ""
+    value = json.dumps(
+        {
+            "review_id": int(review["id"]),
+            "document_id": review["document_id"],
+            "version_id": review["version_id"],
+        }
+    )
     return [
         {
             "type": "section",
@@ -148,7 +168,19 @@ def build_review_dm_blocks(*, title: str, review: dict) -> list[dict]:
                     f"{details}\n\nThis review is attached to article version `{review['version_id']}`."
                 ),
             },
-        }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": PROVIDE_REVIEW,
+                    "text": {"type": "plain_text", "text": "Provide technical input"},
+                    "style": "primary",
+                    "value": value,
+                }
+            ],
+        },
     ]
 
 
@@ -185,6 +217,45 @@ def build_review_modal(*, payload: dict, title: str) -> dict:
                     "action_id": REVIEW_NOTE_ACTION,
                     "multiline": True,
                     "max_length": 1200,
+                },
+            },
+        ],
+    }
+
+
+def build_review_response_modal(*, review: dict, title: str) -> dict:
+    requested = str(review.get("review_note") or "").strip()
+    context = f"\n\n*Requested input:* {requested}" if requested else ""
+    return {
+        "type": "modal",
+        "callback_id": REVIEW_RESPONSE_MODAL,
+        "private_metadata": json.dumps(
+            {
+                "review_id": int(review["id"]),
+                "document_id": review["document_id"],
+                "version_id": review["version_id"],
+            }
+        ),
+        "title": {"type": "plain_text", "text": "Review article"},
+        "submit": {"type": "plain_text", "text": "Submit input"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Provide technical review input for *{title}*.{context}",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": REVIEW_RESPONSE_BLOCK,
+                "label": {"type": "plain_text", "text": "Your technical input"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": REVIEW_RESPONSE_ACTION,
+                    "multiline": True,
+                    "max_length": 4000,
                 },
             },
         ],
@@ -238,12 +309,14 @@ async def _refresh_shared_card(client, *, channel_id: str, message_ts: str, docu
     owner = get_store().get_owner(document_id)
     version_id = _active_version_id(document_id)
     pending = get_store().pending_reviews_for_article(document_id, version_id=version_id or None)
+    completed = get_store().completed_reviews_for_article(document_id, version_id=version_id or None)
     blocks = _strip_governance_blocks(list(message.get("blocks") or []))
     blocks.extend(
         build_governance_blocks(
             document_id=document_id,
             owner_user_id=str((owner or {}).get("owner_user_id") or "") or None,
             pending_reviews=pending,
+            completed_reviews=completed,
         )
     )
     await client.chat_update(
@@ -381,3 +454,98 @@ def register(app: AsyncApp) -> None:
             message_ts=message_ts,
             document_id=document_id,
         )
+
+    @app.action(PROVIDE_REVIEW)
+    async def provide_review(ack, body, client):
+        await ack()
+        payload = json.loads(body["actions"][0]["value"])
+        review_id = int(payload.get("review_id") or 0)
+        actor_id = str((body.get("user") or {}).get("id") or "")
+        review = get_store().get_review(review_id) if review_id else None
+        if not review or str(review.get("reviewer_user_id") or "") != actor_id:
+            if actor_id:
+                await _send_dm(
+                    client,
+                    actor_id,
+                    text="That technical review task is not assigned to you or is no longer available.",
+                    blocks=[],
+                )
+            return
+        if str(review.get("status") or "") != "requested":
+            await _send_dm(
+                client,
+                actor_id,
+                text="That technical review has already been completed.",
+                blocks=[],
+            )
+            return
+        await client.views_open(
+            trigger_id=body["trigger_id"],
+            view=build_review_response_modal(review=review, title=_title(str(review["document_id"]))),
+        )
+
+    @app.view(REVIEW_RESPONSE_MODAL)
+    async def submit_review_response(ack, body, client, view):
+        payload = json.loads(view.get("private_metadata") or "{}")
+        values = (view.get("state") or {}).get("values") or {}
+        response_note = str(
+            (((values.get(REVIEW_RESPONSE_BLOCK) or {}).get(REVIEW_RESPONSE_ACTION) or {}).get("value") or "")
+        ).strip()
+        actor_id = str((body.get("user") or {}).get("id") or "")
+        review_id = int(payload.get("review_id") or 0)
+        if not response_note:
+            await ack(
+                response_action="errors",
+                errors={REVIEW_RESPONSE_BLOCK: "Please add your technical review input."},
+            )
+            return
+        await ack()
+
+        completed = get_store().complete_review(
+            review_id,
+            reviewer_user_id=actor_id,
+            response_note=response_note,
+        )
+        if not completed:
+            await _send_dm(
+                client,
+                actor_id,
+                text="That review could not be completed because it is no longer pending or is not assigned to you.",
+                blocks=[],
+            )
+            return
+
+        document_id = str(completed["document_id"])
+        title = _title(document_id)
+        requester_id = str(completed.get("requested_by_user_id") or "")
+        await _send_dm(
+            client,
+            actor_id,
+            text=f"Thanks — your technical review input for {title} has been recorded.",
+            blocks=[],
+        )
+        if requester_id and requester_id != actor_id:
+            await _send_dm(
+                client,
+                requester_id,
+                text=f"Technical review completed for {title}.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"<@{actor_id}> completed the technical review for *{title}*.\n\n"
+                                f"*Review input*\n{completed['response_note']}"
+                            ),
+                        },
+                    }
+                ],
+            )
+
+        # The review was requested from a shared governance card. Find its current
+        # message from the task's origin by scanning only the configured knowledge
+        # channel messages is deliberately avoided; the next owner action refreshes
+        # the card, and edit-card refreshes also reconcile governance state.
+        # For review tasks initiated from an owner DM we preserve instant personal
+        # notification without introducing channel-history polling here.
