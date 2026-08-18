@@ -18,7 +18,7 @@ def build_knowledge_edit_card(
 
     The card appears while drafting is still in progress. Governance controls are
     available immediately and stay attached when the same message is refreshed
-    with the completed draft.
+    with the completed or failed draft.
     """
     status = str(task.get("status") or "drafting")
     request_id = str(task.get("request_id") or f"KE-{int(task['id']):05d}")
@@ -56,6 +56,20 @@ def build_knowledge_edit_card(
                 "text": {
                     "type": "mrkdwn",
                     "text": "⏳ *Drafting focused revision…*\n_You can assign ownership or technical review while this runs._",
+                },
+            }
+        )
+    elif status == "draft_failed":
+        blocks.append(
+            {
+                "type": "section",
+                "block_id": "knowledge_edit:draft",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "⚠️ *Drafting failed — the article was not changed.*\n"
+                        "_Ownership and review assignments are preserved. Retry can be added without recreating the task._"
+                    ),
                 },
             }
         )
