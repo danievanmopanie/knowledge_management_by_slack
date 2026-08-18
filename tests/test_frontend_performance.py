@@ -5,6 +5,7 @@ from langchain_core.documents import Document
 
 from src.agents.frontend_support.agent import FrontendSupportAgent
 from src.core.context import RequestContext
+from src.knowledge.retrieval_models import RetrievalCandidate
 from src.knowledge.support_evidence import (
     CONVERSATIONAL_LIMIT,
     PROMPT_CONTEXT_MAX_CHARS,
@@ -91,6 +92,62 @@ def test_prompt_context_is_capped_at_4500():
     rendered = package.to_prompt_context()
     assert rendered.startswith("i")
     assert len(rendered) <= PROMPT_CONTEXT_MAX_CHARS + len("\n\n[Support evidence truncated]")
+
+
+class WeakGovernedResult:
+    candidates = [
+        RetrievalCandidate(
+            evidence_id="babylon-profile",
+            content="Babylon employee profile deletion",
+            metadata={"source": "babylon"},
+            score=0.4,
+        )
+    ]
+    should_answer = True
+    confidence_score = 0.40
+
+    def to_context_string(self):
+        return "Babylon employee profile deletion"
+
+
+class WeakGovernedRetriever:
+    def search(self, query):
+        return WeakGovernedResult()
+
+
+class MixedIncidentRAG:
+    graph_store = object()
+
+    def similar_incidents(self, query, k=5):
+        return [
+            Document(
+                page_content="Unrelated docking station replacement",
+                metadata={"number": "INC-WEAK", "score": 0.49, "state": "Closed"},
+            ),
+            Document(
+                page_content="Laptop audio disappeared; Windows Audio service was restarted",
+                metadata={"number": "INC-AUDIO", "score": 0.81, "state": "Closed"},
+            ),
+        ]
+
+
+def test_frontend_drops_weak_governed_and_incident_evidence_before_prompt():
+    service = SupportEvidenceService(
+        retriever=WeakGovernedRetriever(),
+        incident_rag=MixedIncidentRAG(),
+        support_graph=EmptyGraph(),
+    )
+    context = RequestContext.from_slack(channel_id="C1", user_id="U1")
+
+    package = service.build("My laptop suddenly has no sound", context)
+
+    assert package.governed_should_answer is False
+    assert package.governed_candidates == []
+    assert package.governed_context == ""
+    assert "Babylon" not in package.to_prompt_context()
+    assert "INC-WEAK" not in package.incident_context
+    assert "INC-AUDIO" in package.incident_context
+    assert package.incident_sources == {"incident:INC-AUDIO"}
 
 
 class Chunk:

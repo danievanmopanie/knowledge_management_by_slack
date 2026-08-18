@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     retrieval_min_confidence: float = 0.30
     retrieval_strong_confidence: float = 0.55
     retrieval_max_chunks_per_document: int = 2
+    # Frontend Support is intentionally stricter than generic retrieval. Weak nearest-neighbour
+    # matches must not be presented to technicians as organisational evidence.
+    frontend_governed_min_confidence: float = 0.55
+    frontend_incident_min_relevance: float = 0.50
 
     # Paths
     vectorstore_path: Path = Path("./data/vectorstore")
