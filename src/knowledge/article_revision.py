@@ -27,6 +27,19 @@ Rules:
 - Return the complete corrected article text, not commentary about the edit.
 """
 
+REVIEW_FEEDBACK_SYSTEM_PROMPT = """You are a senior IT knowledge editor updating an
+already-proposed knowledge article revision using explicit technical reviewer feedback.
+
+Rules:
+- Treat the current proposed revision as the starting draft.
+- Apply only feedback explicitly supplied by named reviewers.
+- Preserve draft content that the feedback does not contradict or extend.
+- Do not invent technical facts, validation results, root causes, products, or steps.
+- If reviewer inputs conflict, do not choose silently. Preserve the safer existing text
+  and add a short Reviewer note identifying the conflict for human resolution.
+- Return the complete updated article text, not commentary about your editing process.
+"""
+
 
 def reconstruct_document_text(
     document_id: str,
@@ -58,4 +71,47 @@ async def revise_article(*, current_text: str, edit_note: str, llm=None) -> str:
     revised = str(revised).strip()
     if not revised:
         raise ValueError("Article revision model returned an empty draft")
+    return revised
+
+
+async def apply_review_feedback(
+    *,
+    proposed_text: str,
+    reviewer_feedback: list[dict],
+    llm=None,
+) -> str:
+    """Update a proposed draft only after the owner explicitly applies completed reviews."""
+    if not proposed_text.strip():
+        raise ValueError("Cannot apply review feedback without an existing proposed draft")
+    feedback_lines: list[str] = []
+    for review in reviewer_feedback:
+        response_note = str(review.get("response_note") or "").strip()
+        if not response_note:
+            continue
+        reviewer = str(review.get("reviewer_user_id") or "unknown")
+        requested = str(review.get("review_note") or "").strip()
+        prefix = f"Reviewer {reviewer}"
+        if requested:
+            prefix += f" (asked to review: {requested})"
+        feedback_lines.append(f"- {prefix}: {response_note}")
+    if not feedback_lines:
+        raise ValueError("No completed technical review input is available to apply")
+
+    active_llm = llm or get_llm()
+    response = await active_llm.ainvoke(
+        [
+            SystemMessage(content=REVIEW_FEEDBACK_SYSTEM_PROMPT),
+            HumanMessage(
+                content=(
+                    f"Current proposed revision:\n{proposed_text.strip()}\n\n"
+                    "Completed technical reviewer feedback:\n"
+                    + "\n".join(feedback_lines)
+                )
+            ),
+        ]
+    )
+    revised = response.content if hasattr(response, "content") else str(response)
+    revised = str(revised).strip()
+    if not revised:
+        raise ValueError("Review-feedback revision model returned an empty draft")
     return revised
