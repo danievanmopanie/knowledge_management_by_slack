@@ -236,26 +236,33 @@ def build_review_response_modal(*, review: dict, title: str) -> dict:
                 "version_id": review["version_id"],
             }
         ),
-        "title": {"type": "plain_text", "text": "Review article"},
-        "submit": {"type": "plain_text", "text": "Submit input"},
+        "title": {"type": "plain_text", "text": "Technical review"},
+        "submit": {"type": "plain_text", "text": "Submit review"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"Provide technical review input for *{title}*.{context}",
+                    "text": (
+                        f"Review *{title}* and provide the technical facts or corrections the owner should apply."
+                        f"{context}\n\nYour input is recorded as review feedback; it does not publish the article."
+                    ),
                 },
             },
             {
                 "type": "input",
                 "block_id": REVIEW_RESPONSE_BLOCK,
-                "label": {"type": "plain_text", "text": "Your technical input"},
+                "label": {"type": "plain_text", "text": "Technical review input"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": REVIEW_RESPONSE_ACTION,
                     "multiline": True,
-                    "max_length": 4000,
+                    "max_length": 2500,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Add corrections, missing steps, prerequisites, risks, or validation evidence.",
+                    },
                 },
             },
         ],
