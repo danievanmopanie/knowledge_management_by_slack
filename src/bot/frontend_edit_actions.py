@@ -2,20 +2,43 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 
 from src.bot.knowledge_governance_interactivity import build_governance_blocks
 
 APPROVE_KNOWLEDGE_EDIT = "knowledge_edit_approve_publish"
 APPLY_REVIEW_FEEDBACK = "knowledge_edit_apply_review_feedback"
+VIEW_FULL_KNOWLEDGE_DRAFT = "knowledge_edit_view_full_draft"
 DISMISS_KNOWLEDGE_EDIT = "knowledge_edit_dismiss"
 _DECISION_BLOCK = "knowledge_edit:decision"
 _MAX_NOTE_CHARS = 1200
-_MAX_PREVIEW_CHARS = 1800
+_MAX_DIFF_LINES = 12
+_MAX_DIFF_CHARS = 1800
 
 
 def _task_value(task: dict) -> str:
     return json.dumps({"request_id": int(task["id"])})
+
+
+def compact_revision_diff(current_text: str, proposed_text: str) -> str:
+    """Render only locally-computed changed lines for a fast Slack review preview."""
+    current_lines = (current_text or "").splitlines()
+    proposed_lines = (proposed_text or "").splitlines()
+    changed = [
+        line
+        for line in difflib.ndiff(current_lines, proposed_lines)
+        if line.startswith("- ") or line.startswith("+ ")
+    ]
+    if not changed:
+        return "_No textual line changes detected._"
+    visible = changed[:_MAX_DIFF_LINES]
+    text = "\n".join(visible)
+    if len(changed) > _MAX_DIFF_LINES:
+        text += f"\n… {len(changed) - _MAX_DIFF_LINES} more changed lines"
+    if len(text) > _MAX_DIFF_CHARS:
+        text = text[:_MAX_DIFF_CHARS].rstrip() + "\n…"
+    return f"```{text}```"
 
 
 def build_knowledge_edit_card(
@@ -24,13 +47,9 @@ def build_knowledge_edit_card(
     owner_user_id: str | None = None,
     pending_reviews: list[dict] | None = None,
     completed_reviews: list[dict] | None = None,
+    current_text: str = "",
 ) -> list[dict]:
-    """Render one persistent review card for a staged article revision.
-
-    The card appears while drafting is still in progress. Governance controls are
-    available immediately and stay attached when the same message is refreshed
-    with the completed, stale, dismissed or published state.
-    """
+    """Render one persistent review card for a staged article revision."""
     status = str(task.get("status") or "drafting")
     request_id = str(task.get("request_id") or f"KE-{int(task['id']):05d}")
     note = str(task.get("edit_note") or "").strip()[:_MAX_NOTE_CHARS]
@@ -143,22 +162,29 @@ def build_knowledge_edit_card(
             }
         )
     else:
-        preview = proposed[:_MAX_PREVIEW_CHARS]
-        if len(proposed) > _MAX_PREVIEW_CHARS:
-            preview = preview.rstrip() + "\n…"
         blocks.append(
             {
                 "type": "section",
                 "block_id": "knowledge_edit:draft",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Proposed revision preview*\n{preview or '_Draft unavailable._'}",
+                    "text": (
+                        "*What changed*\n"
+                        + compact_revision_diff(current_text, proposed)
+                    ),
                 },
             }
         )
         if status == "review":
             value = _task_value(task)
-            elements: list[dict] = []
+            elements: list[dict] = [
+                {
+                    "type": "button",
+                    "action_id": VIEW_FULL_KNOWLEDGE_DRAFT,
+                    "text": {"type": "plain_text", "text": "View full draft"},
+                    "value": value,
+                }
+            ]
             if unapplied_completed:
                 elements.append(
                     {
