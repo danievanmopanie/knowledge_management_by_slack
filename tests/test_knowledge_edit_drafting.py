@@ -60,7 +60,9 @@ async def test_background_draft_updates_same_shared_card(tmp_path, monkeypatch):
     assert client.updates[0]["channel"] == "C_KNOWLEDGE"
     assert client.updates[0]["ts"] == "2.0"
     rendered = str(client.updates[0]["blocks"])
-    assert "Proposed revision preview" in rendered
+    assert "What changed" in rendered
+    assert "Updated article" in rendered
+    assert "Old article" in rendered
     assert "U_OWNER" in rendered
 
 
