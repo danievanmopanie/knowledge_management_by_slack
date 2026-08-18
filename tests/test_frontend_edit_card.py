@@ -1,4 +1,8 @@
-from src.bot.frontend_edit_actions import build_knowledge_edit_card
+from src.bot.frontend_edit_actions import (
+    APPROVE_KNOWLEDGE_EDIT,
+    DISMISS_KNOWLEDGE_EDIT,
+    build_knowledge_edit_card,
+)
 from src.knowledge.edit_requests import EditRequestStore
 
 
@@ -54,7 +58,7 @@ def test_drafting_card_has_governance_controls_before_llm_finishes(tmp_path):
     assert owner_picker["placeholder"]["text"] == "Assign article owner"
 
 
-def test_same_card_switches_to_revision_preview_when_draft_is_ready(tmp_path):
+def test_same_card_switches_to_revision_preview_and_decision_controls_when_ready(tmp_path):
     store, task = _task(tmp_path)
     store.set_draft(task["id"], "# Laptop Audio\n\nRestart Windows Audio after driver reinstall.")
     ready = store.get(task["id"])
@@ -64,8 +68,45 @@ def test_same_card_switches_to_revision_preview_when_draft_is_ready(tmp_path):
     text = "\n".join(
         str(((block.get("text") or {}).get("text") or "")) for block in blocks
     )
+    action_ids = {
+        element.get("action_id")
+        for block in blocks
+        for element in block.get("elements", [])
+        if element.get("action_id")
+    }
 
     assert ready["status"] == "review"
     assert "Proposed revision preview" in text
     assert "Restart Windows Audio" in text
     assert "Drafting focused revision" not in text
+    assert APPROVE_KNOWLEDGE_EDIT in action_ids
+    assert DISMISS_KNOWLEDGE_EDIT in action_ids
+
+
+def test_stale_and_published_cards_remove_decision_controls(tmp_path):
+    store, task = _task(tmp_path)
+    store.set_draft(task["id"], "revised")
+    store.mark_stale(task["id"], decided_by="U_OWNER")
+    stale = store.get(task["id"])
+    assert stale is not None
+    stale_blocks = build_knowledge_edit_card(stale)
+    stale_text = "\n".join(
+        str(((block.get("text") or {}).get("text") or "")) for block in stale_blocks
+    )
+    stale_actions = {
+        element.get("action_id")
+        for block in stale_blocks
+        for element in block.get("elements", [])
+        if element.get("action_id")
+    }
+    assert "Stale draft" in stale_text
+    assert APPROVE_KNOWLEDGE_EDIT not in stale_actions
+
+    store.dismiss(task["id"], decided_by="U_OWNER")
+    dismissed = store.get(task["id"])
+    assert dismissed is not None
+    dismissed_blocks = build_knowledge_edit_card(dismissed)
+    dismissed_text = "\n".join(
+        str(((block.get("text") or {}).get("text") or "")) for block in dismissed_blocks
+    )
+    assert "Dismissed by <@U_OWNER>" in dismissed_text
