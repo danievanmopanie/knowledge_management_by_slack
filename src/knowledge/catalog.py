@@ -11,6 +11,10 @@ from typing import Any
 from src.core.database import connect
 
 
+class StaleKnowledgeVersionError(RuntimeError):
+    """Raised when a caller tries to revise a version that is no longer active."""
+
+
 def document_id(source_system: str, source_id: str) -> str:
     raw = f"{source_system}:{source_id}".encode("utf-8")
     return "doc_" + hashlib.sha256(raw).hexdigest()[:20]
@@ -67,6 +71,7 @@ class KnowledgeCatalog:
         text: str,
         owner_id: str | None,
         visibility: str = "internal",
+        expected_version_id: str | None = None,
     ) -> dict[str, Any]:
         doc_id = document_id(source_system, source_id)
         digest = content_hash(text)
@@ -87,6 +92,14 @@ class KnowledgeCatalog:
                 "SELECT * FROM document_versions WHERE document_id=? AND status='active'",
                 (doc_id,),
             ).fetchone()
+
+            if expected_version_id is not None:
+                active_version_id = str(active["version_id"]) if active else ""
+                if active_version_id != expected_version_id:
+                    raise StaleKnowledgeVersionError(
+                        f"Expected active version {expected_version_id}, found {active_version_id or 'none'}"
+                    )
+
             if active and active["content_hash"] == digest:
                 result = dict(active)
                 result["document_id"] = doc_id
