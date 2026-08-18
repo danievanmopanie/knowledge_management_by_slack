@@ -10,6 +10,7 @@ from src.knowledge.support_evidence import (
     CONVERSATIONAL_LIMIT,
     PROMPT_CONTEXT_MAX_CHARS,
     SupportEvidenceService,
+    _retrieval_query_text,
 )
 
 
@@ -80,6 +81,26 @@ def test_evidence_retrieval_is_parallel_single_search_top3_and_cached():
     assert incidents.ks == [CONVERSATIONAL_LIMIT]
 
 
+def test_private_coaching_retrieval_uses_latest_technician_statement_only():
+    query = """PRIVATE COACHING SESSION.
+This is a one-on-one troubleshooting space for the technician.
+Never expose private conversation content in a public channel.
+Recent private conversation:
+- technician [technical_question]: My VPN failed yesterday.
+- technician [technical_question]: My laptop suddenly has no sound. It was working earlier today. What should I check?
+Coach without judgement.
+"""
+
+    assert _retrieval_query_text(query) == (
+        "My laptop suddenly has no sound. It was working earlier today. What should I check?"
+    )
+
+
+def test_non_private_retrieval_query_is_unchanged():
+    query = "Current collaborative Slack thread:\n- U1: Teams will not launch"
+    assert _retrieval_query_text(query) == query
+
+
 def test_prompt_context_is_capped_at_4500():
     from src.knowledge.support_evidence import SupportEvidencePackage
 
@@ -122,7 +143,7 @@ class MixedIncidentRAG:
         return [
             Document(
                 page_content="Unrelated docking station replacement",
-                metadata={"number": "INC-WEAK", "score": 0.49, "state": "Closed"},
+                metadata={"number": "INC-WEAK", "score": 0.65, "state": "Closed"},
             ),
             Document(
                 page_content="Laptop audio disappeared; Windows Audio service was restarted",
