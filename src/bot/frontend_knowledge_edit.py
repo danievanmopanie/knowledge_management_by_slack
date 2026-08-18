@@ -26,7 +26,8 @@ DISMISS_ARTICLE_EDIT = "frontend_dismiss_existing_article_edit"
 _EDIT_BLOCK = "frontend_existing_article_edit"
 
 _EDIT_PATTERNS = (
-    re.compile(r"\b(?:that|this|the)\s+(?:kb|knowledge)\s*(?:base\s+)?(?:article|page|document)?\s+(?:is\s+)?(?:wrong|outdated|incorrect|stale)\b", re.I),
+    re.compile(r"\b(?:that|this|the)\s+(?:kb|knowledge)\s*(?:base\s+)?(?:article|page|document)?\s+(?:is\s+)?(?:wrong|outdated|incorrect|stale|incomplete)\b", re.I),
+    re.compile(r"\b(?:that|this|the)\s+(?:article|page|document)\s+(?:is\s+)?(?:wrong|outdated|incorrect|stale|incomplete)\b", re.I),
     re.compile(r"\b(?:update|edit|fix|revise|correct)\s+(?:that|this|the)?\s*(?:kb|knowledge)\s*(?:base\s+)?(?:article|page|document)\b", re.I),
     re.compile(r"\barticle\s+needs?\s+(?:an?\s+)?updat\w*\b", re.I),
     re.compile(r"\bflag\s+(?:that|this|the)\s+(?:article|knowledge)\b.*\breview\b", re.I),
