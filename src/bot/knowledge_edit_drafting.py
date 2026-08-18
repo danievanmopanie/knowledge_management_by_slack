@@ -11,7 +11,11 @@ import logging
 
 from src.bot.frontend_edit_actions import build_knowledge_edit_card
 from src.bot.knowledge_governance_interactivity import get_store as get_governance_store
-from src.knowledge.article_revision import reconstruct_document_text, revise_article
+from src.knowledge.article_revision import (
+    apply_review_feedback,
+    reconstruct_document_text,
+    revise_article,
+)
 from src.knowledge.edit_requests import EditRequestStore
 
 logger = logging.getLogger(__name__)
@@ -34,11 +38,11 @@ async def render_revision_task(client, task: dict) -> None:
         return
 
     governance = get_governance_store()
-    owner = governance.get_owner(str(task["document_id"]))
-    pending = governance.pending_reviews_for_article(
-        str(task["document_id"]),
-        version_id=str(task.get("base_version_id") or "") or None,
-    )
+    document_id = str(task["document_id"])
+    version_id = str(task.get("base_version_id") or "") or None
+    owner = governance.get_owner(document_id)
+    pending = governance.pending_reviews_for_article(document_id, version_id=version_id)
+    completed = governance.completed_reviews_for_article(document_id, version_id=version_id, limit=10)
     await client.chat_update(
         channel=channel_id,
         ts=message_ts,
@@ -47,6 +51,7 @@ async def render_revision_task(client, task: dict) -> None:
             task,
             owner_user_id=str((owner or {}).get("owner_user_id") or "") or None,
             pending_reviews=pending,
+            completed_reviews=completed,
         ),
     )
 
@@ -74,6 +79,42 @@ async def draft_revision_task(client, request_id: int) -> None:
         await render_revision_task(client, updated)
 
 
+async def apply_feedback_task(client, request_id: int) -> None:
+    """Apply only the completed review inputs explicitly selected by the owner action."""
+    store = get_edit_store()
+    task = store.get(request_id)
+    if task is None or task.get("status") != "feedback_drafting":
+        return
+
+    review_ids = {int(item) for item in task.get("feedback_review_ids") or []}
+    governance = get_governance_store()
+    completed = governance.completed_reviews_for_article(
+        str(task["document_id"]),
+        version_id=str(task.get("base_version_id") or "") or None,
+        limit=20,
+    )
+    feedback = [item for item in completed if int(item.get("id") or 0) in review_ids]
+
+    try:
+        revised = await apply_review_feedback(
+            proposed_text=str(task.get("proposed_text") or ""),
+            reviewer_feedback=feedback,
+        )
+        store.set_feedback_draft(request_id, revised)
+    except Exception as exc:
+        logger.exception("Knowledge edit %s review-feedback drafting failed", task.get("request_id"))
+        store.mark_failed(request_id, error_message=str(exc))
+
+    updated = store.get(request_id)
+    if updated is not None:
+        await render_revision_task(client, updated)
+
+
 def schedule_revision_draft(client, request_id: int) -> asyncio.Task:
     """Schedule expensive drafting after the Slack action has already acknowledged."""
     return asyncio.create_task(draft_revision_task(client, request_id))
+
+
+def schedule_feedback_draft(client, request_id: int) -> asyncio.Task:
+    """Schedule Atlas only after the owner explicitly chooses Apply review feedback."""
+    return asyncio.create_task(apply_feedback_task(client, request_id))
