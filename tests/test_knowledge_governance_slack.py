@@ -7,10 +7,10 @@ from src.bot.knowledge_governance_interactivity import (
     REQUEST_REVIEW,
     REVIEWER_ACTION,
     REVIEWER_BLOCK,
+    _is_channel_member,
     build_governance_blocks,
     build_owner_dm_blocks,
     build_review_modal,
-    _is_channel_member,
 )
 from src.knowledge.article_governance import ArticleGovernanceStore
 
@@ -81,7 +81,7 @@ class _MemberClient:
         }
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_channel_member_validation_follows_pagination():
     client = _MemberClient()
     assert await _is_channel_member(client, "C_KNOWLEDGE", "U_REVIEWER") is True
