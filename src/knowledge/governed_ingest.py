@@ -15,22 +15,30 @@ def commit_knowledge(
     title: str,
     source_id: str,
     owner_id: str | None,
+    source_system: str = "slack",
     visibility: str = "internal",
     allowed_user_ids: str = "",
     allowed_channel_ids: str = "",
+    expected_version_id: str | None = None,
     catalog: KnowledgeCatalog | None = None,
     vector_store: VectorStore | None = None,
 ) -> dict[str, Any]:
-    """Commit one confirmed document and replace only its previous active chunks."""
+    """Commit one confirmed document and replace only its previous active chunks.
+
+    ``expected_version_id`` provides compare-and-swap semantics for revisions: if
+    the article changed after a draft was created, the catalogue rejects the
+    publish before any active chunks are removed.
+    """
     catalog = catalog or KnowledgeCatalog()
     vector_store = vector_store or VectorStore()
     version = catalog.register_version(
-        source_system="slack",
+        source_system=source_system,
         source_id=source_id,
         title=title,
         text=text,
         owner_id=owner_id,
         visibility=visibility,
+        expected_version_id=expected_version_id,
     )
     if version["unchanged"]:
         return {**version, "chunks": len(version.get("old_chunk_ids", []))}
