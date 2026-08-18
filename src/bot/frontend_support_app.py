@@ -21,6 +21,7 @@ from src.agents.frontend_support.conversation import (
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.frontend_actions import build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service, register as register_frontend_interactivity
+from src.bot.knowledge_governance_interactivity import register as register_knowledge_governance_interactivity
 from src.bot.router import route_frontend_support
 from src.core.config import settings
 from src.core.context import RequestContext
@@ -33,6 +34,7 @@ APP_TOKEN = os.getenv("FRONTEND_SUPPORT_SLACK_APP_TOKEN", "").strip()
 
 app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 register_frontend_interactivity(app)
+register_knowledge_governance_interactivity(app)
 clarifications = ClarificationEngine()
 
 BUSY_TEXT = "⏳ Working on this — checking the thread and relevant support history…"
