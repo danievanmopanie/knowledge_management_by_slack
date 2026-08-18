@@ -7,6 +7,7 @@ import json
 from src.bot.knowledge_governance_interactivity import build_governance_blocks
 
 APPROVE_KNOWLEDGE_EDIT = "knowledge_edit_approve_publish"
+APPLY_REVIEW_FEEDBACK = "knowledge_edit_apply_review_feedback"
 DISMISS_KNOWLEDGE_EDIT = "knowledge_edit_dismiss"
 _DECISION_BLOCK = "knowledge_edit:decision"
 _MAX_NOTE_CHARS = 1200
@@ -22,6 +23,7 @@ def build_knowledge_edit_card(
     *,
     owner_user_id: str | None = None,
     pending_reviews: list[dict] | None = None,
+    completed_reviews: list[dict] | None = None,
 ) -> list[dict]:
     """Render one persistent review card for a staged article revision.
 
@@ -33,6 +35,11 @@ def build_knowledge_edit_card(
     request_id = str(task.get("request_id") or f"KE-{int(task['id']):05d}")
     note = str(task.get("edit_note") or "").strip()[:_MAX_NOTE_CHARS]
     proposed = str(task.get("proposed_text") or "").strip()
+    completed = completed_reviews or []
+    applied_ids = {int(item) for item in task.get("applied_review_ids") or []}
+    unapplied_completed = [
+        item for item in completed if int(item.get("id") or 0) not in applied_ids
+    ]
 
     blocks: list[dict] = [
         {
@@ -65,6 +72,20 @@ def build_knowledge_edit_card(
                 "text": {
                     "type": "mrkdwn",
                     "text": "⏳ *Drafting focused revision…*\n_You can assign ownership or technical review while this runs._",
+                },
+            }
+        )
+    elif status == "feedback_drafting":
+        blocks.append(
+            {
+                "type": "section",
+                "block_id": "knowledge_edit:draft",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "⏳ *Applying completed technical review feedback…*\n"
+                        "_The existing draft remains governed and nothing is published until the owner approves it._"
+                    ),
                 },
             }
         )
@@ -137,35 +158,48 @@ def build_knowledge_edit_card(
         )
         if status == "review":
             value = _task_value(task)
+            elements: list[dict] = []
+            if unapplied_completed:
+                elements.append(
+                    {
+                        "type": "button",
+                        "action_id": APPLY_REVIEW_FEEDBACK,
+                        "text": {"type": "plain_text", "text": "Apply review feedback"},
+                        "value": value,
+                    }
+                )
+            elements.extend(
+                [
+                    {
+                        "type": "button",
+                        "action_id": APPROVE_KNOWLEDGE_EDIT,
+                        "text": {"type": "plain_text", "text": "Approve & publish"},
+                        "style": "primary",
+                        "value": value,
+                    },
+                    {
+                        "type": "button",
+                        "action_id": DISMISS_KNOWLEDGE_EDIT,
+                        "text": {"type": "plain_text", "text": "Dismiss"},
+                        "style": "danger",
+                        "value": value,
+                        "confirm": {
+                            "title": {"type": "plain_text", "text": "Dismiss revision?"},
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "This closes the proposed revision without changing the governed article.",
+                            },
+                            "confirm": {"type": "plain_text", "text": "Dismiss"},
+                            "deny": {"type": "plain_text", "text": "Cancel"},
+                        },
+                    },
+                ]
+            )
             blocks.append(
                 {
                     "type": "actions",
                     "block_id": _DECISION_BLOCK,
-                    "elements": [
-                        {
-                            "type": "button",
-                            "action_id": APPROVE_KNOWLEDGE_EDIT,
-                            "text": {"type": "plain_text", "text": "Approve & publish"},
-                            "style": "primary",
-                            "value": value,
-                        },
-                        {
-                            "type": "button",
-                            "action_id": DISMISS_KNOWLEDGE_EDIT,
-                            "text": {"type": "plain_text", "text": "Dismiss"},
-                            "style": "danger",
-                            "value": value,
-                            "confirm": {
-                                "title": {"type": "plain_text", "text": "Dismiss revision?"},
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": "This closes the proposed revision without changing the governed article.",
-                                },
-                                "confirm": {"type": "plain_text", "text": "Dismiss"},
-                                "deny": {"type": "plain_text", "text": "Cancel"},
-                            },
-                        },
-                    ],
+                    "elements": elements,
                 }
             )
 
@@ -174,6 +208,7 @@ def build_knowledge_edit_card(
             document_id=str(task["document_id"]),
             owner_user_id=owner_user_id,
             pending_reviews=pending_reviews or [],
+            completed_reviews=completed,
         )
     )
     return blocks
