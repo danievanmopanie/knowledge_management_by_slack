@@ -21,6 +21,11 @@ from src.agents.frontend_support.conversation import (
 from src.agents.frontend_support.voice import VoiceTranscriptionError, transcribe_first_voice_note
 from src.bot.frontend_actions import build_resolution_capture_blocks
 from src.bot.frontend_interactivity import get_service, register as register_frontend_interactivity
+from src.bot.frontend_knowledge_edit import (
+    looks_like_knowledge_edit,
+    offer_knowledge_edit,
+    register as register_frontend_knowledge_edit,
+)
 from src.bot.knowledge_governance_interactivity import register as register_knowledge_governance_interactivity
 from src.bot.router import route_frontend_support
 from src.core.config import settings
@@ -35,6 +40,7 @@ APP_TOKEN = os.getenv("FRONTEND_SUPPORT_SLACK_APP_TOKEN", "").strip()
 app = AsyncApp(token=BOT_TOKEN or "xoxb-not-configured")
 register_frontend_interactivity(app)
 register_knowledge_governance_interactivity(app)
+register_frontend_knowledge_edit(app)
 clarifications = ClarificationEngine()
 
 BUSY_TEXT = "⏳ Working on this — checking the thread and relevant support history…"
@@ -265,6 +271,15 @@ async def _public(event: dict, say, client, context: RequestContext, text: str) 
         root_ts,
     )
 
+    if looks_like_knowledge_edit(text) and not decision.assistant_suppressed:
+        await offer_knowledge_edit(
+            client,
+            channel_id=context.channel_id,
+            thread_ts=root_ts,
+            edit_note=text,
+        )
+        return True
+
     if decision.kind == MessageKind.ASSISTANT_SUPPRESS:
         await say(
             text="Got it — I'll keep listening and remembering the thread, but I'll stay out unless you call me back in.",
@@ -413,6 +428,14 @@ async def handle_mention(event, say, client):
             user_id=event["user"],
             text=cleaned or "help with this",
         )
+        if looks_like_knowledge_edit(cleaned):
+            await offer_knowledge_edit(
+                client,
+                channel_id=context.channel_id,
+                thread_ts=root_ts,
+                edit_note=cleaned,
+            )
+            return
         query = compose_thread_query(
             service,
             channel_id=context.channel_id,
