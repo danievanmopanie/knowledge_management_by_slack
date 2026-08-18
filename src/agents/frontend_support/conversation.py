@@ -62,6 +62,7 @@ SUPPORT_TERMS = (
     "pairing",
     "paired",
     "offline",
+    "missing",
     "not working",
     "won't",
     "isn't",
