@@ -34,6 +34,8 @@ class ArticleGovernanceStore:
                     requested_by_user_id TEXT NOT NULL,
                     review_note TEXT NOT NULL DEFAULT '',
                     response_note TEXT NOT NULL DEFAULT '',
+                    shared_channel_id TEXT NOT NULL DEFAULT '',
+                    shared_message_ts TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'requested',
                     requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     completed_at TEXT
@@ -53,11 +55,16 @@ class ArticleGovernanceStore:
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(knowledge_article_reviews)")
             }
-            if "response_note" not in columns:
-                conn.execute(
-                    "ALTER TABLE knowledge_article_reviews "
-                    "ADD COLUMN response_note TEXT NOT NULL DEFAULT ''"
-                )
+            migrations = {
+                "response_note": "TEXT NOT NULL DEFAULT ''",
+                "shared_channel_id": "TEXT NOT NULL DEFAULT ''",
+                "shared_message_ts": "TEXT NOT NULL DEFAULT ''",
+            }
+            for column, ddl in migrations.items():
+                if column not in columns:
+                    conn.execute(
+                        f"ALTER TABLE knowledge_article_reviews ADD COLUMN {column} {ddl}"
+                    )
 
     def assign_owner(
         self,
@@ -100,14 +107,17 @@ class ArticleGovernanceStore:
         reviewer_user_id: str,
         requested_by_user_id: str,
         review_note: str = "",
+        shared_channel_id: str = "",
+        shared_message_ts: str = "",
     ) -> dict[str, Any]:
         with connect(self.path) as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO knowledge_article_reviews
                     (document_id, version_id, reviewer_user_id,
-                     requested_by_user_id, review_note)
-                VALUES (?, ?, ?, ?, ?)
+                     requested_by_user_id, review_note,
+                     shared_channel_id, shared_message_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document_id,
@@ -115,6 +125,8 @@ class ArticleGovernanceStore:
                     reviewer_user_id,
                     requested_by_user_id,
                     review_note.strip(),
+                    shared_channel_id,
+                    shared_message_ts,
                 ),
             )
             review_id = int(cursor.lastrowid)
