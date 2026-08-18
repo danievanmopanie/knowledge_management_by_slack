@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     # Frontend Support is intentionally stricter than generic retrieval. Weak nearest-neighbour
     # matches must not be presented to technicians as organisational evidence.
     frontend_governed_min_confidence: float = 0.55
-    frontend_incident_min_relevance: float = 0.50
+    frontend_incident_min_relevance: float = 0.70
 
     # Paths
     vectorstore_path: Path = Path("./data/vectorstore")
