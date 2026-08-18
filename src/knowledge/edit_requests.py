@@ -7,6 +7,7 @@ same task is later updated with the drafted revision and final review decision.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,8 @@ class EditRequestStore:
                     published_version_id TEXT,
                     decided_by TEXT,
                     error_message TEXT NOT NULL DEFAULT '',
+                    applied_review_ids_json TEXT NOT NULL DEFAULT '[]',
+                    feedback_review_ids_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -48,6 +51,8 @@ class EditRequestStore:
                 "error_message": "TEXT NOT NULL DEFAULT ''",
                 "published_version_id": "TEXT",
                 "decided_by": "TEXT",
+                "applied_review_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "feedback_review_ids_json": "TEXT NOT NULL DEFAULT '[]'",
             }
             for column, ddl in migrations.items():
                 if column not in columns:
@@ -100,6 +105,12 @@ class EditRequestStore:
             return None
         task = dict(row)
         task["request_id"] = f"KE-{int(task['id']):05d}"
+        task["applied_review_ids"] = [
+            int(item) for item in json.loads(task.pop("applied_review_ids_json") or "[]")
+        ]
+        task["feedback_review_ids"] = [
+            int(item) for item in json.loads(task.pop("feedback_review_ids_json") or "[]")
+        ]
         return task
 
     def attach_shared_message(self, request_id: int, *, channel_id: str, message_ts: str) -> None:
@@ -124,13 +135,56 @@ class EditRequestStore:
                 (proposed_text.strip(), request_id),
             )
 
+    def start_feedback_draft(self, request_id: int, *, review_ids: list[int]) -> bool:
+        """Move a reviewable task into explicit owner-triggered feedback drafting."""
+        review_ids = sorted({int(item) for item in review_ids if int(item) > 0})
+        if not review_ids:
+            return False
+        with connect(self.path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE frontend_knowledge_edit_requests
+                SET status='feedback_drafting', feedback_review_ids_json=?,
+                    error_message='', updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='review'
+                """,
+                (json.dumps(review_ids), request_id),
+            )
+        return cursor.rowcount == 1
+
+    def set_feedback_draft(self, request_id: int, proposed_text: str) -> None:
+        """Persist the feedback-updated draft and mark those review inputs as applied."""
+        with connect(self.path) as conn:
+            row = conn.execute(
+                """
+                SELECT applied_review_ids_json, feedback_review_ids_json
+                FROM frontend_knowledge_edit_requests
+                WHERE id=? AND status='feedback_drafting'
+                """,
+                (request_id,),
+            ).fetchone()
+            if not row:
+                return
+            applied = {int(item) for item in json.loads(row["applied_review_ids_json"] or "[]")}
+            pending = {int(item) for item in json.loads(row["feedback_review_ids_json"] or "[]")}
+            conn.execute(
+                """
+                UPDATE frontend_knowledge_edit_requests
+                SET proposed_text=?, status='review', error_message='',
+                    applied_review_ids_json=?, feedback_review_ids_json='[]',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='feedback_drafting'
+                """,
+                (proposed_text.strip(), json.dumps(sorted(applied | pending)), request_id),
+            )
+
     def mark_failed(self, request_id: int, *, error_message: str) -> None:
         with connect(self.path) as conn:
             conn.execute(
                 """
                 UPDATE frontend_knowledge_edit_requests
                 SET status='draft_failed', error_message=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND status='drafting'
+                WHERE id=? AND status IN ('drafting', 'feedback_drafting')
                 """,
                 (error_message.strip()[:1200], request_id),
             )
@@ -171,7 +225,7 @@ class EditRequestStore:
                 """
                 UPDATE frontend_knowledge_edit_requests
                 SET status='dismissed', decided_by=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND status IN ('drafting', 'review', 'draft_failed', 'stale')
+                WHERE id=? AND status IN ('drafting', 'feedback_drafting', 'review', 'draft_failed', 'stale')
                 """,
                 (decided_by or None, request_id),
             )
