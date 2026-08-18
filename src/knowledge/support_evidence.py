@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from src.core.config import settings
 from src.core.context import RequestContext
+from src.knowledge.citation_memory import CitationMemory
 from src.knowledge.incident_rag import IncidentRAG
 from src.knowledge.retrieval_models import RetrievalCandidate, RetrievalQuery
 from src.knowledge.retriever import HybridRetriever
@@ -145,6 +146,7 @@ class SupportEvidenceService:
         self.retriever = retriever or HybridRetriever()
         self.incident_rag = incident_rag or IncidentRAG()
         self.support_graph = support_graph or SupportKnowledgeGraph(self.incident_rag.graph_store)
+        self.citations = CitationMemory()
         self._cache: dict[tuple, tuple[float, SupportEvidencePackage]] = {}
         self._cache_lock = threading.RLock()
 
@@ -170,6 +172,37 @@ class SupportEvidenceService:
                 self._cache.pop(oldest_key, None)
             self._cache[key] = (time.monotonic(), package)
 
+    def _remember_governed_articles(
+        self,
+        package: SupportEvidencePackage,
+        context: RequestContext,
+    ) -> None:
+        if (
+            not package.governed_should_answer
+            or not package.governed_candidates
+            or not context.thread_ts
+            or context.channel_id != settings.channel_frontend_support
+        ):
+            return
+        articles = []
+        for candidate in package.governed_candidates:
+            metadata = candidate.metadata or {}
+            document_id = str(metadata.get("document_id") or "").strip()
+            if not document_id:
+                continue
+            articles.append(
+                {
+                    "document_id": document_id,
+                    "title": str(metadata.get("source") or document_id),
+                }
+            )
+        if articles:
+            self.citations.replace(
+                channel_id=context.channel_id,
+                thread_ts=context.thread_ts,
+                articles=articles,
+            )
+
     def build(
         self,
         query: str,
@@ -181,6 +214,7 @@ class SupportEvidenceService:
         cache_key = self._cache_key(query, context, limit)
         cached = self._get_cached(cache_key)
         if cached is not None:
+            self._remember_governed_articles(cached, context)
             return cached
 
         retrieval_text = _retrieval_text(query)
@@ -265,5 +299,6 @@ class SupportEvidenceService:
             governed_should_answer=governed_allowed,
             confidence_score=governed.confidence_score,
         )
+        self._remember_governed_articles(package, context)
         self._put_cached(cache_key, package)
         return package
