@@ -26,7 +26,8 @@ def get_edit_store() -> EditRequestStore:
     return _edit_store
 
 
-async def _render_task(client, task: dict) -> None:
+async def render_revision_task(client, task: dict) -> None:
+    """Refresh the one persistent Slack card from durable task/governance state."""
     channel_id = str(task.get("shared_channel_id") or "")
     message_ts = str(task.get("shared_message_ts") or "")
     if not channel_id or not message_ts:
@@ -70,7 +71,7 @@ async def draft_revision_task(client, request_id: int) -> None:
 
     updated = store.get(request_id)
     if updated is not None:
-        await _render_task(client, updated)
+        await render_revision_task(client, updated)
 
 
 def schedule_revision_draft(client, request_id: int) -> asyncio.Task:
