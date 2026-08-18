@@ -1,6 +1,7 @@
 import pytest
 
 from src.bot.frontend_knowledge_edit import (
+    _choice_blocks,
     has_actionable_edit_detail,
     looks_like_knowledge_edit,
     offer_knowledge_edit,
@@ -21,6 +22,20 @@ def test_vague_edit_request_does_not_trigger_drafting():
     assert has_actionable_edit_detail(
         "Update the knowledge article: after reinstalling the driver, restart Windows Audio"
     )
+
+
+def test_choice_blocks_use_unique_action_ids_for_multiple_articles():
+    blocks = _choice_blocks(
+        citations=[
+            {"document_id": "D1", "title": "Babylon employee profile deletion"},
+            {"document_id": "D2", "title": "Babylon employee profile deletion"},
+        ],
+        edit_note="This knowledge is incomplete and should require resolver confirmation.",
+        channel_id="C_FRONT",
+        thread_ts="T1",
+    )
+    action_ids = [element["action_id"] for element in blocks[1]["elements"]]
+    assert len(action_ids) == len(set(action_ids))
 
 
 def test_citation_memory_replaces_with_small_ranked_set(tmp_path):
