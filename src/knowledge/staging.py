@@ -67,6 +67,24 @@ class StagingStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def list_staged(
+        self,
+        *,
+        uploader_id: str | None,
+        channel_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return staged uploads owned by one user in one Slack channel, oldest first."""
+        with connect(self.path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM staged_uploads
+                WHERE status='staged' AND uploader_id IS ? AND channel_id=?
+                ORDER BY created_at, stage_id
+                """,
+                (uploader_id, channel_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def set_status(self, stage_id: str, status: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with connect(self.path) as conn:
