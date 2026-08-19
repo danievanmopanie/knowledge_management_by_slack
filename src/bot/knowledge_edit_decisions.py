@@ -252,7 +252,7 @@ def register(app: AsyncApp) -> None:
 
         store = get_edit_store()
         task = store.get(request_id)
-        if task is None or task.get("status") not in {"review", "draft_failed", "stale"}:
+        if task is None or task.get("status") not in {"awaiting_action", "review", "draft_failed", "stale"}:
             return
 
         actor_id = str((body.get("user") or {}).get("id") or "")

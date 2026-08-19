@@ -1,8 +1,9 @@
 """Fast deterministic entry flow for correcting an existing governed article.
 
 Frontend Support detects the intent without an LLM, resolves only articles that
-were actually surfaced in the thread, creates the durable task/card immediately,
-and schedules Atlas drafting after Slack has acknowledged the action.
+were actually surfaced in the thread, and creates the durable review task/card
+immediately. Knowledge Review Card v2 then lets the owner explicitly choose AI
+or manual drafting.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from slack_bolt.async_app import AsyncApp
 
 from src.bot.frontend_edit_actions import build_knowledge_edit_card
 from src.bot.knowledge_edit_decisions import register as register_knowledge_edit_decisions
-from src.bot.knowledge_edit_drafting import schedule_revision_draft
+from src.bot.knowledge_edit_workflow import register as register_knowledge_edit_workflow
 from src.bot.knowledge_governance_interactivity import get_store as get_governance_store
 from src.core.config import settings
 from src.knowledge.catalog import KnowledgeCatalog
@@ -177,6 +178,7 @@ async def offer_knowledge_edit(
 
 def register(app: AsyncApp) -> None:
     register_knowledge_edit_decisions(app)
+    register_knowledge_edit_workflow(app)
 
     @app.action(re.compile(rf"^{re.escape(FLAG_ARTICLE_EDIT)}:\d+$"))
     async def flag_article_edit(ack, body, client):
@@ -201,7 +203,7 @@ def register(app: AsyncApp) -> None:
             )
             return
 
-        task = get_edits().create_drafting(
+        task = get_edits().create_pending(
             channel_id=source_channel_id,
             thread_ts=source_thread_ts,
             document_id=document_id,
@@ -213,7 +215,7 @@ def register(app: AsyncApp) -> None:
 
         target_channel = settings.channel_create_knowledge or settings.channel_knowledge_uploads
         if not target_channel:
-            get_edits().mark_failed(task["id"], error_message="Create Knowledge channel is not configured")
+            get_edits().dismiss(task["id"], decided_by=actor_id)
             await client.chat_postEphemeral(
                 channel=source_channel_id,
                 user=actor_id,
@@ -235,7 +237,7 @@ def register(app: AsyncApp) -> None:
         )
         shared_ts = str((posted or {}).get("ts") or "")
         if not shared_ts:
-            get_edits().mark_failed(task["id"], error_message="Slack did not return the shared task message")
+            get_edits().dismiss(task["id"], decided_by=actor_id)
             return
 
         get_edits().attach_shared_message(
@@ -251,13 +253,11 @@ def register(app: AsyncApp) -> None:
                 channel=source_channel_id,
                 ts=source_message_ts,
                 text=(
-                    f"✅ Flagged as {task['request_id']} — the review card is in <#{target_channel}> "
-                    "and the focused revision is drafting now."
+                    f"✅ Flagged as {task['request_id']} — the review card is in <#{target_channel}>. "
+                    "Choose *Draft with AI* or *Edit manually* there; nothing is published yet."
                 ),
                 blocks=[],
             )
-
-        schedule_revision_draft(client, int(task["id"]))
 
     @app.action(DISMISS_ARTICLE_EDIT)
     async def dismiss_article_edit(ack, body, client):
