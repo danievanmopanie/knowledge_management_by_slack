@@ -2,7 +2,40 @@
 
 ## Purpose
 
-`#frontend-support` is a collaborative troubleshooting and knowledge-sharing channel. It is not a ticket queue and not every top-level message is a support case. The agent should listen to the conversation, recognise technical support context, compare current symptoms with historical incidents, help technicians collaborate, preserve who contributed what, and promote confirmed resolutions into reusable knowledge.
+`#frontend-support` (target human-facing name: `#frontline-support`) is a collaborative troubleshooting and knowledge-sharing surface. It is not a ticket queue and not every top-level message is a support case. The support coworker should listen to the conversation, recognise technical support context, compare current symptoms with historical incidents, help technicians collaborate, preserve who contributed what, and promote confirmed resolutions into reusable knowledge.
+
+The knowledge architecture in this document is deliberately **surface-neutral**. Slack remains the default frontline collaboration UI, but the Frontline Support coworker is moving into the OpenBot control plane and should be reachable through AG-UI from Slack, OpenBot native channels or future surfaces without changing its domain logic.
+
+See [Control Plane Collaboration UX](CONTROL_PLANE_COLLABORATION_UX.md) for the target Slack/OpenBot interaction model and migration sequence.
+
+## Runtime placement after the control-plane shift
+
+The three-layer knowledge model remains valid. What changes is where the agent and interaction state live.
+
+```text
+Slack / OpenBot UI
+        │
+        ▼
+CopilotKit Channels + AG-UI
+        │
+        ▼
+OpenBot Front Desk / Frontline Support coworker
+        │
+        ▼
+SupportEvidenceService + governed tools
+        │
+        ├── governed knowledge
+        ├── incident vectors
+        └── support knowledge graph
+```
+
+Consequences:
+
+- the Slack channel ID no longer owns or selects the Frontline Support agent;
+- Slack thread coordinates remain provenance/context references rather than authoritative agent state;
+- the same evidence service can be used from multiple surfaces;
+- policy, audit and human identity are enforced through the control plane before consequential writes;
+- confirmed incident and knowledge records remain in their structured domain systems of record.
 
 ## Three-layer knowledge architecture
 
@@ -12,8 +45,8 @@ Retain source material and provenance:
 
 - ServiceNow incident CSV exports
 - Formal knowledge articles and runbooks
-- Confirmed reusable Slack resolutions
-- Source incident number and source Slack thread
+- Confirmed reusable collaboration resolutions
+- Source incident number and source collaboration thread
 
 This layer is the audit trail. The LLM must never invent a source that is not present here.
 
@@ -45,7 +78,7 @@ Use typed entities and relationships for collective expertise and repeat-resolut
 | `Resolution` | Successful fix and optional root cause |
 | `Technology` | Application, service, device class or technology domain |
 | `Environment` | Location or environment where the issue occurred |
-| `SlackThread` | Collaborative Slack discussion linked to an incident |
+| `CollaborationThread` | Slack/OpenBot discussion linked to an incident |
 | `KnowledgeItem` | Human-confirmed reusable knowledge |
 
 #### Core relationships
@@ -60,8 +93,8 @@ Person -CONTRIBUTED-> Action
 Person -RESOLVED-> Incident
 Incident -SUCCESSFUL_FIX-> Resolution
 Resolution -RESOLVED_BY-> Person
-Incident -DISCUSSED_IN-> SlackThread
-SlackThread -REFERENCES-> Incident
+Incident -DISCUSSED_IN-> CollaborationThread
+CollaborationThread -REFERENCES-> Incident
 Resolution -PROMOTED_TO-> KnowledgeItem
 Incident -SIMILAR_TO-> Incident
 ```
@@ -76,19 +109,21 @@ This makes questions possible that vector search alone handles poorly, for examp
 
 ## Current implementation
 
-The branch introduces:
+The repository contains:
 
 - `src/knowledge/support_graph.py` - typed graph entities and relationships
 - `src/knowledge/support_ingest.py` - deterministic graph seeding from incident CSV fields
 - `src/knowledge/support_evidence.py` - one evidence package combining governed knowledge, incident vectors and graph context
 - `scripts/rebuild_support_graph.py` - rebuild the typed graph from historical CSV incident exports
-- `FrontendSupportAgent` now consumes the combined three-layer evidence package
+- `FrontendSupportAgent` consuming the combined three-layer evidence package
 
 The deterministic seed deliberately records only facts directly supported by CSV fields. It does not pretend that unstructured work notes have already been correctly converted into actions or root causes.
 
+During the control-plane migration, these domain components should be preserved and exposed behind a surface-neutral Frontline Support coworker rather than rewritten into CopilotKit or OpenBot-specific business logic.
+
 ## Next extraction layer
 
-A small local extraction model should process changed incidents and confirmed Slack threads into strict structured output:
+A small local extraction model should process changed incidents and confirmed collaboration threads into strict structured output:
 
 ```json
 {
@@ -116,17 +151,23 @@ A small local extraction model should process changed incidents and confirmed Sl
 
 Only extracted facts above a configured confidence threshold should be promoted into graph relationships automatically. Low-confidence facts should remain evidence for the conversational LLM, not trusted graph truth.
 
-## Slack collaboration behaviour to build next
+## Collaboration behaviour to retain
 
-1. Listen to all `#frontend-support` conversation without treating every root message as a case.
+1. Listen to `#frontline-support` conversation without treating every root message as a case.
 2. Classify messages as social/collaborative, technical problem, troubleshooting contribution, question or likely resolution.
 3. For technical context, retrieve the three-layer evidence package.
 4. Proactively speak only when there is high-value evidence, a repeat-incident pattern, a direct question, a meaningful state change or likely resolution.
 5. Track contributor identity on troubleshooting actions.
-6. When resolution language is detected, ask the requester for the incident number if it is not already known.
-7. Ask the original requester or identified resolver: `It looks like this issue is resolved. Capture this as reusable knowledge?`
-8. On confirmation, create a proposed KnowledgeItem from symptom, environment, attempted actions, root cause, successful fix, contributors and source thread.
+6. When resolution language is detected, resolve or request the incident number if it is not already known.
+7. Ask the original requester or identified resolver whether the resolution should be captured as reusable knowledge.
+8. On confirmation, create a proposed `KnowledgeItem` from symptom, environment, attempted actions, root cause, successful fix, contributors and source thread.
+9. Route the confirmed candidate into the `#create-knowledge` workshop/domain workflow without copying Slack messages into a second source of truth.
+10. Support the same coworker behaviour from an OpenBot channel when a technician or curator continues the work outside Slack.
+
+The interaction rendering for these behaviours moves to CopilotKit Channels/AG-UI; the evidence and domain rules stay here.
 
 ## Storage evolution
 
-The typed graph currently sits on the existing `GraphStore` / NetworkX persistence so the architecture can be introduced without a disruptive database migration. The domain boundary is intentionally isolated in `SupportKnowledgeGraph`, allowing the backing store to move to Neo4j later without changing the Slack agent or extraction schema.
+The typed graph currently sits on the existing `GraphStore` / NetworkX persistence so the architecture can be introduced without a disruptive database migration. The domain boundary is intentionally isolated in `SupportKnowledgeGraph`, allowing the backing store to move to Neo4j later without changing the collaboration surface or extraction schema.
+
+Slack/OpenBot conversation persistence is a separate concern from this domain graph. Do not store chat history in the support graph merely to replace control-plane thread memory. Only durable support facts and provenance links should be promoted into the domain model.
