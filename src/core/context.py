@@ -19,6 +19,9 @@ class RequestContext:
     roles: tuple[str, ...] = field(default_factory=tuple)
     groups: tuple[str, ...] = field(default_factory=tuple)
     site: str | None = None
+    # Slack profile email, when known. Used to link the Slack user to their
+    # Snipe-IT / Taskwondo accounts so external actions are stamped as the human.
+    email: str | None = None
 
     @classmethod
     def from_slack(
@@ -32,6 +35,7 @@ class RequestContext:
         roles: list[str] | tuple[str, ...] | None = None,
         groups: list[str] | tuple[str, ...] | None = None,
         site: str | None = None,
+        email: str | None = None,
     ) -> "RequestContext":
         kwargs: dict[str, Any] = {
             "channel_id": channel_id,
@@ -41,6 +45,7 @@ class RequestContext:
             "roles": tuple(roles or ()),
             "groups": tuple(groups or ()),
             "site": site,
+            "email": email,
         }
         if request_id:
             kwargs["request_id"] = request_id
