@@ -140,5 +140,25 @@ class Settings(BaseSettings):
     github_repo_owner: str = ""
     github_repo_name: str = ""
 
+    # Snipe-IT — external system of record for hardware assets. The agent acts
+    # with a service-account token but stamps the real human on every action.
+    snipeit_base_url: str = ""
+    snipeit_api_token: str = ""
+    # Optional private (e.g. Tailscale) base for deep links surfaced in Slack,
+    # e.g. "https://snipeit.tailnet". Falls back to snipeit_base_url.
+    snipeit_deep_link_base: str = ""
+
+    # Taskwondo — external system of record for work items / tasks.
+    taskwondo_base_url: str = ""
+    taskwondo_api_token: str = ""
+    # Project key (e.g. "OPS") new work items are created under when the
+    # requester does not specify one.
+    taskwondo_default_project: str = ""
+    taskwondo_deep_link_base: str = ""
+
+    # Identity mapping — resolve a Slack user to their Snipe-IT / Taskwondo
+    # accounts. When enabled, unmapped users are matched by email on first use.
+    identity_auto_link_by_email: bool = True
+
 
 settings = Settings()

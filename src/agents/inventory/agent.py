@@ -8,10 +8,13 @@ import re
 from src.agents.base import BaseAgent
 from src.core.context import RequestContext
 from src.core.errors import safe_error_message
+from src.identity.commands import try_link_me
+from src.identity.resolver import IdentityResolver
 from src.inventory.assisted_receiving import AssistedReceivingWorkflow
 from src.inventory.commands import InventoryCommandService
 from src.inventory.customers import CustomerCustodyService
 from src.inventory.domain import InventoryDomainError
+from src.inventory.external_custody import SnipeITCustodyService
 from src.inventory.overview import InventoryOverviewService
 from src.inventory.po_intake import PurchaseOrderIntakeWorkflow
 from src.inventory.stock_reconciliation import StockReconciliationWorkflow
@@ -67,7 +70,14 @@ Then use `confirm receipt RCV-...` or `cancel receipt RCV-...`.
 • `reopen exception 42 note Replacement did not arrive`
 • `exception history 42`
 
-*Serialized assets*
+*Asset custody (Snipe-IT, when configured)*
+• `checkout asset A-1042 to me`
+• `checkout asset A-1042 to jane@company.com`
+• `checkin asset A-1042`
+• `asset status A-1042`
+• `link me your.name@company.com` (one-time identity link)
+
+*Serialized assets (local store)*
 • `status asset A-1042`
 • `store asset A-1042 at SHELF-B3`
 • `issue asset A-1042 to U123 customer EMP-42 dedicated`
@@ -124,13 +134,15 @@ DEACTIVATE_CUSTOMER_RE = re.compile(r"^deactivate\s+customer\s+(?P<customer>\S+)
 class InventoryAgent(BaseAgent):
     name = "inventory"
 
-    def __init__(self):
+    def __init__(self, custody: SnipeITCustodyService | None = None, resolver: IdentityResolver | None = None):
         self.commands = InventoryCommandService()
         self.receiving = AssistedReceivingWorkflow()
         self.po_intake = PurchaseOrderIntakeWorkflow()
         self.stock_counts = StockReconciliationWorkflow(self.commands.repository)
         self.overview = InventoryOverviewService(self.commands.repository)
         self.customers = CustomerCustodyService(self.commands.repository)
+        self.identity = resolver or IdentityResolver()
+        self.custody = custody or SnipeITCustodyService(resolver=self.identity)
 
     async def handle(self, message: str, context: RequestContext) -> str:
         text = (message or "").strip()
@@ -139,6 +151,15 @@ class InventoryAgent(BaseAgent):
             return HELP
         if text.lower() in {"help", "?", "hi", "hello"}:
             return HELP
+
+        linked = try_link_me(text, context, self.identity)
+        if linked is not None:
+            return linked
+
+        # When Snipe-IT is the system of record, asset custody runs against it.
+        custody_reply = self.custody.try_handle(text, context)
+        if custody_reply is not None:
+            return custody_reply
 
         try:
             if text.lower() == "inventory summary":
